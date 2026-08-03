@@ -31,6 +31,6 @@ fi
 
 artifact="${darwin_arm64_artifacts[0]}"
 destination="$SCRIPT_DIR/$(basename "$artifact")"
-mv -f "$artifact" "$destination"
+cp "$artifact" "$destination"
 
 echo "已安装 Darwin ARM64 产物：$destination"

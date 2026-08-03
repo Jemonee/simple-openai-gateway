@@ -3,6 +3,20 @@
 
 set -euo pipefail
 
+BUILD_STARTED_AT=$SECONDS
+
+format_duration() {
+	local elapsed="$1"
+	local minutes=$((elapsed / 60))
+	local seconds=$((elapsed % 60))
+
+	if [ "$minutes" -gt 0 ]; then
+		printf '%dm%02ds' "$minutes" "$seconds"
+	else
+		printf '%ds' "$seconds"
+	fi
+}
+
 # project.json 维护稳定项目身份；PACKAGE_NAME 只控制本次构建产物名。
 PROJECT_BINARY=$(go run ./tools/projectctl field binaryName)
 VERSION=$(go run ./tools/projectctl field version)
@@ -74,8 +88,19 @@ fi
 
 echo "构建产物名称：${APP_NAME}（来源：${NAME_SOURCE}）"
 
-echo "+ 构建前端资源"
-pnpm --dir frontend build
+frontend_build_log=$(mktemp "${TMPDIR:-/tmp}/simple-openai-gateway-frontend-build.XXXXXX")
+cleanup() {
+	rm -f "$frontend_build_log"
+}
+trap cleanup EXIT
+
+frontend_started_at=$SECONDS
+if ! pnpm --dir frontend build >"$frontend_build_log" 2>&1; then
+	echo "前端构建失败，详细日志：$frontend_build_log"
+	trap - EXIT
+	exit 1
+fi
+echo "✅ 前端构建完成，耗时：$(format_duration $((SECONDS - frontend_started_at)))"
 
 # 清理之前的构建
 rm -rf build
@@ -100,5 +125,5 @@ echo "+ macOS！"
 build_target darwin amd64 "build/${APP_NAME}-darwin-x86-${VERSION}"
 build_target darwin arm64 "build/${APP_NAME}-darwin-arm64-${VERSION}"
 
-echo "✅ 构建完成！"
+echo "✅ 构建完成，耗时：$(format_duration $((SECONDS - BUILD_STARTED_AT)))"
 ls -lh build/
