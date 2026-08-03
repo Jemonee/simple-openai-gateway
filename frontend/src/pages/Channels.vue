@@ -611,7 +611,7 @@ function channelRowStyle({ row }: { row: Channel }): CSSProperties {
     '--channel-heat-stop': `${percentage.toFixed(2)}%`,
     '--channel-heat-mid': `${(percentage * 0.58).toFixed(2)}%`,
     '--channel-heat-edge': `${Math.min(100, percentage + 1.4).toFixed(2)}%`,
-    '--channel-heat-tone': `color-mix(in oklab, var(--hongfen-primary) ${(100 - temperature).toFixed(2)}%, var(--hongfen-danger) ${temperature.toFixed(2)}%)`,
+    '--channel-heat-tone': `color-mix(in oklab, var(--channel-heat-cold) ${(100 - temperature).toFixed(2)}%, var(--channel-heat-hot) ${temperature.toFixed(2)}%)`,
   }
 }
 
@@ -1025,6 +1025,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+:deep(.el-table__body-wrapper) { container-type: inline-size; }
 :deep(.el-table__body tr.channel-row--enabled > td.el-table__cell) {
   background: transparent;
   transition: background-color 180ms ease;
@@ -1032,15 +1033,15 @@ onUnmounted(() => {
 :deep(.el-table__body tr.channel-row--enabled) { background: var(--hongfen-surface); }
 :deep(.el-table__body tr.channel-row--enabled.channel-row--has-usage) {
   background-image: linear-gradient(90deg,
-    color-mix(in srgb, var(--hongfen-primary) 18%, var(--hongfen-surface)) 0%,
-    color-mix(in srgb, var(--channel-heat-tone) 24%, var(--hongfen-surface)) var(--channel-heat-mid),
-    color-mix(in srgb, var(--channel-heat-tone) 13%, var(--hongfen-surface)) var(--channel-heat-stop),
+    color-mix(in srgb, var(--channel-heat-tone) 24%, var(--hongfen-surface)) 0%,
+    color-mix(in srgb, var(--channel-heat-tone) 17%, var(--hongfen-surface)) var(--channel-heat-mid),
+    color-mix(in srgb, var(--channel-heat-tone) 8%, var(--hongfen-surface)) var(--channel-heat-stop),
     var(--hongfen-surface) var(--channel-heat-edge),
     var(--hongfen-surface) 100%);
   background-repeat: no-repeat;
-  background-size: 100% 100%;
+  background-size: 100cqw 100%;
 }
-:deep(.el-table__body tr.channel-row--enabled:hover > td.el-table__cell) { background: color-mix(in srgb, var(--channel-heat-tone, var(--hongfen-primary)) 5%, transparent); }
+:deep(.el-table__body tr.channel-row--enabled:hover > td.el-table__cell) { background: color-mix(in srgb, var(--channel-heat-tone, var(--channel-heat-cold)) 5%, transparent); }
 :deep(.el-table__body tr.channel-row--disabled > td.el-table__cell),
 :deep(.el-table__body tr.channel-row--disabled:hover > td.el-table__cell) { background: color-mix(in srgb, var(--hongfen-text-subtle) 7%, var(--hongfen-surface-muted)); }
 :deep(.el-table__body tr.channel-row--disabled > td.el-table__cell:first-child) { box-shadow: inset 3px 0 0 var(--hongfen-border-strong); }
@@ -1060,7 +1061,11 @@ onUnmounted(() => {
 .channel-state-cell.is-circuit-open small { color: var(--hongfen-danger); cursor: help; }
 :global(.channel-error-popper) { max-width: min(560px, calc(100vw - 32px)); line-height: 1.5; overflow-wrap: anywhere; }
 .reset-circuit-button { color: var(--hongfen-danger); }
-.channel-page { --channel-table-height: min(660px, max(360px, calc(100dvh - var(--hongfen-header-height) - 220px))); }
+.channel-page {
+  --channel-heat-cold: #2788dc;
+  --channel-heat-hot: var(--hongfen-danger);
+  --channel-table-height: min(660px, max(360px, calc(100dvh - var(--hongfen-header-height) - 220px)));
+}
 @media (min-width: 961px) {
   .channel-page { height: 100%; min-height: 0; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; --channel-table-height: calc(100% - 59px); }
   .channel-page > .table-panel { min-height: 0; }
