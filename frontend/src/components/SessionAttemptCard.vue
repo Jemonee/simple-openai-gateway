@@ -86,7 +86,7 @@ function costSourceType(): 'success' | 'warning' | 'info' {
       <section class="attempt-metric-group performance-metrics" aria-label="性能指标">
         <span class="metric-group-label">性能</span>
         <dl>
-          <div><dt>首 Token</dt><dd>{{ formatTiming(attempt.firstTokenMs) }}</dd></div>
+          <div><dt>首 Token</dt><dd>{{ formatTiming(attempt.firstTokenMs) }} <small>中转首响 {{ formatTiming(attempt.firstResponseMs) }}</small></dd></div>
           <div><dt>请求延迟</dt><dd>{{ formatTiming(attempt.latencyMs) }}</dd></div>
           <div><dt>请求耗时</dt><dd>{{ formatTiming(attempt.durationMs) }}</dd></div>
         </dl>
@@ -144,6 +144,7 @@ function costSourceType(): 'success' | 'warning' | 'info' {
 .cost-metrics dl { grid-template-columns: repeat(2, minmax(78px, 1fr)); }
 .attempt-metric-group dl > div { display: grid; gap: 2px; min-width: 0; }
 .attempt-metric-group dt { color: var(--hongfen-text-muted); font-size: 10px; white-space: nowrap; }
+.attempt-metric-group dd small { margin-left: 4px; color: var(--hongfen-text-subtle); font-size: 8px; font-weight: 400; }
 .attempt-metric-group dd { margin: 0; color: var(--hongfen-text); font-size: 12px; font-weight: 600; white-space: nowrap; }
 @container (max-width: 900px) {
   .attempt-metric-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }

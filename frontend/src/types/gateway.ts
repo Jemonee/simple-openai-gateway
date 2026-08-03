@@ -103,6 +103,8 @@ export interface Channel {
   supportsStreamUsage: boolean
   /** Channel-wide official-price multiplier in basis points; 10000 represents 1.00x. */
   priceMultiplierBasisPoints: number
+  /** Cumulative upstream consumption in micro-units, without currency conversion. */
+  cumulativeUpstreamCostMicros: number
   /** Number of consecutive retryable failures. */
   consecutiveFailures: number
   /** Channel circuit level: 0 closed, 1 temporary, 2 extended; 3 is retained only for legacy channel state. */
@@ -667,6 +669,8 @@ export interface RelayAttemptLog {
   usageSource: string
   /** Time from upstream response headers to the first generated output token, or zero without a sample. */
   firstTokenMs: number
+  /** Time from the upstream request start to the first non-empty SSE data event, matching common relay-site first-response timing. */
+  firstResponseMs: number
   /** Time to upstream response headers in milliseconds. */
   latencyMs: number
   /** Time from upstream response headers until its response body ended. */
@@ -748,6 +752,8 @@ export interface RelayRequestLog {
   gatewayPreparationMs: number
   /** Time from final upstream response headers to the first generated output token, or zero without a sample. */
   firstTokenMs: number
+  /** Time from the final upstream request start to the first non-empty SSE data event, or zero without a sample. */
+  firstResponseMs: number
   /** Time from gateway ingress to the final upstream response headers, or zero without a sample. */
   latencyMs: number
   /** Time from final upstream response headers until the response body ended. */
@@ -907,6 +913,17 @@ export interface SessionChannelMigration {
   occurredAt: string
 }
 
+export interface SessionChannelUsage {
+  /** Persistent channel identifier captured by the session attempts. */
+  channelId: number
+  /** Current channel name, falling back to the historical attempt name. */
+  channelName: string
+  /** Upstream attempts sent through this channel during the retained session. */
+  attemptCount: number
+  /** This channel's attempt count divided by all retained session attempts. */
+  share: number
+}
+
 export interface CodexSessionSummary {
   /** Extracted Codex session identifier, blank for an unidentified request. */
   sessionId: string
@@ -976,6 +993,10 @@ export interface CodexSessionSummary {
   averageFirstTokenMs: number
   /** Retained requests with an observed first output token. */
   firstTokenSampleCount: number
+  /** Mean time from the final upstream request start to its first non-empty SSE data event. */
+  averageFirstResponseMs: number
+  /** Retained requests with an observed relay-site first response event. */
+  firstResponseSampleCount: number
   /** Mean time to final upstream response headers in milliseconds. */
   averageLatencyMs: number
   /** Retained requests with an observed final upstream response header. */
@@ -1019,6 +1040,8 @@ export interface ActiveSessionPage {
 export interface CodexSessionDetail {
   /** Full five-day aggregate for the selected session. */
   summary: CodexSessionSummary
+  /** Every upstream channel used by retained attempts, ordered by descending call share. */
+  channels: SessionChannelUsage[]
   /** Retained request details for the selected detail page. */
   requests: RelayRequestLog[]
   /** Total retained request count for detail pagination. */

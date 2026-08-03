@@ -752,6 +752,46 @@ func (s *Store) backfillCodexCompactionTracking() error {
 	})
 }
 
+func (s *Store) correctSuccessfulCodexCompactionCounts() error {
+	const migrationName = "successful_codex_compaction_counts_v1"
+	return s.db.Transaction(func(db *gorm.DB) error {
+		var migration GatewayMigration
+		err := db.First(&migration, "name = ?", migrationName).Error
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		type sessionCompactionCount struct {
+			TokenID         uint64
+			SessionID       string
+			CompactionCount int64
+		}
+		var counts []sessionCompactionCount
+		if err := db.Model(&RelayRequestLog{}).
+			Select("token_id, codex_session_id AS session_id, COUNT(*) AS compaction_count").
+			Where("is_compaction = ? AND codex_session_id <> '' AND NOT (outcome = ? OR (outcome = '' AND status_code >= 200 AND status_code < 300))",
+				true, RelayOutcomeSuccess).
+			Group("token_id, codex_session_id").Scan(&counts).Error; err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		for _, count := range counts {
+			if err := db.Model(&RelaySessionState{}).
+				Where("token_id = ? AND session_id = ?", count.TokenID, count.SessionID).
+				UpdateColumn("compaction_count", gorm.Expr(
+					"CASE WHEN compaction_count > ? THEN compaction_count - ? ELSE 0 END",
+					count.CompactionCount, count.CompactionCount,
+				)).Error; err != nil {
+				return err
+			}
+		}
+		return db.Create(&GatewayMigration{Name: migrationName, AppliedAt: now}).Error
+	})
+}
+
 func relayRequestElapsedDuration(log RelayRequestLog) time.Duration {
 	return time.Duration(max(log.LatencyMS, 0)+max(log.DurationMS, 0)) * time.Millisecond
 }

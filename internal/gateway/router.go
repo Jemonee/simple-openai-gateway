@@ -178,6 +178,25 @@ func (r *Router) Plan(ctx context.Context, token *ClientToken, modelName string,
 			return nil, ErrNoAvailableChannel
 		}
 		r.orderCandidatesWithoutWeightedAdvance(model.RoutingStrategy, candidates)
+		if sessionKey != "" {
+			affinity, affinityErr := r.sessionAffinity(ctx, token.ID, model.ID, sessionKey)
+			if affinityErr != nil {
+				return nil, affinityErr
+			}
+			if affinity != nil && pinCandidate(candidates, affinity.ChannelModelID) {
+				return &RoutePlan{
+					Model:                    model,
+					Candidates:               candidates,
+					SessionAffinity:          true,
+					SessionAffinityMappingID: affinity.ChannelModelID,
+					InitialSelection: RouteSelection{
+						Reason:   SelectionReasonSessionAffinity,
+						Detail:   previousSessionRoute.RequestedModel + " -> " + model.Name,
+						Decision: deterministicRouteDecision(model.RoutingStrategy, "session_affinity", candidates),
+					},
+				}, nil
+			}
+		}
 		if pinChannelCandidate(candidates, previousSessionRoute.ChannelID) {
 			return &RoutePlan{
 				Model:                  model,
@@ -817,14 +836,17 @@ func (r *Router) RecordSessionAffinity(ctx context.Context, tokenID uint64, mode
 	}).Create(&record).Error
 }
 
-func (r *Router) RecordSessionAffinityAfterSuccess(ctx context.Context, tokenID uint64, modelID uint64, sessionKey string, previousChannelModelID uint64, successfulChannelModelID uint64) {
+func (r *Router) RecordSessionAffinityAfterSuccess(ctx context.Context, tokenID uint64, modelID uint64, sessionKey string, requestStartedAt time.Time, previousChannelModelID uint64, successfulChannelModelID uint64) {
 	if tokenID == 0 || modelID == 0 || sessionKey == "" || successfulChannelModelID == 0 {
 		return
 	}
 	var current SessionAffinity
 	err := r.store.db.WithContext(ctx).Where("token_id = ? AND model_id = ? AND session_hash = ? AND expires_at > ?", tokenID, modelID, hashSecret(sessionKey), time.Now()).First(&current).Error
 	if previousChannelModelID == 0 {
-		if err == nil || !errors.Is(err, gorm.ErrRecordNotFound) {
+		if err == nil && (requestStartedAt.IsZero() || !requestStartedAt.After(current.UpdatedAt)) {
+			return
+		}
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return
 		}
 	} else {

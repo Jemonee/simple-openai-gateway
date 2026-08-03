@@ -68,6 +68,7 @@ func (s *Store) migrate() error {
 		&RelayAttemptLog{},
 		&RelayStepLog{},
 		&TokenDailyStat{},
+		&ChannelModelDailyStat{},
 		&GatewayMigration{},
 		&ResponseAffinity{},
 		&SessionAffinity{},
@@ -95,6 +96,9 @@ func (s *Store) migrate() error {
 	if err := s.backfillApplicationOutcomes(); err != nil {
 		return err
 	}
+	if err := s.backfillChannelModelDailyStats(); err != nil {
+		return err
+	}
 	if err := s.backfillRequestStatisticsFromFinalAttempts(); err != nil {
 		return err
 	}
@@ -111,6 +115,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.backfillCodexCompactionTracking(); err != nil {
+		return err
+	}
+	if err := s.correctSuccessfulCodexCompactionCounts(); err != nil {
 		return err
 	}
 	if err := s.backfillModelAgentContextWindows(); err != nil {

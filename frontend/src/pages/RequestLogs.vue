@@ -252,7 +252,7 @@ onMounted(async () => {
           </template>
         </el-table-column>
         <el-table-column label="来源" width="142"><template #default="scope"><div class="source-breakdown"><el-tag :type="costSourceType(scope.row)" effect="plain" size="small">{{ costSource(scope.row) }}</el-tag><small>{{ usageSource(scope.row.usageSource) }}</small></div></template></el-table-column>
-        <el-table-column label="性能 / 尝试" min-width="220"><template #default="scope"><div class="performance-cell"><strong>首 Token {{ formatTiming(scope.row.firstTokenMs) }} · 延迟 {{ formatTiming(scope.row.latencyMs) }}</strong><small>请求耗时 {{ formatTiming(scope.row.durationMs) }} · {{ scope.row.attemptCount }} 次尝试</small></div></template></el-table-column>
+        <el-table-column label="性能 / 尝试" min-width="240"><template #default="scope"><div class="performance-cell"><strong>首 Token {{ formatTiming(scope.row.firstTokenMs) }} <small class="relay-first-response">中转首响 {{ formatTiming(scope.row.firstResponseMs) }}</small></strong><small>延迟 {{ formatTiming(scope.row.latencyMs) }} · 请求耗时 {{ formatTiming(scope.row.durationMs) }} · {{ scope.row.attemptCount }} 次尝试</small></div></template></el-table-column>
         <el-table-column label="详情" width="62" fixed="right" align="right"><template #default="scope"><el-tooltip content="查看调用记录" placement="top"><el-button class="table-action-button" text :icon="View" :loading="payloadLoadingId === scope.row.id" aria-label="查看调用记录" @click="showPayloads(scope.row)" /></el-tooltip></template></el-table-column>
       </el-table>
       <footer class="table-pagination"><el-pagination v-model:current-page="pagination.page" v-model:page-size="pagination.pageSize" :disabled="loading" :total="total" :page-sizes="[25, 50, 100]" layout="total, sizes, prev, pager, next" @change="loadLogs" /></footer>
@@ -273,6 +273,7 @@ onMounted(async () => {
 .usage-cost-cell, .performance-cell, .source-breakdown { display: grid; min-width: 0; gap: 3px; font-variant-numeric: tabular-nums; }
 .usage-cost-cell > div { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 3px 12px; }
 .usage-cost-cell > div strong, .performance-cell strong { color: var(--hongfen-text); font-size: 11px; line-height: 1.35; }
+.performance-cell .relay-first-response { margin-left: 6px; color: var(--hongfen-text-subtle); font-size: 9px; font-weight: 500; white-space: nowrap; }
 .usage-cost-cell > div span { flex: none; color: var(--hongfen-text); font: 600 12px/1.3 var(--hongfen-font-mono); }
 .usage-cost-cell small, .performance-cell small, .source-breakdown small { color: var(--hongfen-text-muted); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
 .source-breakdown { justify-items: start; }

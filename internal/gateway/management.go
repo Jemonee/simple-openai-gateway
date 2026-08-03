@@ -61,9 +61,10 @@ type ChannelModelDiscovery struct {
 
 type ChannelView struct {
 	Channel
-	APIKeyConfigured bool           `json:"apiKeyConfigured"`
-	Models           []ChannelModel `json:"models"`
-	Metrics          ChannelMetrics `json:"metrics"`
+	APIKeyConfigured       bool           `json:"apiKeyConfigured"`
+	CumulativeUpstreamCost int64          `json:"cumulativeUpstreamCostMicros"`
+	Models                 []ChannelModel `json:"models"`
+	Metrics                ChannelMetrics `json:"metrics"`
 }
 
 type GatewayModelView struct {
@@ -357,6 +358,10 @@ func (s *ManagementService) ListChannels(ctx context.Context) ([]ChannelView, er
 	if err != nil {
 		return nil, err
 	}
+	costsByChannel, err := loadChannelCumulativeCosts(ctx, s.store.db, channelIDs)
+	if err != nil {
+		return nil, err
+	}
 	views := make([]ChannelView, 0, len(channels))
 	for _, channel := range channels {
 		metrics := metricsByChannel[channel.ID]
@@ -366,10 +371,11 @@ func (s *ManagementService) ListChannels(ctx context.Context) ([]ChannelView, er
 		metrics.RecentAttemptCount = recentMetric.Attempts
 		metrics.TodayAttemptCount = todayAttempts[channel.ID]
 		views = append(views, ChannelView{
-			Channel:          channel,
-			APIKeyConfigured: channel.APIKeyCipher != "",
-			Models:           modelsByChannel[channel.ID],
-			Metrics:          metrics,
+			Channel:                channel,
+			APIKeyConfigured:       channel.APIKeyCipher != "",
+			CumulativeUpstreamCost: costsByChannel[channel.ID],
+			Models:                 modelsByChannel[channel.ID],
+			Metrics:                metrics,
 		})
 	}
 	return views, nil
@@ -573,11 +579,16 @@ func (s *ManagementService) channelView(ctx context.Context, channel Channel) (*
 	metrics.RecentSuccessCount = recentMetric.Successes
 	metrics.RecentAttemptCount = recentMetric.Attempts
 	metrics.TodayAttemptCount = todayAttempts[channel.ID]
+	costsByChannel, err := loadChannelCumulativeCosts(ctx, s.store.db, []uint64{channel.ID})
+	if err != nil {
+		return nil, err
+	}
 	return &ChannelView{
-		Channel:          channel,
-		APIKeyConfigured: channel.APIKeyCipher != "",
-		Models:           models,
-		Metrics:          metrics,
+		Channel:                channel,
+		APIKeyConfigured:       channel.APIKeyCipher != "",
+		CumulativeUpstreamCost: costsByChannel[channel.ID],
+		Models:                 models,
+		Metrics:                metrics,
 	}, nil
 }
 

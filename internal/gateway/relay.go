@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/textproto"
 	"strings"
@@ -71,6 +72,7 @@ type relayExecution struct {
 	usageSources             map[string]struct{}
 	costSources              map[string]struct{}
 	firstTokenMS             int64
+	firstResponseMS          int64
 	latencyMS                int64
 	durationMS               int64
 	responseBody             []byte
@@ -91,6 +93,7 @@ type attemptResult struct {
 	upstreamCost     int64
 	costSource       string
 	firstTokenMS     int64
+	firstResponseMS  int64
 	latencyMS        int64
 	durationMS       int64
 	streamError      error
@@ -188,6 +191,7 @@ func (s *RelayService) RelayWithTrace(ctx context.Context, writer http.ResponseW
 	maxAttempts = min(maxAttempts, len(plan.Candidates))
 	trace.Record(RelayStageRetryPolicy, RelayStepCategoryGateway, 0, retryPolicyStarted, nil, fmt.Sprintf("max_attempts=%d", maxAttempts))
 	var lastNetworkError error
+	consecutiveDNSErrors := 0
 	selection := plan.InitialSelection
 
 	for index := 0; index < maxAttempts; index++ {
@@ -202,6 +206,11 @@ func (s *RelayService) RelayWithTrace(ctx context.Context, writer http.ResponseW
 		if ctx.Err() != nil || errors.Is(attemptErr, context.Canceled) {
 			lastNetworkError = context.Canceled
 			break
+		}
+		if isDNSError(attemptErr) {
+			consecutiveDNSErrors++
+		} else {
+			consecutiveDNSErrors = 0
 		}
 		if plan.Affinity {
 			publicErr := &PublicError{Status: http.StatusServiceUnavailable, Message: "The channel associated with previous_response_id is unavailable.", Type: "api_error", Code: "response_affinity_unavailable"}
@@ -219,6 +228,10 @@ func (s *RelayService) RelayWithTrace(ctx context.Context, writer http.ResponseW
 		message = "The request was canceled."
 		status = statusClientClosedRequest
 		code = "request_canceled"
+	} else if consecutiveDNSErrors >= 3 {
+		message = "The gateway could not resolve upstream hosts."
+		status = http.StatusServiceUnavailable
+		code = "upstream_dns_unavailable"
 	} else {
 		var applicationFailure *upstreamApplicationFailure
 		if errors.As(lastNetworkError, &applicationFailure) && applicationFailureCode(applicationFailure) == "upstream_empty_response" {
@@ -261,7 +274,14 @@ func routePublicError(err error) *PublicError {
 	}
 }
 
+func isDNSError(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr)
+}
+
 func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseWriter, incomingHeaders http.Header, rawQuery string, execution *relayExecution, candidate RouteCandidate, selection RouteSelection, lastAttempt bool, affinity bool) (*attemptResult, error) {
+	execution.firstTokenMS = 0
+	execution.firstResponseMS = 0
 	execution.latencyMS = 0
 	execution.durationMS = 0
 	attempt := execution.attempts
@@ -311,7 +331,7 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	execution.trace.Record(RelayStageUpstreamWaitHeaders, RelayStepCategoryUpstream, attempt, started, requestErr, statusDetail)
 	logCtx := context.WithoutCancel(ctx)
 	if requestErr != nil {
-		execution.durationMS = elapsedMilliseconds(execution.startedAt, responseReceivedAt)
+		execution.durationMS = latency
 		result := &attemptResult{
 			requestBody: body,
 			sentTokens:  sentTokens,
@@ -327,13 +347,13 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 			result.upstreamCost = result.estimatedCost
 			result.costSource = CostSourceFallback
 		}
-		if ctx.Err() == nil && !errors.Is(requestErr, context.Canceled) {
+		if ctx.Err() == nil && !errors.Is(requestErr, context.Canceled) && !isDNSError(requestErr) {
 			result.circuitOpenUntil = s.recordChannelFailure(logCtx, candidate.Channel.ID, candidate.Mapping.ID, requestErr.Error())
 		}
 		s.recordAttempt(logCtx, execution, candidate, selection, *result, 0, false, requestErr)
 		return result, requestErr
 	}
-	execution.latencyMS = elapsedMilliseconds(execution.startedAt, responseReceivedAt)
+	execution.latencyMS = latency
 
 	response.Body = s.withIdleTimeout(response.Body)
 	if execution.payload.Stream && isEventStream(response.Header) && response.StatusCode >= 200 && response.StatusCode < 300 {
@@ -346,13 +366,14 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	_ = response.Body.Close()
 	execution.trace.Record(RelayStageResponseBodyRead, RelayStepCategoryUpstream, attempt, responseReadStarted, readErr,
 		fmt.Sprintf("status=%d bytes=%d", response.StatusCode, len(responseBody)))
-	execution.durationMS = elapsedMilliseconds(execution.startedAt, responseFinishedAt)
+	execution.durationMS = elapsedMilliseconds(started, responseFinishedAt)
 	responseAnalysisStarted := time.Now()
 	usage, hasUsage := ParseUsage(responseBody)
-	channelFailure, channelFailureDetail := upstreamChannelFailure(response.StatusCode, responseBody)
+	retryableStatus := shouldRetryStatus(response.StatusCode)
+	channelUnavailable, channelFailureDetail := upstreamChannelFailure(response.StatusCode, responseBody)
 	execution.trace.Record(RelayStageResponseAnalysis, RelayStepCategoryGateway, attempt, responseAnalysisStarted, nil,
-		fmt.Sprintf("usage=%t channel_failure=%t", hasUsage, channelFailure))
-	if shouldRetryStatus(response.StatusCode) || channelFailure {
+		fmt.Sprintf("usage=%t channel_failure=%t channel_unavailable=%t", hasUsage, retryableStatus || channelUnavailable, channelUnavailable))
+	if retryableStatus || channelUnavailable {
 		result := &attemptResult{
 			response: response, body: responseBody, requestBody: body, usage: usage, sentTokens: sentTokens,
 			costSource: CostSourceFailedZero, latencyMS: latency, durationMS: elapsedMilliseconds(started, responseFinishedAt),
@@ -363,7 +384,7 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 		if attemptErr == nil {
 			attemptErr = fmt.Errorf("upstream returned HTTP %d", response.StatusCode)
 		}
-		if channelFailure {
+		if channelUnavailable {
 			failureMessage = channelFailureDetail
 			result.retryDetail = truncateRunes(channelFailureDetail, 512)
 			attemptErr = errors.New(channelFailureDetail)
@@ -372,7 +393,7 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 			result.retryReason = SelectionReasonResponseError
 			result.retryDetail = "response_body_read"
 		}
-		if channelFailure {
+		if channelUnavailable {
 			result.circuitOpenUntil = s.recordChannelUnavailable(logCtx, candidate.Channel.ID, candidate.Mapping.ID, failureMessage)
 		} else {
 			result.circuitOpenUntil = s.recordChannelFailure(logCtx, candidate.Channel.ID, candidate.Mapping.ID, failureMessage)
@@ -398,7 +419,7 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 			retryReason: SelectionReasonUpstreamApplicationError, retryDetail: truncateRunes(appErr.Message, 512),
 		}
 		if appErr.penalizesChannel() {
-			result.circuitOpenUntil = s.recordChannelFailure(logCtx, candidate.Channel.ID, candidate.Mapping.ID, appErr.Error())
+			result.circuitOpenUntil = s.recordApplicationChannelFailure(logCtx, candidate, appErr)
 		} else {
 			s.recordChannelResponsive(logCtx, candidate.Channel.ID)
 		}
@@ -499,6 +520,7 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 		event, readErr := readSSEEvent(reader)
 		if len(event) > 0 {
 			receivedEvent = true
+			recordFirstResponse(event, &result, execution, started)
 			capture.Write(event)
 			consumeSSEEvent(event, s.estimator, &usage, &upstreamCost, &outputEstimate, &responseID)
 			hasOutput := sseEventHasOutputToken(event)
@@ -514,7 +536,7 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 				if hasApplicationError && !hasOutput && appErr.shouldRetry() {
 					finishedAt := time.Now()
 					_ = response.Body.Close()
-					execution.durationMS = elapsedMilliseconds(execution.startedAt, finishedAt)
+					execution.durationMS = elapsedMilliseconds(started, finishedAt)
 					result.body, result.bodyTruncated = capture.Snapshot()
 					result.usage = usage
 					result.durationMS = elapsedMilliseconds(started, finishedAt)
@@ -522,7 +544,7 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 					result.retryReason = SelectionReasonUpstreamApplicationError
 					result.retryDetail = truncateRunes(appErr.Message, 512)
 					logCtx := context.WithoutCancel(ctx)
-					result.circuitOpenUntil = s.recordChannelFailure(logCtx, candidate.Channel.ID, candidate.Mapping.ID, appErr.Error())
+					result.circuitOpenUntil = s.recordApplicationChannelFailure(logCtx, candidate, appErr)
 					recordStreamStage(appErr, receivedEvent, terminalSuccess)
 					s.recordAttempt(logCtx, execution, candidate, selection, result, response.StatusCode, false, appErr)
 					return &result, appErr
@@ -568,7 +590,7 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 
 	_ = response.Body.Close()
 	finishedAt := time.Now()
-	execution.durationMS = elapsedMilliseconds(execution.startedAt, finishedAt)
+	execution.durationMS = elapsedMilliseconds(started, finishedAt)
 	result.durationMS = elapsedMilliseconds(started, finishedAt)
 	result.body, result.bodyTruncated = capture.Snapshot()
 	if !terminalSuccess && streamErr == nil && receivedEvent {
@@ -670,6 +692,8 @@ func (s *RelayService) finishStream(ctx context.Context, execution *relayExecuti
 		s.recordChannelSuccess(logCtx, candidate.Channel.ID, result.latencyMS)
 	} else if errors.As(streamErr, &appErr) && !appErr.penalizesChannel() {
 		s.recordChannelResponsive(logCtx, candidate.Channel.ID)
+	} else if errors.As(streamErr, &appErr) {
+		s.recordApplicationChannelFailure(logCtx, candidate, appErr)
 	} else {
 		s.recordChannelFailure(logCtx, candidate.Channel.ID, candidate.Mapping.ID, streamErr.Error())
 	}
@@ -707,7 +731,7 @@ func (s *RelayService) recordSessionAffinityAfterSuccess(ctx context.Context, ex
 		s.router.RecordSessionAffinity(ctx, execution.token.ID, execution.modelID, execution.payload.SessionKey, successfulChannelModelID)
 		return
 	}
-	s.router.RecordSessionAffinityAfterSuccess(ctx, execution.token.ID, execution.modelID, execution.payload.SessionKey, execution.sessionAffinityMappingID, successfulChannelModelID)
+	s.router.RecordSessionAffinityAfterSuccess(ctx, execution.token.ID, execution.modelID, execution.payload.SessionKey, execution.startedAt, execution.sessionAffinityMappingID, successfulChannelModelID)
 }
 
 func elapsedMilliseconds(started time.Time, finished time.Time) int64 {
@@ -715,8 +739,8 @@ func elapsedMilliseconds(started time.Time, finished time.Time) int64 {
 	return max(elapsed, int64(1))
 }
 
-func durationAfterLatency(totalMS int64, latencyMS int64) int64 {
-	return max(totalMS-latencyMS, int64(0))
+func upstreamAttemptDuration(durationMS int64) int64 {
+	return max(durationMS, int64(0))
 }
 
 func firstTokenAfterLatency(firstTokenMS int64, latencyMS int64) int64 {
@@ -726,15 +750,22 @@ func firstTokenAfterLatency(firstTokenMS int64, latencyMS int64) int64 {
 	return max(firstTokenMS-latencyMS, int64(1))
 }
 
+func recordFirstResponse(event []byte, result *attemptResult, execution *relayExecution, attemptStarted time.Time) {
+	if result.firstResponseMS > 0 || !sseEventHasData(event) {
+		return
+	}
+	now := time.Now()
+	result.firstResponseMS = elapsedMilliseconds(attemptStarted, now)
+	execution.firstResponseMS = result.firstResponseMS
+}
+
 func recordFirstToken(event []byte, result *attemptResult, execution *relayExecution, attemptStarted time.Time) {
 	if result.firstTokenMS > 0 || !sseEventHasOutputToken(event) {
 		return
 	}
 	now := time.Now()
 	result.firstTokenMS = elapsedMilliseconds(attemptStarted, now)
-	if execution.firstTokenMS == 0 {
-		execution.firstTokenMS = elapsedMilliseconds(execution.startedAt, now)
-	}
+	execution.firstTokenMS = result.firstTokenMS
 }
 
 func endpointPath(endpoint string) string {
@@ -745,38 +776,31 @@ func endpointPath(endpoint string) string {
 }
 
 func shouldRetryStatus(status int) bool {
-	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
+	return status >= 300 && status < 400 ||
+		status == http.StatusNotFound ||
+		status == http.StatusRequestTimeout ||
+		status == http.StatusTooManyRequests ||
+		status >= 500
 }
 
 func upstreamChannelFailure(status int, body []byte) (bool, string) {
 	category := ""
+	appErr, hasApplicationError := upstreamApplicationError(body)
 	switch status {
 	case http.StatusUnauthorized:
 		category = "upstream authentication failed"
 	case http.StatusPaymentRequired:
 		category = "upstream account balance unavailable"
 	case http.StatusBadRequest, http.StatusForbidden:
-		normalized := strings.ToLower(string(body))
-		markers := []string{
-			"预扣费额度失败", "余额不足", "余额额度", "需要预扣费额度", "账户余额",
-			"insufficient_quota", "insufficient quota", "insufficient balance", "insufficient credit",
-			"credit balance", "credits exhausted", "out of credits", "billing hard limit",
-			"billing_hard_limit", "payment required", "quota exceeded", "quota_exceeded",
-			"invalid api key", "invalid_api_key", "api key is invalid", "api key disabled",
-			"authentication failed", "account disabled", "key disabled", "账号已停用",
-		}
-		for _, marker := range markers {
-			if strings.Contains(normalized, marker) {
-				category = "upstream account or credential unavailable"
-				break
-			}
+		if (hasApplicationError && appErr.opensCircuitImmediately()) || hasChannelUnavailableMarker(string(body)) {
+			category = "upstream account or credential unavailable"
 		}
 	}
 	if category == "" {
 		return false, ""
 	}
 	message := ""
-	if appErr, failed := upstreamApplicationError(body); failed {
+	if hasApplicationError {
 		message = strings.TrimSpace(appErr.Message)
 	}
 	if message == "" {
@@ -835,10 +859,11 @@ func isEventStream(header http.Header) bool {
 }
 
 type upstreamApplicationFailure struct {
-	Message         string
-	Code            string
-	nonRetryable    bool
-	preserveChannel bool
+	Message            string
+	Code               string
+	nonRetryable       bool
+	preserveChannel    bool
+	channelUnavailable bool
 }
 
 func (e *upstreamApplicationFailure) Error() string {
@@ -856,6 +881,10 @@ func (e *upstreamApplicationFailure) penalizesChannel() bool {
 	return e != nil && !e.preserveChannel
 }
 
+func (e *upstreamApplicationFailure) opensCircuitImmediately() bool {
+	return e != nil && e.channelUnavailable
+}
+
 func applicationFailureCode(failure *upstreamApplicationFailure) string {
 	if failure != nil && strings.TrimSpace(failure.Code) != "" {
 		return truncateRunes(strings.TrimSpace(failure.Code), 80)
@@ -866,11 +895,44 @@ func applicationFailureCode(failure *upstreamApplicationFailure) string {
 func newApplicationFailure(message string, code string) *upstreamApplicationFailure {
 	failure := &upstreamApplicationFailure{Message: truncateRunes(strings.TrimSpace(message), 2000), Code: truncateRunes(strings.TrimSpace(code), 80)}
 	switch strings.ToLower(failure.Code) {
-	case "bad_request", "content_filter", "content_policy_violation", "context_length_exceeded", "invalid_request", "invalid_request_error", "max_output_tokens", "response_cancelled", "unsupported_value":
+	case "bad_request", "content_filter", "content_policy_violation", "context_length_exceeded", "invalid_request", "invalid_request_error", "max_output_tokens", "model_not_allowed", "response_cancelled", "unsupported_value":
 		failure.nonRetryable = true
 		failure.preserveChannel = true
 	}
+	failure.channelUnavailable = channelUnavailableErrorCode(failure.Code) || hasChannelUnavailableMarker(failure.Message)
+	if failure.channelUnavailable {
+		failure.nonRetryable = false
+		failure.preserveChannel = false
+	}
 	return failure
+}
+
+func channelUnavailableErrorCode(code string) bool {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "account_disabled", "authentication_error", "billing_hard_limit", "e44003", "insufficient_quota", "insufficient_user_quota", "invalid_api_key", "key_disabled", "payment_required", "quota_exceeded", "unauthorized":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasChannelUnavailableMarker(value string) bool {
+	normalized := strings.ToLower(value)
+	markers := []string{
+		"预扣费额度失败", "余额不足", "余额额度", "需要预扣费额度", "账户余额",
+		"insufficient_quota", "insufficient_user_quota", "insufficient quota", "insufficient balance", "insufficient credit",
+		"credit balance", "credits exhausted", "out of credits", "billing hard limit",
+		"billing_hard_limit", "payment required", "quota exceeded", "quota_exceeded",
+		"usage limit", "e44003", "switch groups/plans",
+		"invalid api key", "invalid_api_key", "api key is invalid", "api key disabled",
+		"authentication failed", "account disabled", "key disabled", "账号已停用",
+	}
+	for _, marker := range markers {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func incompleteApplicationFailure(reason string) *upstreamApplicationFailure {
@@ -1302,6 +1364,20 @@ func sseEventHasOutputToken(event []byte) bool {
 	return false
 }
 
+func sseEventHasData(event []byte) bool {
+	for _, line := range bytes.Split(event, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(data) > 0 && !bytes.Equal(data, []byte("[DONE]")) {
+			return true
+		}
+	}
+	return false
+}
+
 func sseEventHasUsableResponseOutput(event []byte) bool {
 	for _, line := range bytes.Split(event, []byte("\n")) {
 		line = bytes.TrimSpace(line)
@@ -1559,8 +1635,9 @@ func (s *RelayService) recordAttempt(_ context.Context, execution *relayExecutio
 		CostSource:            result.costSource,
 		UsageSource:           result.usage.Source,
 		FirstTokenMS:          firstTokenAfterLatency(result.firstTokenMS, result.latencyMS),
+		FirstResponseMS:       result.firstResponseMS,
 		LatencyMS:             result.latencyMS,
-		DurationMS:            durationAfterLatency(result.durationMS, result.latencyMS),
+		DurationMS:            upstreamAttemptDuration(result.durationMS),
 		Success:               success,
 		ErrorMessage:          message,
 		CreatedAt:             time.Now().UTC(),
@@ -1632,7 +1709,6 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 		durationMS = elapsedMilliseconds(execution.startedAt, now)
 	}
 	firstTokenMS := firstTokenAfterLatency(execution.firstTokenMS, execution.latencyMS)
-	durationMS = durationAfterLatency(durationMS, execution.latencyMS)
 	responseBody, responseBodyTruncated := retainLoggedPayload(execution.payloadLogDetail, execution.responseBody, execution.responseBodyTruncated)
 	sessionName, renamedSession := agentRequestSessionTitle(execution.endpoint, execution.payload.ClientKind, execution.rawBody)
 	loggedSessionID, loggedSessionSource := execution.payload.LogSessionKey, execution.payload.LogSessionSource
@@ -1680,6 +1756,7 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 		AttemptCount:          execution.attempts,
 		GatewayPreparationMS:  execution.gatewayPreparationMS,
 		FirstTokenMS:          firstTokenMS,
+		FirstResponseMS:       execution.firstResponseMS,
 		LatencyMS:             execution.latencyMS,
 		DurationMS:            durationMS,
 		Stream:                execution.payload.Stream,
@@ -1735,7 +1812,7 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 	persistStarted := time.Now()
 	persistErr := s.store.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		var previousLog RelayRequestLog
-		if err := db.Select("is_compaction").Where("id = ?", log.ID).First(&previousLog).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		if err := db.Select("is_compaction, outcome, status_code").Where("id = ?", log.ID).First(&previousLog).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 		if err := db.Model(&ClientToken{}).Where("id = ?", execution.token.ID).Update("last_used_at", now).Error; err != nil {
@@ -1790,6 +1867,9 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 			if err := db.CreateInBatches(execution.attemptLogs, len(execution.attemptLogs)).Error; err != nil {
 				return err
 			}
+			if err := upsertChannelModelDailyStats(db, execution.attemptLogs, now); err != nil {
+				return err
+			}
 		}
 		if len(steps) > 0 {
 			if err := db.CreateInBatches(steps, len(steps)).Error; err != nil {
@@ -1807,7 +1887,9 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 				log.SessionName = title
 			}
 		}
-		if log.IsCompaction && !previousLog.IsCompaction && log.CodexSessionID != "" {
+		previousSuccessfulCompaction := previousLog.IsCompaction &&
+			(previousLog.Outcome == RelayOutcomeSuccess || (previousLog.Outcome == "" && previousLog.StatusCode >= http.StatusOK && previousLog.StatusCode < http.StatusMultipleChoices))
+		if outcome == RelayOutcomeSuccess && log.IsCompaction && !previousSuccessfulCompaction && log.CodexSessionID != "" {
 			if err := incrementSessionCompactionCount(db, log.TokenID, log.CodexSessionID, now); err != nil {
 				return err
 			}
@@ -1860,6 +1942,13 @@ func relayRequestOutcome(status int, errorCode string) string {
 		return RelayOutcomeSuccess
 	}
 	return RelayOutcomeFailed
+}
+
+func (s *RelayService) recordApplicationChannelFailure(ctx context.Context, candidate RouteCandidate, failure *upstreamApplicationFailure) *time.Time {
+	if failure.opensCircuitImmediately() {
+		return s.recordChannelUnavailable(ctx, candidate.Channel.ID, candidate.Mapping.ID, failure.Error())
+	}
+	return s.recordChannelFailure(ctx, candidate.Channel.ID, candidate.Mapping.ID, failure.Error())
 }
 
 func (s *RelayService) recordChannelFailure(ctx context.Context, channelID uint64, channelModelID uint64, message string) *time.Time {

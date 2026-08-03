@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -66,49 +67,58 @@ type SessionChannelMigration struct {
 	OccurredAt      time.Time `json:"occurredAt"`
 }
 
+type SessionChannelUsage struct {
+	ChannelID    uint64  `json:"channelId"`
+	ChannelName  string  `json:"channelName"`
+	AttemptCount int64   `json:"attemptCount"`
+	Share        float64 `json:"share"`
+}
+
 type SessionLogSummary struct {
-	GroupID               string              `gorm:"column:group_id" json:"-"`
-	SessionID             string              `json:"sessionId"`
-	SessionName           string              `json:"sessionName"`
-	SessionSource         string              `json:"sessionSource"`
-	ClientKind            string              `json:"clientKind"`
-	ThreadSource          string              `json:"threadSource"`
-	Identified            bool                `json:"identified"`
-	FallbackRequestID     string              `json:"fallbackRequestId"`
-	TokenID               uint64              `json:"tokenId"`
-	TokenName             string              `json:"tokenName"`
-	TokenKeyPrefix        string              `json:"tokenKeyPrefix"`
-	LatestModel           string              `json:"latestModel"`
-	LatestEndpoint        string              `json:"latestEndpoint"`
-	PrimaryModel          string              `json:"primaryModel"`
-	ContextWindowTokens   int64               `json:"contextWindowTokens"`
-	ContextWindowSource   string              `json:"contextWindowSource"`
-	ContextWindowSamples  int64               `json:"contextWindowSampleCount"`
-	RequestCount          int64               `json:"requestCount"`
-	CompactionCount       int64               `json:"compactionCount"`
-	SuccessCount          int64               `json:"successCount"`
-	CanceledCount         int64               `json:"canceledCount"`
-	ProcessingCount       int64               `json:"processingCount"`
-	SuccessRate           float64             `json:"successRate"`
-	AttemptCount          int64               `json:"attemptCount"`
-	InputTokens           int64               `json:"inputTokens"`
-	NormalInputTokens     int64               `json:"normalInputTokens"`
-	OutputTokens          int64               `json:"outputTokens"`
-	CachedTokens          int64               `json:"cachedTokens"`
-	CacheWriteTokens      int64               `json:"cacheWriteTokens"`
-	SentTokens            int64               `json:"sentTokens"`
-	CacheHitRate          float64             `json:"cacheHitRate"`
-	EstimatedCost         int64               `json:"estimatedCostMicros"`
-	UpstreamCost          int64               `json:"upstreamCostMicros"`
-	AverageFirstTokenMS   float64             `json:"averageFirstTokenMs"`
-	FirstTokenSampleCount int64               `json:"firstTokenSampleCount"`
-	AverageLatencyMS      float64             `json:"averageLatencyMs"`
-	LatencySampleCount    int64               `json:"latencySampleCount"`
-	AverageDurationMS     float64             `json:"averageDurationMs"`
-	DurationSampleCount   int64               `json:"durationSampleCount"`
-	FirstSeenAt           time.Time           `json:"firstSeenAt"`
-	LastSeenAt            time.Time           `json:"lastSeenAt"`
-	CurrentChannel        *SessionChannelView `gorm:"-" json:"currentChannel"`
+	GroupID                  string              `gorm:"column:group_id" json:"-"`
+	SessionID                string              `json:"sessionId"`
+	SessionName              string              `json:"sessionName"`
+	SessionSource            string              `json:"sessionSource"`
+	ClientKind               string              `json:"clientKind"`
+	ThreadSource             string              `json:"threadSource"`
+	Identified               bool                `json:"identified"`
+	FallbackRequestID        string              `json:"fallbackRequestId"`
+	TokenID                  uint64              `json:"tokenId"`
+	TokenName                string              `json:"tokenName"`
+	TokenKeyPrefix           string              `json:"tokenKeyPrefix"`
+	LatestModel              string              `json:"latestModel"`
+	LatestEndpoint           string              `json:"latestEndpoint"`
+	PrimaryModel             string              `json:"primaryModel"`
+	ContextWindowTokens      int64               `json:"contextWindowTokens"`
+	ContextWindowSource      string              `json:"contextWindowSource"`
+	ContextWindowSamples     int64               `json:"contextWindowSampleCount"`
+	RequestCount             int64               `json:"requestCount"`
+	CompactionCount          int64               `json:"compactionCount"`
+	SuccessCount             int64               `json:"successCount"`
+	CanceledCount            int64               `json:"canceledCount"`
+	ProcessingCount          int64               `json:"processingCount"`
+	SuccessRate              float64             `json:"successRate"`
+	AttemptCount             int64               `json:"attemptCount"`
+	InputTokens              int64               `json:"inputTokens"`
+	NormalInputTokens        int64               `json:"normalInputTokens"`
+	OutputTokens             int64               `json:"outputTokens"`
+	CachedTokens             int64               `json:"cachedTokens"`
+	CacheWriteTokens         int64               `json:"cacheWriteTokens"`
+	SentTokens               int64               `json:"sentTokens"`
+	CacheHitRate             float64             `json:"cacheHitRate"`
+	EstimatedCost            int64               `json:"estimatedCostMicros"`
+	UpstreamCost             int64               `json:"upstreamCostMicros"`
+	AverageFirstTokenMS      float64             `json:"averageFirstTokenMs"`
+	FirstTokenSampleCount    int64               `json:"firstTokenSampleCount"`
+	AverageFirstResponseMS   float64             `json:"averageFirstResponseMs"`
+	FirstResponseSampleCount int64               `json:"firstResponseSampleCount"`
+	AverageLatencyMS         float64             `json:"averageLatencyMs"`
+	LatencySampleCount       int64               `json:"latencySampleCount"`
+	AverageDurationMS        float64             `json:"averageDurationMs"`
+	DurationSampleCount      int64               `json:"durationSampleCount"`
+	FirstSeenAt              time.Time           `json:"firstSeenAt"`
+	LastSeenAt               time.Time           `json:"lastSeenAt"`
+	CurrentChannel           *SessionChannelView `gorm:"-" json:"currentChannel"`
 }
 
 type SessionLogPage struct {
@@ -120,11 +130,12 @@ type SessionLogPage struct {
 }
 
 type SessionLogDetail struct {
-	Summary      SessionLogSummary  `json:"summary"`
-	Requests     []RelayRequestView `json:"requests"`
-	RequestTotal int64              `json:"requestTotal"`
-	Page         int                `json:"page"`
-	PageSize     int                `json:"pageSize"`
+	Summary      SessionLogSummary     `json:"summary"`
+	Channels     []SessionChannelUsage `json:"channels"`
+	Requests     []RelayRequestView    `json:"requests"`
+	RequestTotal int64                 `json:"requestTotal"`
+	Page         int                   `json:"page"`
+	PageSize     int                   `json:"pageSize"`
 }
 
 func normalizeSessionPage(page *int, pageSize *int) {
@@ -167,16 +178,18 @@ func (s *ManagementService) SessionLogs(ctx context.Context, query SessionLogQue
 		"COALESCE(SUM(sent_tokens), 0) AS sent_tokens, " +
 		"COALESCE(SUM(estimated_cost), 0) AS estimated_cost, COALESCE(SUM(upstream_cost), 0) AS upstream_cost, " +
 		"COALESCE(SUM(first_token_ms), 0) AS total_first_token_ms, SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_sample_count, " +
+		"COALESCE(SUM(first_response_ms), 0) AS total_first_response_ms, SUM(CASE WHEN first_response_ms > 0 THEN 1 ELSE 0 END) AS first_response_sample_count, " +
 		"COALESCE(SUM(latency_ms), 0) AS total_latency_ms, SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END) AS latency_sample_count, " +
 		"COALESCE(SUM(duration_ms), 0) AS total_duration_ms, COUNT(*) AS duration_sample_count, " +
 		"MIN(unixepoch(created_at)) AS first_seen_unix, MAX(unixepoch(created_at)) AS last_seen_unix"
 	type aggregateRow struct {
 		SessionLogSummary
-		TotalFirstTokenMS int64
-		TotalLatencyMS    int64
-		TotalDurationMS   int64
-		FirstSeenUnix     int64
-		LastSeenUnix      int64
+		TotalFirstTokenMS    int64
+		TotalFirstResponseMS int64
+		TotalLatencyMS       int64
+		TotalDurationMS      int64
+		FirstSeenUnix        int64
+		LastSeenUnix         int64
 	}
 	var rows []aggregateRow
 	if err := applySessionLogFilters(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), query, cutoff).
@@ -190,6 +203,9 @@ func (s *ManagementService) SessionLogs(ctx context.Context, query SessionLogQue
 		summary.FirstSeenAt = time.Unix(row.FirstSeenUnix, 0).UTC()
 		summary.LastSeenAt = time.Unix(row.LastSeenUnix, 0).UTC()
 		finishSessionSummary(&summary, row.TotalFirstTokenMS, row.TotalLatencyMS, row.TotalDurationMS)
+		if summary.FirstResponseSampleCount > 0 {
+			summary.AverageFirstResponseMS = float64(row.TotalFirstResponseMS) / float64(summary.FirstResponseSampleCount)
+		}
 		if err := s.populateSessionSummary(ctx, &summary, cutoff); err != nil {
 			return nil, err
 		}
@@ -273,30 +289,34 @@ func (s *ManagementService) SessionLogDetail(ctx context.Context, query SessionD
 	}
 
 	type detailAggregate struct {
-		RequestCount      int64
-		SuccessCount      int64
-		CanceledCount     int64
-		ProcessingCount   int64
-		AttemptCount      int64
-		InputTokens       int64
-		NormalInputTokens int64
-		OutputTokens      int64
-		CachedTokens      int64
-		CacheWriteTokens  int64
-		SentTokens        int64
-		EstimatedCost     int64
-		UpstreamCost      int64
-		TotalFirstTokenMS int64
-		FirstTokenSamples int64
-		TotalLatencyMS    int64
-		LatencySamples    int64
-		TotalDurationMS   int64
-		FirstSeenUnix     int64
-		LastSeenUnix      int64
+		RequestCount         int64
+		CompactionCount      int64
+		SuccessCount         int64
+		CanceledCount        int64
+		ProcessingCount      int64
+		AttemptCount         int64
+		InputTokens          int64
+		NormalInputTokens    int64
+		OutputTokens         int64
+		CachedTokens         int64
+		CacheWriteTokens     int64
+		SentTokens           int64
+		EstimatedCost        int64
+		UpstreamCost         int64
+		TotalFirstTokenMS    int64
+		FirstTokenSamples    int64
+		TotalFirstResponseMS int64
+		FirstResponseSamples int64
+		TotalLatencyMS       int64
+		LatencySamples       int64
+		TotalDurationMS      int64
+		FirstSeenUnix        int64
+		LastSeenUnix         int64
 	}
 	var aggregate detailAggregate
 	if err := applySessionIdentity(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).Where("created_at >= ?", cutoff), query).
-		Select("COUNT(*) AS request_count, SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS success_count, " +
+		Select("COUNT(*) AS request_count, SUM(CASE WHEN is_compaction AND (outcome = 'success' OR (outcome = '' AND status_code >= 200 AND status_code < 300)) THEN 1 ELSE 0 END) AS compaction_count, " +
+			"SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS success_count, " +
 			"SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END) AS canceled_count, " +
 			"SUM(CASE WHEN outcome = 'processing' THEN 1 ELSE 0 END) AS processing_count, " +
 			"COALESCE(SUM(attempt_count), 0) AS attempt_count, COALESCE(SUM(input_tokens), 0) AS input_tokens, " +
@@ -306,6 +326,7 @@ func (s *ManagementService) SessionLogDetail(ctx context.Context, query SessionD
 			"COALESCE(SUM(sent_tokens), 0) AS sent_tokens, " +
 			"COALESCE(SUM(estimated_cost), 0) AS estimated_cost, COALESCE(SUM(upstream_cost), 0) AS upstream_cost, " +
 			"COALESCE(SUM(first_token_ms), 0) AS total_first_token_ms, SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_samples, " +
+			"COALESCE(SUM(first_response_ms), 0) AS total_first_response_ms, SUM(CASE WHEN first_response_ms > 0 THEN 1 ELSE 0 END) AS first_response_samples, " +
 			"COALESCE(SUM(latency_ms), 0) AS total_latency_ms, SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END) AS latency_samples, " +
 			"COALESCE(SUM(duration_ms), 0) AS total_duration_ms, " +
 			"MIN(unixepoch(created_at)) AS first_seen_unix, MAX(unixepoch(created_at)) AS last_seen_unix").Scan(&aggregate).Error; err != nil {
@@ -315,31 +336,40 @@ func (s *ManagementService) SessionLogDetail(ctx context.Context, query SessionD
 		return nil, gorm.ErrRecordNotFound
 	}
 	summary := SessionLogSummary{
-		SessionID:             query.SessionID,
-		Identified:            query.SessionID != "",
-		FallbackRequestID:     query.RequestID,
-		TokenID:               query.TokenID,
-		RequestCount:          aggregate.RequestCount,
-		SuccessCount:          aggregate.SuccessCount,
-		CanceledCount:         aggregate.CanceledCount,
-		ProcessingCount:       aggregate.ProcessingCount,
-		AttemptCount:          aggregate.AttemptCount,
-		InputTokens:           aggregate.InputTokens,
-		NormalInputTokens:     aggregate.NormalInputTokens,
-		OutputTokens:          aggregate.OutputTokens,
-		CachedTokens:          aggregate.CachedTokens,
-		CacheWriteTokens:      aggregate.CacheWriteTokens,
-		SentTokens:            aggregate.SentTokens,
-		EstimatedCost:         aggregate.EstimatedCost,
-		UpstreamCost:          aggregate.UpstreamCost,
-		FirstTokenSampleCount: aggregate.FirstTokenSamples,
-		LatencySampleCount:    aggregate.LatencySamples,
-		DurationSampleCount:   aggregate.RequestCount,
-		FirstSeenAt:           time.Unix(aggregate.FirstSeenUnix, 0).UTC(),
-		LastSeenAt:            time.Unix(aggregate.LastSeenUnix, 0).UTC(),
+		SessionID:                query.SessionID,
+		Identified:               query.SessionID != "",
+		FallbackRequestID:        query.RequestID,
+		TokenID:                  query.TokenID,
+		RequestCount:             aggregate.RequestCount,
+		SuccessCount:             aggregate.SuccessCount,
+		CanceledCount:            aggregate.CanceledCount,
+		ProcessingCount:          aggregate.ProcessingCount,
+		AttemptCount:             aggregate.AttemptCount,
+		InputTokens:              aggregate.InputTokens,
+		NormalInputTokens:        aggregate.NormalInputTokens,
+		OutputTokens:             aggregate.OutputTokens,
+		CachedTokens:             aggregate.CachedTokens,
+		CacheWriteTokens:         aggregate.CacheWriteTokens,
+		SentTokens:               aggregate.SentTokens,
+		EstimatedCost:            aggregate.EstimatedCost,
+		UpstreamCost:             aggregate.UpstreamCost,
+		FirstTokenSampleCount:    aggregate.FirstTokenSamples,
+		FirstResponseSampleCount: aggregate.FirstResponseSamples,
+		LatencySampleCount:       aggregate.LatencySamples,
+		DurationSampleCount:      aggregate.RequestCount,
+		FirstSeenAt:              time.Unix(aggregate.FirstSeenUnix, 0).UTC(),
+		LastSeenAt:               time.Unix(aggregate.LastSeenUnix, 0).UTC(),
 	}
 	finishSessionSummary(&summary, aggregate.TotalFirstTokenMS, aggregate.TotalLatencyMS, aggregate.TotalDurationMS)
+	if summary.FirstResponseSampleCount > 0 {
+		summary.AverageFirstResponseMS = float64(aggregate.TotalFirstResponseMS) / float64(summary.FirstResponseSampleCount)
+	}
 	if err := s.populateSessionSummary(ctx, &summary, cutoff); err != nil {
+		return nil, err
+	}
+	summary.CompactionCount = aggregate.CompactionCount
+	channels, err := s.sessionChannelUsage(ctx, query, cutoff)
+	if err != nil {
 		return nil, err
 	}
 
@@ -358,7 +388,48 @@ func (s *ManagementService) SessionLogDetail(ctx context.Context, query SessionD
 		}
 		requests = append(requests, view)
 	}
-	return &SessionLogDetail{Summary: summary, Requests: requests, RequestTotal: requestTotal, Page: query.Page, PageSize: query.PageSize}, nil
+	return &SessionLogDetail{Summary: summary, Channels: channels, Requests: requests, RequestTotal: requestTotal, Page: query.Page, PageSize: query.PageSize}, nil
+}
+
+func (s *ManagementService) sessionChannelUsage(ctx context.Context, query SessionDetailQuery, cutoff time.Time) ([]SessionChannelUsage, error) {
+	requestIDs := applySessionIdentity(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).
+		Select("id").Where("created_at >= ?", cutoff), query)
+	type usageRow struct {
+		ChannelID    uint64
+		ChannelName  string
+		AttemptCount int64
+	}
+	var rows []usageRow
+	if err := s.store.db.WithContext(ctx).Table("relay_attempt_logs AS a").
+		Select("a.channel_id, COALESCE(NULLIF(c.name, ''), MAX(a.channel_name)) AS channel_name, COUNT(*) AS attempt_count").
+		Joins("LEFT JOIN channels AS c ON c.id = a.channel_id").
+		Where("a.request_id IN (?)", requestIDs).
+		Group("a.channel_id, c.name").
+		Order("attempt_count DESC, channel_name ASC, a.channel_id ASC").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	var total int64
+	for _, row := range rows {
+		total += row.AttemptCount
+	}
+	usage := make([]SessionChannelUsage, 0, len(rows))
+	for _, row := range rows {
+		name := strings.TrimSpace(row.ChannelName)
+		if name == "" {
+			if row.ChannelID > 0 {
+				name = fmt.Sprintf("渠道 #%d", row.ChannelID)
+			} else {
+				name = "未知渠道"
+			}
+		}
+		share := 0.0
+		if total > 0 {
+			share = float64(row.AttemptCount) / float64(total)
+		}
+		usage = append(usage, SessionChannelUsage{ChannelID: row.ChannelID, ChannelName: name, AttemptCount: row.AttemptCount, Share: share})
+	}
+	return usage, nil
 }
 
 func applySessionIdentity(db *gorm.DB, query SessionDetailQuery) *gorm.DB {
@@ -376,6 +447,9 @@ func applySessionDetailStatus(db *gorm.DB, status string) *gorm.DB {
 		return db.Where("outcome = ?", RelayOutcomeCanceled)
 	case "failure":
 		return db.Where("outcome = ?", RelayOutcomeFailed)
+	case "compaction":
+		return db.Where("is_compaction = ? AND (outcome = ? OR (outcome = '' AND status_code >= 200 AND status_code < 300))",
+			true, RelayOutcomeSuccess)
 	default:
 		return db
 	}

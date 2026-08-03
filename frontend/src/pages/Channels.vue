@@ -558,6 +558,11 @@ function formatPriceMultiplier(value: number): string {
   return `${new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(multiplier)}x`
 }
 
+function formatConsumption(micros: number): string {
+  const value = Number.isFinite(micros) ? Math.max(0, micros) : 0
+  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 6 }).format(value / 1_000_000)
+}
+
 function formatTiming(value: number, samples: number): string {
   return samples > 0 ? formatDuration(value) : '--'
 }
@@ -704,9 +709,9 @@ async function testChannel(channel: Channel) {
 async function resetChannelCircuit(channel: Channel) {
   try {
     await ElMessageBox.confirm(
-      `人工恢复渠道“${channel.name}”？恢复后该渠道会立即重新参与请求调度。`,
-      '恢复三级熔断渠道',
-      { type: 'warning', confirmButtonText: '恢复并启用', cancelButtonText: '取消' },
+      `手动恢复渠道“${channel.name}”的熔断状态？恢复后会清除失败状态并立即重新参与请求调度。`,
+      '手动恢复熔断渠道',
+      { type: 'warning', confirmButtonText: '确认恢复', cancelButtonText: '取消' },
     )
   } catch {
     return
@@ -787,6 +792,9 @@ onUnmounted(() => {
         <el-table-column label="价格倍率" width="88" align="right">
           <template #default="scope"><span class="price-multiplier">{{ formatPriceMultiplier(scope.row.priceMultiplierBasisPoints) }}</span></template>
         </el-table-column>
+        <el-table-column label="累计消费" width="132" align="right">
+          <template #default="scope"><strong class="cumulative-cost">{{ formatConsumption(scope.row.cumulativeUpstreamCostMicros) }}</strong></template>
+        </el-table-column>
         <el-table-column label="今日使用占比" width="190" align="right">
           <template #default="scope">
             <div class="metric-copy success-metric">
@@ -853,7 +861,7 @@ onUnmounted(() => {
         <el-table-column label="操作" width="164" fixed="right" align="right">
           <template #default="scope">
             <div class="table-actions">
-              <el-tooltip v-if="scope.row.circuitLevel >= 3" content="人工恢复并重新启用渠道" placement="top"><el-button class="table-action-button reset-circuit-button" text type="warning" :icon="Unlock" :loading="resettingCircuitChannelId === scope.row.id" :disabled="deletingChannelId === scope.row.id || testingChannelId === scope.row.id" aria-label="人工恢复三级熔断渠道" @click="resetChannelCircuit(scope.row)" /></el-tooltip>
+              <el-tooltip v-if="hasCircuitMark(scope.row)" content="手动恢复熔断渠道" placement="top"><el-button class="table-action-button reset-circuit-button" text type="warning" :icon="Unlock" :loading="resettingCircuitChannelId === scope.row.id" :disabled="deletingChannelId === scope.row.id || testingChannelId === scope.row.id" aria-label="手动恢复熔断渠道" @click="resetChannelCircuit(scope.row)" /></el-tooltip>
               <el-tooltip content="测试渠道连接" placement="top"><el-button class="table-action-button" text :icon="Connection" :loading="testingChannelId === scope.row.id" :disabled="deletingChannelId === scope.row.id" aria-label="测试渠道连接" @click="testChannel(scope.row)" /></el-tooltip>
               <el-tooltip content="编辑渠道" placement="top"><el-button class="table-action-button" text :icon="Edit" aria-label="编辑渠道" @click="resetForm(scope.row)" /></el-tooltip>
               <el-tooltip content="删除渠道" placement="top"><el-button class="table-action-button" text type="danger" :icon="Delete" :loading="deletingChannelId === scope.row.id" :disabled="testingChannelId === scope.row.id" aria-label="删除渠道" @click="deleteChannel(scope.row)" /></el-tooltip>
@@ -1047,10 +1055,16 @@ onUnmounted(() => {
 :deep(.el-table__body tr.channel-row--disabled > td.el-table__cell:first-child) { box-shadow: inset 3px 0 0 var(--hongfen-border-strong); }
 :deep(.el-table__body tr.channel-row--disabled .primary-cell strong),
 :deep(.el-table__body tr.channel-row--disabled .metric-copy strong),
-:deep(.el-table__body tr.channel-row--disabled .price-multiplier) { color: var(--hongfen-text-muted); }
-:deep(.el-table__body tr.channel-row--circuit-open > td.el-table__cell),
-:deep(.el-table__body tr.channel-row--circuit-open:hover > td.el-table__cell) { background: var(--hongfen-danger-soft); }
-:deep(.el-table__body tr.channel-row--circuit-open > td.el-table__cell:first-child) { box-shadow: inset 3px 0 0 var(--hongfen-danger); }
+:deep(.el-table__body tr.channel-row--disabled .price-multiplier),
+:deep(.el-table__body tr.channel-row--disabled .cumulative-cost) { color: var(--hongfen-text-muted); }
+:deep(.el-table__body tr.channel-row--enabled > td.el-table__cell.el-table-fixed-column--left),
+:deep(.el-table__body tr.channel-row--enabled:hover > td.el-table__cell.el-table-fixed-column--left),
+:deep(.el-table__body tr.channel-row--enabled > td.el-table__cell.el-table-fixed-column--right),
+:deep(.el-table__body tr.channel-row--enabled:hover > td.el-table__cell.el-table-fixed-column--right) { background: color-mix(in srgb, var(--hongfen-surface) 94%, transparent); }
+:deep(.el-table__body tr.channel-row--disabled > td.el-table__cell.el-table-fixed-column--left),
+:deep(.el-table__body tr.channel-row--disabled:hover > td.el-table__cell.el-table-fixed-column--left),
+:deep(.el-table__body tr.channel-row--disabled > td.el-table__cell.el-table-fixed-column--right),
+:deep(.el-table__body tr.channel-row--disabled:hover > td.el-table__cell.el-table-fixed-column--right) { background: color-mix(in srgb, var(--hongfen-surface-muted) 96%, transparent); }
 .channel-state-cell { display: grid; min-width: 0; gap: 3px; }
 .channel-state-cell :deep(.el-tag) { max-width: 100%; }
 .channel-state-heading { display: flex; align-items: center; gap: 5px; min-width: 0; }
@@ -1105,7 +1119,8 @@ onUnmounted(() => {
 .channel-model-tag-label { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .channel-model-more-tag { flex-shrink: 0; cursor: help; font-variant-numeric: tabular-nums; }
 .channel-model-overflow-content { display: flex; flex-wrap: wrap; gap: 6px; max-width: 360px; max-height: 220px; overflow-y: auto; padding: 2px; }
-.price-multiplier { color: var(--hongfen-text); font-family: var(--hongfen-font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.price-multiplier, .cumulative-cost { color: var(--hongfen-text); font-family: var(--hongfen-font-mono); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cumulative-cost { font-weight: 650; }
 .latency-metric-cell { display: flex; align-items: center; gap: 8px; min-height: 48px; }
 .metric-copy { display: grid; min-width: 0; gap: 2px; font-variant-numeric: tabular-nums; }
 .metric-copy strong { color: var(--hongfen-text); font-size: 13px; font-weight: 650; }

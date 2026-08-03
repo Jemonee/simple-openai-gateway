@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, useTemplateRef, watch } from 'vue'
 import { ArrowDown, ArrowUp, EditPen, FullScreen, Refresh, Right, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import RequestPayloadDialog from '@/components/RequestPayloadDialog.vue'
@@ -28,7 +28,7 @@ interface RequestRouteSummary {
   kind: 'reuse' | 'hit' | 'unavailable'
 }
 
-type SessionDetailStatus = 'all' | 'success' | 'canceled' | 'failure'
+type SessionDetailStatus = 'all' | 'success' | 'canceled' | 'failure' | 'compaction'
 
 const { summary } = defineProps<SessionLogDrawerProps>()
 const emit = defineEmits<{
@@ -52,11 +52,15 @@ const detailStatus = ref<SessionDetailStatus>('all')
 const currentChannelExpanded = ref(false)
 const expandedRequestIds = ref<Set<string>>(new Set())
 const timelineScroller = useTemplateRef<HTMLElement>('timelineScroller')
+const channelUsageValue = useTemplateRef<HTMLElement>('channelUsageValue')
+const channelUsageOverflowing = ref(false)
+let channelUsageResizeObserver: ResizeObserver | null = null
 const detailStatusOptions: Array<{ label: string; value: SessionDetailStatus }> = [
   { label: '全部', value: 'all' },
   { label: '成功', value: 'success' },
   { label: '取消', value: 'canceled' },
   { label: '失败', value: 'failure' },
+  { label: '压缩', value: 'compaction' },
 ]
 
 async function renameCurrentSession() {
@@ -103,6 +107,29 @@ const timelineRequests = computed(() => (detail.value?.requests ?? []).map((requ
 })))
 const hasMoreRequests = computed(() => (detail.value?.requests.length ?? 0) < (detail.value?.requestTotal ?? 0))
 const failureCount = computed(() => Math.max(0, (detail.value?.summary.requestCount ?? 0) - (detail.value?.summary.successCount ?? 0) - (detail.value?.summary.canceledCount ?? 0) - (detail.value?.summary.processingCount ?? 0)))
+const channelUsageText = computed(() => (detail.value?.channels ?? [])
+  .slice()
+  .sort((left, right) => right.share - left.share || right.attemptCount - left.attemptCount || left.channelName.localeCompare(right.channelName, 'zh-CN'))
+  .map((channel) => `${channel.channelName}（${formatPercent(channel.share)}）`)
+  .join(' · '))
+
+function updateChannelUsageOverflow() {
+  const element = channelUsageValue.value
+  channelUsageOverflowing.value = Boolean(element && element.scrollWidth > element.clientWidth)
+}
+
+watch(channelUsageValue, (element, previous) => {
+  if (previous) channelUsageResizeObserver?.unobserve(previous)
+  if (!element) {
+    channelUsageOverflowing.value = false
+    return
+  }
+  channelUsageResizeObserver ??= new ResizeObserver(updateChannelUsageOverflow)
+  channelUsageResizeObserver.observe(element)
+  void nextTick(updateChannelUsageOverflow)
+})
+
+onBeforeUnmount(() => channelUsageResizeObserver?.disconnect())
 
 function formatDate(value: string): string {
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'medium', timeZone: 'Asia/Shanghai' }).format(new Date(value))
@@ -500,6 +527,7 @@ watch(
             <h3>响应效率</h3>
             <dl>
               <div><dt>首 Token</dt><dd>{{ detail.summary.firstTokenSampleCount ? formatTiming(detail.summary.averageFirstTokenMs) : '--' }}</dd></div>
+              <div><dt>中转首 Token</dt><dd>{{ detail.summary.firstResponseSampleCount ? formatTiming(detail.summary.averageFirstResponseMs) : '--' }}</dd></div>
               <div><dt>请求延迟</dt><dd>{{ detail.summary.latencySampleCount ? formatTiming(detail.summary.averageLatencyMs) : '--' }}</dd></div>
             </dl>
           </section>
@@ -533,6 +561,12 @@ watch(
                 <span>· {{ assignmentLabel(detail.summary.currentChannel.assignmentSource) }}</span>
               </p>
               <p v-else>{{ detail.summary.latestModel }} · 尚未进入上游渠道</p>
+              <el-tooltip v-if="channelUsageText" :content="channelUsageText" placement="bottom-start" :show-after="300" :disabled="!channelUsageOverflowing">
+                <p class="channel-usage-summary" :aria-label="`会话调用渠道：${channelUsageText}`">
+                  <span>全部渠道</span>
+                  <strong ref="channelUsageValue">{{ channelUsageText }}</strong>
+                </p>
+              </el-tooltip>
             </div>
           </button>
           <el-tag :type="currentChannelState().type" effect="plain">{{ currentChannelState().label }}</el-tag>
@@ -584,6 +618,7 @@ watch(
                 <span>{{ option.label }}</span>
                 <i v-if="option.value === 'canceled'">{{ formatCompactNumber(detail.summary.canceledCount) }}</i>
                 <i v-else-if="option.value === 'failure'">{{ formatCompactNumber(failureCount) }}</i>
+                <i v-else-if="option.value === 'compaction'">{{ formatCompactNumber(detail.summary.compactionCount) }}</i>
               </button>
             </div>
             <span>{{ formatCompactNumber(detail.requestTotal) }} 个匹配请求 · 会话共 {{ formatCompactNumber(detail.summary.attemptCount) }} 次上游尝试</span>
@@ -609,7 +644,7 @@ watch(
                   <el-icon class="request-expand-icon"><Right /></el-icon>
                   <time :datetime="entry.request.createdAt">{{ formatDate(entry.request.createdAt) }}</time>
                   <span>{{ entry.request.endpoint === 'chat' ? 'Chat Completions' : 'Responses' }}</span>
-                  <el-tag v-if="entry.request.isCompaction" class="compaction-request-tag" type="warning" effect="plain" size="small">上下文压缩</el-tag>
+                  <el-tag v-if="entry.request.isCompaction" class="compaction-request-tag" type="warning" effect="plain" size="small">压缩请求</el-tag>
                   <code>{{ entry.request.apiPath }}</code>
                   <code>{{ entry.request.requestedModel }}</code>
                   <span>思考等级 {{ entry.request.reasoningEffort || '默认' }}</span>
@@ -631,6 +666,7 @@ watch(
                   <span>网关前置 {{ formatTiming(entry.request.gatewayPreparationMs) }}</span>
                   <i aria-hidden="true">/</i>
                   <span>首 Token {{ formatTiming(entry.request.firstTokenMs) }}</span>
+                  <small class="relay-first-response">中转首响 {{ formatTiming(entry.request.firstResponseMs) }}</small>
                   <i aria-hidden="true">/</i>
                   <span>请求延迟 {{ formatTiming(entry.request.latencyMs) }}</span>
                   <i aria-hidden="true">/</i>
@@ -727,6 +763,7 @@ watch(
 .session-secondary-metrics > section:last-child { border-right: 0; }
 .session-secondary-metrics h3 { margin-bottom: 7px; color: var(--hongfen-text-subtle); font-size: 10px; font-weight: 600; }
 .session-secondary-metrics dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.session-secondary-metrics > section:nth-child(2) dl { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .session-secondary-metrics .token-breakdown dl { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .session-secondary-metrics dl > div { display: grid; min-width: 0; justify-items: center; gap: 3px; }
 .session-secondary-metrics dt { color: var(--hongfen-text-muted); font-size: 9px; }
@@ -745,6 +782,9 @@ watch(
 .current-channel-section p { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px; }
 .current-channel-section p strong { color: var(--hongfen-text); }
 .current-channel-section p code { color: var(--hongfen-primary-hover); overflow-wrap: anywhere; }
+.current-channel-section .channel-usage-summary { display: flex; width: min(620px, 64vw); max-width: 100%; flex-wrap: nowrap; overflow: hidden; }
+.channel-usage-summary > span { flex: 0 0 auto; }
+.channel-usage-summary > strong { min-width: 0; overflow: hidden; color: var(--hongfen-text-muted); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .current-channel-grid { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 14px 20px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--hongfen-border); }
 .current-channel-grid > div { display: grid; gap: 4px; min-width: 0; }
 .channel-url { grid-column: 1 / -1; }
@@ -806,6 +846,7 @@ watch(
 .request-brief > span { display: inline-flex; min-width: 0; align-items: baseline; flex-wrap: wrap; gap: 4px; }
 .request-brief strong { color: var(--hongfen-text); font-weight: 650; }
 .request-brief-timings i { color: var(--hongfen-border-strong); font-style: normal; }
+.request-brief-timings .relay-first-response { color: var(--hongfen-text-subtle); font-size: 9px; }
 .route-result { font-style: normal; font-weight: 650; }
 .route-result.is-reuse { color: var(--hongfen-warning); }
 .route-result.is-hit { color: var(--hongfen-success); }

@@ -127,7 +127,7 @@ func newTestStore(t *testing.T) *Store {
 	if err := db.AutoMigrate(
 		&AdminUser{}, &AdminSession{}, &Channel{}, &GatewayModel{}, &ChannelModel{},
 		&CircuitRecord{},
-		&ClientToken{}, &ClientTokenModel{}, &RelayRequestLog{}, &RelaySessionState{}, &ModelAgentContextWindow{}, &RelayChatSessionClaim{}, &RelayAttemptLog{}, &RelayStepLog{}, &TokenDailyStat{}, &GatewayMigration{},
+		&ClientToken{}, &ClientTokenModel{}, &RelayRequestLog{}, &RelaySessionState{}, &ModelAgentContextWindow{}, &RelayChatSessionClaim{}, &RelayAttemptLog{}, &RelayStepLog{}, &TokenDailyStat{}, &ChannelModelDailyStat{}, &GatewayMigration{},
 		&ResponseAffinity{}, &SessionAffinity{},
 	); err != nil {
 		t.Fatal(err)
@@ -213,24 +213,23 @@ func TestTokenEstimatorUsesParsedPayload(t *testing.T) {
 	}
 }
 
-func TestDurationAfterLatency(t *testing.T) {
+func TestUpstreamAttemptDurationPreservesElapsedTime(t *testing.T) {
 	tests := []struct {
-		total   int64
-		latency int64
-		want    int64
+		duration int64
+		want     int64
 	}{
-		{total: 350, latency: 100, want: 250},
-		{total: 100, latency: 100, want: 0},
-		{total: 0, latency: 100, want: 0},
+		{duration: 350, want: 350},
+		{duration: 100, want: 100},
+		{duration: 0, want: 0},
 	}
 	for _, test := range tests {
-		if got := durationAfterLatency(test.total, test.latency); got != test.want {
-			t.Fatalf("durationAfterLatency(%d, %d) = %d, want %d", test.total, test.latency, got, test.want)
+		if got := upstreamAttemptDuration(test.duration); got != test.want {
+			t.Fatalf("upstreamAttemptDuration(%d) = %d, want %d", test.duration, got, test.want)
 		}
 	}
 }
 
-func TestFirstTokenAfterLatencyPreservesObservedSample(t *testing.T) {
+func TestFirstTokenAfterLatencyUsesResponseHeaderClock(t *testing.T) {
 	tests := []struct {
 		firstToken int64
 		latency    int64
@@ -244,6 +243,26 @@ func TestFirstTokenAfterLatencyPreservesObservedSample(t *testing.T) {
 		if got := firstTokenAfterLatency(test.firstToken, test.latency); got != test.want {
 			t.Fatalf("firstTokenAfterLatency(%d, %d) = %d, want %d", test.firstToken, test.latency, got, test.want)
 		}
+	}
+}
+
+func TestRecordFirstResponseUsesRequestClock(t *testing.T) {
+	attemptStarted := time.Now().Add(-100 * time.Millisecond)
+	execution := &relayExecution{startedAt: attemptStarted.Add(-50 * time.Millisecond)}
+	result := attemptResult{latencyMS: 50}
+	recordFirstResponse([]byte("data: {\"type\":\"response.created\"}\n\n"), &result, execution, attemptStarted)
+	if result.firstResponseMS < 100 || execution.firstResponseMS != result.firstResponseMS {
+		t.Fatalf("attempt first response = %d, request first response = %d", result.firstResponseMS, execution.firstResponseMS)
+	}
+}
+
+func TestRecordFirstTokenUsesAttemptClock(t *testing.T) {
+	attemptStarted := time.Now().Add(-100 * time.Millisecond)
+	execution := &relayExecution{startedAt: attemptStarted.Add(-50 * time.Millisecond)}
+	result := attemptResult{}
+	recordFirstToken([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"), &result, execution, attemptStarted)
+	if result.firstTokenMS < 100 || execution.firstTokenMS != result.firstTokenMS {
+		t.Fatalf("attempt first token = %d, request first token = %d", result.firstTokenMS, execution.firstTokenMS)
 	}
 }
 
@@ -2593,8 +2612,8 @@ func TestSessionLogsAggregateExistingFiveDayDetails(t *testing.T) {
 	token, model, channels, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, "http://one.invalid", "http://two.invalid")
 	now := time.Now()
 	logs := []RelayRequestLog{
-		{ID: "session-request-1", TokenID: token.ID, TokenName: token.Name, TokenKeyPrefix: token.KeyPrefix, Endpoint: "responses", RequestedModel: model.Name, CodexSessionID: "codex-session", CodexSessionSource: "prompt_cache_key", RequestParametersJSON: `{"temperature":0.2}`, StatusCode: http.StatusOK, InputTokens: 100, NormalInputTokens: 60, OutputTokens: 20, CachedTokens: 30, CacheWriteTokens: 10, SentTokens: 100, EstimatedCost: 70, UpstreamCost: 60, AttemptCount: 1, FirstTokenMS: 50, LatencyMS: 20, DurationMS: 100, CreatedAt: now.Add(-2 * time.Hour)},
-		{ID: "session-request-2", TokenID: token.ID, TokenName: token.Name, TokenKeyPrefix: token.KeyPrefix, Endpoint: "responses", RequestedModel: model.Name, CodexSessionID: "codex-session", CodexSessionSource: "prompt_cache_key", RequestParametersJSON: `{"reasoning":{"effort":"high"}}`, StatusCode: http.StatusBadGateway, InputTokens: 10, NormalInputTokens: 10, SentTokens: 20, EstimatedCost: 0, UpstreamCost: 0, AttemptCount: 2, LatencyMS: 40, DurationMS: 300, CreatedAt: now.Add(-time.Hour)},
+		{ID: "session-request-1", TokenID: token.ID, TokenName: token.Name, TokenKeyPrefix: token.KeyPrefix, Endpoint: "responses", RequestedModel: model.Name, CodexSessionID: "codex-session", CodexSessionSource: "prompt_cache_key", IsCompaction: true, RequestParametersJSON: `{"temperature":0.2}`, StatusCode: http.StatusOK, InputTokens: 100, NormalInputTokens: 60, OutputTokens: 20, CachedTokens: 30, CacheWriteTokens: 10, SentTokens: 100, EstimatedCost: 70, UpstreamCost: 60, AttemptCount: 1, FirstTokenMS: 50, FirstResponseMS: 20, LatencyMS: 20, DurationMS: 100, CreatedAt: now.Add(-2 * time.Hour)},
+		{ID: "session-request-2", TokenID: token.ID, TokenName: token.Name, TokenKeyPrefix: token.KeyPrefix, Endpoint: "responses", RequestedModel: model.Name, CodexSessionID: "codex-session", CodexSessionSource: "prompt_cache_key", IsCompaction: true, RequestParametersJSON: `{"reasoning":{"effort":"high"}}`, StatusCode: http.StatusBadGateway, Outcome: RelayOutcomeFailed, InputTokens: 10, NormalInputTokens: 10, SentTokens: 20, EstimatedCost: 0, UpstreamCost: 0, AttemptCount: 2, FirstResponseMS: 40, LatencyMS: 40, DurationMS: 300, CreatedAt: now.Add(-time.Hour)},
 		{ID: "unknown-request", TokenID: token.ID, TokenName: token.Name, TokenKeyPrefix: token.KeyPrefix, Endpoint: "chat", RequestedModel: model.Name, CodexSessionSource: "unavailable", RequestParametersJSON: `{}`, StatusCode: http.StatusOK, InputTokens: 50, OutputTokens: 10, CachedTokens: 5, EstimatedCost: 20, UpstreamCost: 15, AttemptCount: 0, FirstTokenMS: 30, LatencyMS: 10, DurationMS: 80, CreatedAt: now.Add(-30 * time.Minute)},
 		{ID: "expired-request", TokenID: token.ID, Endpoint: "responses", RequestedModel: model.Name, CodexSessionID: "codex-session", StatusCode: http.StatusOK, InputTokens: 1000, CreatedAt: now.Add(-(DetailedLogRetentionDays*24*time.Hour + time.Hour))},
 	}
@@ -2654,11 +2673,17 @@ func TestSessionLogsAggregateExistingFiveDayDetails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.RequestTotal != 2 || len(detail.Requests) != 2 || detail.Requests[0].ID != "session-request-2" || len(detail.Requests[0].Attempts) != 2 || detail.Requests[1].ID != "session-request-1" {
+	if detail.RequestTotal != 2 || detail.Summary.CompactionCount != 1 || len(detail.Requests) != 2 || detail.Requests[0].ID != "session-request-2" || len(detail.Requests[0].Attempts) != 2 || detail.Requests[1].ID != "session-request-1" {
 		t.Fatalf("session detail = %+v", detail)
 	}
 	if detail.Summary.NormalInputTokens != 70 || detail.Summary.CacheWriteTokens != 10 || detail.Summary.SentTokens != 120 || detail.Summary.UpstreamCost != 60 || detail.Summary.AverageFirstTokenMS != 50 || detail.Summary.AverageLatencyMS != 30 || detail.Summary.AverageDurationMS != 200 || detail.Requests[1].CacheWriteTokens != 10 || detail.Requests[1].Attempts[0].CacheWriteTokens != 10 || detail.Requests[1].Attempts[0].SentTokens != 100 {
 		t.Fatalf("session cache-write detail = %+v", detail)
+	}
+	if detail.Summary.AverageFirstResponseMS != 30 || detail.Summary.FirstResponseSampleCount != 2 {
+		t.Fatalf("session first response summary = %+v", detail.Summary)
+	}
+	if len(detail.Channels) != 2 || detail.Channels[0].ChannelID != channels[0].ID || detail.Channels[0].AttemptCount != 2 || detail.Channels[0].Share != float64(2)/float64(3) || detail.Channels[1].ChannelID != channels[1].ID || detail.Channels[1].AttemptCount != 1 || detail.Channels[1].Share != float64(1)/float64(3) {
+		t.Fatalf("session channel usage = %+v", detail.Channels)
 	}
 	if detail.Requests[1].Attempts[0].SelectionReason != SelectionReasonInitialRoute || detail.Requests[0].Attempts[0].SelectionReason != "" || detail.Requests[0].Attempts[1].SelectionReason != SelectionReasonRetryableStatus || detail.Requests[0].Attempts[1].PreviousChannelID != channels[0].ID {
 		t.Fatalf("session selection metadata = %+v", detail.Requests)
@@ -2684,6 +2709,10 @@ func TestSessionLogsAggregateExistingFiveDayDetails(t *testing.T) {
 	failureDetail, err := management.SessionLogDetail(context.Background(), SessionDetailQuery{SessionID: "codex-session", TokenID: token.ID, Status: "failure", Page: 1, PageSize: 25})
 	if err != nil || failureDetail.RequestTotal != 1 || len(failureDetail.Requests) != 1 || failureDetail.Requests[0].ID != "session-request-2" || failureDetail.Summary.RequestCount != 2 {
 		t.Fatalf("failed session detail = %+v, %v", failureDetail, err)
+	}
+	compactionDetail, err := management.SessionLogDetail(context.Background(), SessionDetailQuery{SessionID: "codex-session", TokenID: token.ID, Status: "compaction", Page: 1, PageSize: 25})
+	if err != nil || compactionDetail.RequestTotal != 1 || len(compactionDetail.Requests) != 1 || compactionDetail.Requests[0].ID != "session-request-1" || compactionDetail.Summary.CompactionCount != 1 {
+		t.Fatalf("compaction session detail = %+v, %v", compactionDetail, err)
 	}
 	unknownDetail, err := management.SessionLogDetail(context.Background(), SessionDetailQuery{RequestID: "unknown-request", Page: 1, PageSize: 25})
 	if err != nil || unknownDetail.RequestTotal != 1 || unknownDetail.Summary.Identified {
@@ -2746,6 +2775,69 @@ func TestResponsesAffinityPinsOriginalMapping(t *testing.T) {
 	}
 }
 
+func TestResponseAffinitySuccessMovesNewerSessionRoute(t *testing.T) {
+	store := newTestStore(t)
+	var firstCalls atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		firstCalls.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"resp_first","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first"}]}],"usage":{"input_tokens":4,"output_tokens":1}}`))
+	}))
+	defer first.Close()
+	var secondCalls atomic.Int32
+	second := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		secondCalls.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"resp_second","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second"}]}],"usage":{"input_tokens":4,"output_tokens":1}}`))
+	}))
+	defer second.Close()
+	token, model, _, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, first.URL, second.URL)
+	router := NewRouter(store, NewClientAccessService(store), nil)
+	router.RecordSessionAffinity(context.Background(), token.ID, model.ID, "resumed-session", mappings[0].ID)
+	router.RecordAffinity(context.Background(), "resp_before_resume", mappings[1].ID)
+	relay := NewRelayService(store, router, NewTokenEstimator(), &config.ApplicationConfigManager{})
+
+	for _, body := range [][]byte{
+		[]byte(`{"model":"public-model","prompt_cache_key":"resumed-session","previous_response_id":"resp_before_resume","input":"resume"}`),
+		[]byte(`{"model":"public-model","prompt_cache_key":"resumed-session","input":"continue"}`),
+	} {
+		payload, err := ParseRelayPayload(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if publicErr := relay.Relay(context.Background(), httptest.NewRecorder(), http.Header{}, "", "responses", token, payload, body); publicErr != nil {
+			t.Fatal(publicErr)
+		}
+	}
+
+	if firstCalls.Load() != 0 || secondCalls.Load() != 2 {
+		t.Fatalf("calls = %d/%d, want 0/2", firstCalls.Load(), secondCalls.Load())
+	}
+	attempts := relayAttempts(t, store)
+	if len(attempts) != 2 || attempts[0].SelectionReason != SelectionReasonResponseAffinity || attempts[1].SelectionReason != SelectionReasonSessionAffinity || attempts[0].ChannelModelID != mappings[1].ID || attempts[1].ChannelModelID != mappings[1].ID {
+		t.Fatalf("attempts = %+v", attempts)
+	}
+}
+
+func TestOlderResponseAffinitySuccessDoesNotReplaceNewerSessionRoute(t *testing.T) {
+	store := newTestStore(t)
+	token, model, _, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, "http://one.invalid", "http://two.invalid")
+	router := NewRouter(store, NewClientAccessService(store), nil)
+	router.RecordSessionAffinity(context.Background(), token.ID, model.ID, "concurrent-session", mappings[0].ID)
+	var current SessionAffinity
+	if err := store.db.Where("token_id = ? AND model_id = ? AND session_hash = ?", token.ID, model.ID, hashSecret("concurrent-session")).First(&current).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	router.RecordSessionAffinityAfterSuccess(context.Background(), token.ID, model.ID, "concurrent-session", current.UpdatedAt.Add(-time.Second), 0, mappings[1].ID)
+	if err := store.db.Where("token_id = ? AND model_id = ? AND session_hash = ?", token.ID, model.ID, hashSecret("concurrent-session")).First(&current).Error; err != nil {
+		t.Fatal(err)
+	}
+	if current.ChannelModelID != mappings[0].ID {
+		t.Fatalf("affinity mapping = %d, want newer %d", current.ChannelModelID, mappings[0].ID)
+	}
+}
+
 func TestCodexSessionAffinityPinsMappingAndAllowsCircuitFailover(t *testing.T) {
 	store := newTestStore(t)
 	token, model, channels, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, "http://one.invalid", "http://two.invalid")
@@ -2787,7 +2879,7 @@ func TestCodexSessionAffinityPinsMappingAndAllowsCircuitFailover(t *testing.T) {
 	}
 }
 
-func TestCodexSessionModelSwitchRecordsPreviousChannel(t *testing.T) {
+func TestCodexSessionModelSwitchPrefersExistingModelAffinity(t *testing.T) {
 	store := newTestStore(t)
 	token, firstModel, channels, firstMappings := createRouteFixture(t, store, RoutingPriorityWeighted, "http://one.invalid", "http://two.invalid")
 	secondModel := GatewayModel{Name: "second-public-model", RoutingStrategy: RoutingPriorityWeighted, Enabled: true}
@@ -2837,13 +2929,13 @@ func TestCodexSessionModelSwitchRecordsPreviousChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	selection := plan.InitialSelection
-	if len(plan.Candidates) != 2 || plan.Candidates[0].Mapping.ID != stickyMapping.ID {
+	if len(plan.Candidates) != 2 || plan.Candidates[0].Mapping.ID != secondMapping.ID {
 		t.Fatalf("model-switch candidates = %+v", plan.Candidates)
 	}
-	if !plan.SessionAffinity || plan.Affinity || !plan.RefreshSessionAffinity || plan.SessionAffinityMappingID != 0 {
+	if !plan.SessionAffinity || plan.Affinity || plan.RefreshSessionAffinity || plan.SessionAffinityMappingID != secondMapping.ID {
 		t.Fatalf("model-switch affinity flags = %+v", plan)
 	}
-	if selection.Reason != SelectionReasonModelSwitch || selection.PreviousChannelID != channels[0].ID || selection.PreviousChannelName != channels[0].Name || selection.Detail != firstModel.Name+" -> "+secondModel.Name {
+	if selection.Reason != SelectionReasonSessionAffinity || selection.PreviousChannelID != 0 || selection.PreviousChannelName != "" || selection.Detail != firstModel.Name+" -> "+secondModel.Name {
 		t.Fatalf("model-switch selection = %+v", selection)
 	}
 	if selection.Decision == nil || selection.Decision.Mode != "session_affinity" || !selection.Decision.Candidates[0].Selected {
@@ -2851,14 +2943,14 @@ func TestCodexSessionModelSwitchRecordsPreviousChannel(t *testing.T) {
 	}
 
 	execution := &relayExecution{
-		token: token, modelID: secondModel.ID, payload: &RelayPayload{SessionKey: "model-switch-session"}, refreshSessionAffinity: true,
+		token: token, modelID: secondModel.ID, payload: &RelayPayload{SessionKey: "model-switch-session"}, sessionAffinityMappingID: secondMapping.ID,
 	}
-	(&RelayService{router: router}).recordSessionAffinityAfterSuccess(context.Background(), execution, stickyMapping.ID)
+	(&RelayService{router: router}).recordSessionAffinityAfterSuccess(context.Background(), execution, secondMapping.ID)
 	var refreshedAffinity SessionAffinity
 	if err := store.db.Where("token_id = ? AND model_id = ? AND session_hash = ?", token.ID, secondModel.ID, hashSecret("model-switch-session")).First(&refreshedAffinity).Error; err != nil {
 		t.Fatal(err)
 	}
-	if refreshedAffinity.ChannelModelID != stickyMapping.ID {
+	if refreshedAffinity.ChannelModelID != secondMapping.ID {
 		t.Fatalf("refreshed model-switch affinity = %+v", refreshedAffinity)
 	}
 
@@ -3445,6 +3537,27 @@ func TestSSEEventHasOutputToken(t *testing.T) {
 	}
 }
 
+func TestSSEEventHasData(t *testing.T) {
+	tests := []struct {
+		name  string
+		event string
+		want  bool
+	}{
+		{name: "responses metadata", event: "data: {\"type\":\"response.created\"}\n\n", want: true},
+		{name: "chat role delta", event: "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n", want: true},
+		{name: "empty data", event: "data:\n\n", want: false},
+		{name: "done", event: "data: [DONE]\n\n", want: false},
+		{name: "comment", event: ": keep-alive\n\n", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := sseEventHasData([]byte(test.event)); got != test.want {
+				t.Fatalf("sseEventHasData() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRequestSessionNameUsesLatestUserText(t *testing.T) {
 	tests := []struct {
 		name string
@@ -3748,6 +3861,7 @@ func TestHistoricalOutcomeClassifierSkipsUncertainPayloads(t *testing.T) {
 func TestRelayRecordsDistinctStreamingTimings(t *testing.T) {
 	store := newTestStore(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		time.Sleep(40 * time.Millisecond)
 		writer.Header().Set("Content-Type", "text/event-stream")
 		writer.WriteHeader(http.StatusOK)
 		flusher := writer.(http.Flusher)
@@ -3780,11 +3894,14 @@ func TestRelayRecordsDistinctStreamingTimings(t *testing.T) {
 	if err := store.db.First(&attemptLog).Error; err != nil {
 		t.Fatal(err)
 	}
-	if requestLog.LatencyMS <= 0 || requestLog.FirstTokenMS <= 0 || requestLog.DurationMS <= requestLog.FirstTokenMS {
-		t.Fatalf("request timings = latency %d, first token %d, duration %d", requestLog.LatencyMS, requestLog.FirstTokenMS, requestLog.DurationMS)
+	if requestLog.LatencyMS <= 0 || requestLog.FirstResponseMS < requestLog.LatencyMS || requestLog.FirstTokenMS <= requestLog.FirstResponseMS-requestLog.LatencyMS || requestLog.DurationMS <= requestLog.FirstTokenMS {
+		t.Fatalf("request timings = latency %d, first response %d, first token %d, duration %d", requestLog.LatencyMS, requestLog.FirstResponseMS, requestLog.FirstTokenMS, requestLog.DurationMS)
 	}
-	if attemptLog.LatencyMS <= 0 || attemptLog.FirstTokenMS <= 0 || attemptLog.DurationMS <= attemptLog.FirstTokenMS {
-		t.Fatalf("attempt timings = latency %d, first token %d, duration %d", attemptLog.LatencyMS, attemptLog.FirstTokenMS, attemptLog.DurationMS)
+	if attemptLog.LatencyMS <= 0 || attemptLog.FirstResponseMS < attemptLog.LatencyMS || attemptLog.FirstTokenMS <= attemptLog.FirstResponseMS-attemptLog.LatencyMS || attemptLog.DurationMS <= attemptLog.FirstTokenMS {
+		t.Fatalf("attempt timings = latency %d, first response %d, first token %d, duration %d", attemptLog.LatencyMS, attemptLog.FirstResponseMS, attemptLog.FirstTokenMS, attemptLog.DurationMS)
+	}
+	if requestLog.FirstTokenMS != attemptLog.FirstTokenMS || requestLog.FirstResponseMS != attemptLog.FirstResponseMS || requestLog.LatencyMS != attemptLog.LatencyMS || requestLog.DurationMS != attemptLog.DurationMS {
+		t.Fatalf("request timings = %+v, attempt timings = %+v", requestLog, attemptLog)
 	}
 	var stat TokenDailyStat
 	if err := store.db.First(&stat).Error; err != nil {
@@ -4504,6 +4621,58 @@ func TestRelayCircuitsBalanceFailureAndSwitchesChannel(t *testing.T) {
 	}
 }
 
+func TestRelayCircuitsSubscriptionUsageLimitAndMovesSessionRoute(t *testing.T) {
+	store := newTestStore(t)
+	var firstCalls atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		firstCalls.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(`{"error":{"message":"This subscription has reached today's usage limit. Please try again later, or switch groups/plans (E44003)","type":"api_error","code":"insufficient_user_quota"}}`))
+	}))
+	defer first.Close()
+	var secondCalls atomic.Int32
+	second := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		secondCalls.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"resp_switched","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"switched"}]}]}`))
+	}))
+	defer second.Close()
+	token, model, channels, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, first.URL, second.URL)
+	relay := newTestRelay(store)
+	relay.router.RecordSessionAffinity(context.Background(), token.ID, model.ID, "quota-session", mappings[0].ID)
+	body := []byte(`{"model":"public-model","prompt_cache_key":"quota-session","input":"switch depleted subscription"}`)
+	payload, err := ParseRelayPayload(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	if publicErr := relay.Relay(context.Background(), recorder, nil, "", "responses", token, payload, body); publicErr != nil {
+		t.Fatal(publicErr)
+	}
+	if firstCalls.Load() != 1 || secondCalls.Load() != 1 || recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "resp_switched") {
+		t.Fatalf("calls=%d/%d status=%d body=%s", firstCalls.Load(), secondCalls.Load(), recorder.Code, recorder.Body.String())
+	}
+	attempts := relayAttempts(t, store)
+	if len(attempts) != 2 || attempts[0].SelectionReason != SelectionReasonSessionAffinity || attempts[1].SelectionReason != SelectionReasonCircuitOpened || !attempts[1].Success {
+		t.Fatalf("attempts = %+v", attempts)
+	}
+	var failedChannel Channel
+	if err := store.db.First(&failedChannel, channels[0].ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if failedChannel.CircuitLevel != CircuitLevelTemporary || failedChannel.CircuitOpenUntil == nil || !failedChannel.CircuitOpenUntil.After(time.Now()) || !strings.Contains(failedChannel.LastError, "usage limit") {
+		t.Fatalf("failed channel = %+v", failedChannel)
+	}
+	var affinity SessionAffinity
+	if err := store.db.Where("token_id = ? AND model_id = ? AND session_hash = ?", token.ID, model.ID, hashSecret("quota-session")).First(&affinity).Error; err != nil {
+		t.Fatal(err)
+	}
+	if affinity.ChannelModelID != mappings[1].ID {
+		t.Fatalf("affinity mapping = %d, want %d", affinity.ChannelModelID, mappings[1].ID)
+	}
+}
+
 func TestRelayDoesNotSwitchForOrdinaryForbiddenResponse(t *testing.T) {
 	store := newTestStore(t)
 	first := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
@@ -4540,6 +4709,57 @@ func TestRelayDoesNotSwitchForOrdinaryForbiddenResponse(t *testing.T) {
 	}
 	if attempts := relayAttempts(t, store); len(attempts) != 1 || attempts[0].StatusCode != http.StatusForbidden {
 		t.Fatalf("attempts = %+v", attempts)
+	}
+}
+
+func TestRetryableHTTPStatusClassification(t *testing.T) {
+	tests := []struct {
+		status int
+		want   bool
+	}{
+		{status: http.StatusCreated, want: false},
+		{status: http.StatusMovedPermanently, want: true},
+		{status: http.StatusBadRequest, want: false},
+		{status: http.StatusForbidden, want: false},
+		{status: http.StatusNotFound, want: true},
+		{status: http.StatusRequestTimeout, want: true},
+		{status: http.StatusConflict, want: false},
+		{status: http.StatusUnprocessableEntity, want: false},
+		{status: http.StatusTooManyRequests, want: true},
+		{status: http.StatusInternalServerError, want: true},
+	}
+	for _, test := range tests {
+		if got := shouldRetryStatus(test.status); got != test.want {
+			t.Errorf("shouldRetryStatus(%d) = %t, want %t", test.status, got, test.want)
+		}
+	}
+}
+
+func TestApplicationFailureClassification(t *testing.T) {
+	tests := []struct {
+		name             string
+		failure          *upstreamApplicationFailure
+		retry            bool
+		penalize         bool
+		immediateCircuit bool
+	}{
+		{name: "capacity", failure: newApplicationFailure("model is at capacity", "model_at_capacity"), retry: true, penalize: true},
+		{name: "subscription quota", failure: newApplicationFailure("daily usage limit reached", "insufficient_user_quota"), retry: true, penalize: true, immediateCircuit: true},
+		{name: "model permission", failure: newApplicationFailure("model is not permitted", "model_not_allowed")},
+		{name: "invalid request", failure: newApplicationFailure("invalid parameter", "invalid_request")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.failure.shouldRetry(); got != test.retry {
+				t.Errorf("shouldRetry() = %t, want %t", got, test.retry)
+			}
+			if got := test.failure.penalizesChannel(); got != test.penalize {
+				t.Errorf("penalizesChannel() = %t, want %t", got, test.penalize)
+			}
+			if got := test.failure.opensCircuitImmediately(); got != test.immediateCircuit {
+				t.Errorf("opensCircuitImmediately() = %t, want %t", got, test.immediateCircuit)
+			}
+		})
 	}
 }
 
@@ -4632,6 +4852,45 @@ func TestRelayRetriesFirstSSEApplicationErrorWithoutLeakingEvents(t *testing.T) 
 	}
 	attempts := relayAttempts(t, store)
 	if len(attempts) != 2 || attempts[0].Success || !strings.Contains(attempts[0].ResponseBody, "at capacity") || attempts[1].SelectionReason != SelectionReasonUpstreamApplicationError || !attempts[1].Success {
+		t.Fatalf("attempts = %+v", attempts)
+	}
+}
+
+func TestRelayCircuitsSSEAccountFailureAndSwitchesChannel(t *testing.T) {
+	store := newTestStore(t)
+	first := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"error\",\"error\":{\"code\":\"insufficient_user_quota\",\"message\":\"This subscription has reached today's usage limit.\"}}\n\n"))
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"switched\"}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_switched\",\"status\":\"completed\"}}\n\n"))
+	}))
+	defer second.Close()
+	token, _, channels, _ := createRouteFixture(t, store, RoutingPriorityWeighted, first.URL, second.URL)
+	body := []byte(`{"model":"public-model","stream":true,"input":"switch quota-limited stream"}`)
+	payload, err := ParseRelayPayload(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	if publicErr := newTestRelay(store).Relay(context.Background(), recorder, nil, "", "responses", token, payload, body); publicErr != nil {
+		t.Fatal(publicErr)
+	}
+	if output := recorder.Body.String(); !strings.Contains(output, "switched") || strings.Contains(output, "usage limit") {
+		t.Fatalf("downstream stream = %s", output)
+	}
+	var failedChannel Channel
+	if err := store.db.First(&failedChannel, channels[0].ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if failedChannel.CircuitLevel != CircuitLevelTemporary || failedChannel.CircuitOpenUntil == nil || !failedChannel.CircuitOpenUntil.After(time.Now()) {
+		t.Fatalf("failed channel = %+v", failedChannel)
+	}
+	attempts := relayAttempts(t, store)
+	if len(attempts) != 2 || attempts[1].SelectionReason != SelectionReasonCircuitOpened || !attempts[1].Success {
 		t.Fatalf("attempts = %+v", attempts)
 	}
 }

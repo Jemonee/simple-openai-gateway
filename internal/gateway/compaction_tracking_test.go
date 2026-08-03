@@ -259,6 +259,49 @@ func TestRecordRequestTracksSessionCompactionsOnce(t *testing.T) {
 	}
 }
 
+func TestFailedCompactionDoesNotIncrementSessionCount(t *testing.T) {
+	store := newTestStore(t)
+	token := ClientToken{
+		Name: "codex", KeyHash: hashSecret("sk-failed-compaction"), KeyPrefix: "sk-failed-compaction",
+		Enabled: true, AllowAllModels: true, RPM: 60, MaxConcurrency: 10,
+	}
+	if err := store.db.Create(&token).Error; err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{
+		"model":"gpt-5.6-sol",
+		"prompt_cache_key":"failed-compaction-session",
+		"client_metadata":{"x-codex-turn-metadata":{"request_kind":"compaction"}},
+		"input":"compact retained context"
+	}`)
+	payload, err := ParseRelayPayload(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution := &relayExecution{
+		requestID: "failed-compaction-request", token: &token, endpoint: "responses",
+		payload: payload, rawBody: body, startedAt: time.Now().UTC().Add(-time.Second),
+	}
+	relay := newTestRelay(store)
+	relay.recordRequestStarted(context.Background(), execution)
+	relay.recordRequest(context.Background(), execution, http.StatusBadGateway, "upstream failed")
+
+	var log RelayRequestLog
+	if err := store.db.First(&log, "id = ?", execution.requestID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !log.IsCompaction || log.Outcome != RelayOutcomeFailed {
+		t.Fatalf("failed compaction log = %+v", log)
+	}
+	var state RelaySessionState
+	if err := store.db.First(&state, "token_id = ? AND session_id = ?", token.ID, "failed-compaction-session").Error; err != nil {
+		t.Fatal(err)
+	}
+	if state.CompactionCount != 0 {
+		t.Fatalf("CompactionCount = %d, want 0", state.CompactionCount)
+	}
+}
+
 func TestBackfillCodexCompactionTracking(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().UTC()
@@ -277,6 +320,7 @@ func TestBackfillCodexCompactionTracking(t *testing.T) {
 	logs := []RelayRequestLog{
 		{ID: "historical-compaction-1", TokenID: 7, Endpoint: "responses", RequestedModel: "gpt-5.6-sol", CodexSessionID: "historical-session", RequestBody: compressStoredPayload(stringMetadataBody), StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, CreatedAt: now},
 		{ID: "historical-compaction-2", TokenID: 7, Endpoint: "responses", RequestedModel: "gpt-5.6-sol", CodexSessionID: "historical-session", RequestBody: compressStoredPayload(deltaBody), StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, CreatedAt: now.Add(time.Second)},
+		{ID: "historical-compaction-failed", TokenID: 7, Endpoint: "responses", RequestedModel: "gpt-5.6-sol", CodexSessionID: "historical-session", RequestBody: compressStoredPayload(stringMetadataBody), StatusCode: http.StatusBadGateway, Outcome: RelayOutcomeFailed, CreatedAt: now.Add(1500 * time.Millisecond)},
 		{ID: "historical-turn", TokenID: 7, Endpoint: "responses", RequestedModel: "gpt-5.6-sol", CodexSessionID: "historical-session", RequestBody: compressStoredPayload(normalBody), StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, CreatedAt: now.Add(2 * time.Second)},
 		{ID: "historical-payload-removed", TokenID: 7, Endpoint: "responses", RequestedModel: "gpt-5.6-sol", CodexSessionID: "historical-session", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, CreatedAt: now.Add(3 * time.Second)},
 	}
@@ -296,14 +340,23 @@ func TestBackfillCodexCompactionTracking(t *testing.T) {
 	if err := store.backfillCodexCompactionTracking(); err != nil {
 		t.Fatal(err)
 	}
+	var state RelaySessionState
+	if err := store.db.First(&state, "token_id = ? AND session_id = ?", 7, "historical-session").Error; err != nil {
+		t.Fatal(err)
+	}
+	if state.CompactionCount != 3 {
+		t.Fatalf("legacy CompactionCount = %d, want 3", state.CompactionCount)
+	}
+	if err := store.correctSuccessfulCodexCompactionCounts(); err != nil {
+		t.Fatal(err)
+	}
 	var marked int64
 	if err := store.db.Model(&RelayRequestLog{}).Where("is_compaction = ?", true).Count(&marked).Error; err != nil {
 		t.Fatal(err)
 	}
-	if marked != 2 {
-		t.Fatalf("marked compaction requests = %d, want 2", marked)
+	if marked != 3 {
+		t.Fatalf("marked compaction requests = %d, want 3", marked)
 	}
-	var state RelaySessionState
 	if err := store.db.First(&state, "token_id = ? AND session_id = ?", 7, "historical-session").Error; err != nil {
 		t.Fatal(err)
 	}
@@ -316,5 +369,35 @@ func TestBackfillCodexCompactionTracking(t *testing.T) {
 	}
 	if removed.IsCompaction {
 		t.Fatal("request without retained payload must not be guessed as a compaction")
+	}
+}
+
+func TestCorrectSuccessfulCodexCompactionCountsRepairsExistingState(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now().UTC()
+	logs := []RelayRequestLog{
+		{ID: "successful-compaction", TokenID: 7, Endpoint: "responses", CodexSessionID: "repair-session", IsCompaction: true, StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, CreatedAt: now},
+		{ID: "failed-compaction", TokenID: 7, Endpoint: "responses", CodexSessionID: "repair-session", IsCompaction: true, StatusCode: http.StatusBadGateway, Outcome: RelayOutcomeFailed, CreatedAt: now.Add(time.Second)},
+	}
+	if err := store.db.Create(&logs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Create(&RelaySessionState{
+		TokenID: 7, SessionID: "repair-session", CompactionCount: 3, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.correctSuccessfulCodexCompactionCounts(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.correctSuccessfulCodexCompactionCounts(); err != nil {
+		t.Fatal(err)
+	}
+	var state RelaySessionState
+	if err := store.db.First(&state, "token_id = ? AND session_id = ?", 7, "repair-session").Error; err != nil {
+		t.Fatal(err)
+	}
+	if state.CompactionCount != 2 {
+		t.Fatalf("CompactionCount = %d, want 2", state.CompactionCount)
 	}
 }
