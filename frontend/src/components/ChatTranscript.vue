@@ -129,36 +129,36 @@ watch(() => messages, async (currentMessages) => {
 </template>
 
 <style scoped>
-.chat-transcript { display: grid; border-block: 1px solid var(--rose-border); }
-.chat-message { min-width: 0; background: var(--rose-surface); }
-.chat-message + .chat-message { border-top: 1px solid var(--rose-border); }
-.chat-message.is-assistant { background: var(--rose-surface-muted); }
-.chat-message.is-error { border-left: 3px solid var(--rose-danger); background: var(--rose-danger-soft); }
-.message-summary { display: grid; grid-template-columns: 18px 20px 90px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 12px 14px; border: 0; background: transparent; color: var(--rose-text-muted); font: inherit; text-align: left; cursor: pointer; }
-.message-summary:hover { background: color-mix(in srgb, var(--rose-surface) 92%, var(--rose-primary)); }
-.message-summary:focus-visible { position: relative; z-index: 1; outline: 2px solid var(--rose-primary); outline-offset: -2px; }
-.message-summary strong { overflow: hidden; color: var(--rose-text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.chat-transcript { display: grid; border-block: 1px solid var(--hongfen-border); }
+.chat-message { min-width: 0; background: var(--hongfen-surface); }
+.chat-message + .chat-message { border-top: 1px solid var(--hongfen-border); }
+.chat-message.is-assistant { background: var(--hongfen-surface-muted); }
+.chat-message.is-error { border-left: 3px solid var(--hongfen-danger); background: var(--hongfen-danger-soft); }
+.message-summary { display: grid; grid-template-columns: 18px 20px 90px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 12px 14px; border: 0; background: transparent; color: var(--hongfen-text-muted); font: inherit; text-align: left; cursor: pointer; }
+.message-summary:hover { background: color-mix(in srgb, var(--hongfen-surface) 92%, var(--hongfen-primary)); }
+.message-summary:focus-visible { position: relative; z-index: 1; outline: 2px solid var(--hongfen-primary); outline-offset: -2px; }
+.message-summary strong { overflow: hidden; color: var(--hongfen-text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .message-summary > span { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.message-summary small { color: var(--rose-text-subtle); font: 10px var(--rose-font-mono); white-space: nowrap; }
+.message-summary small { color: var(--hongfen-text-subtle); font: 10px var(--hongfen-font-mono); white-space: nowrap; }
 .message-summary .el-icon { font-size: 15px; }
-.message-expand-icon { color: var(--rose-text-subtle); transition: transform 160ms ease; }
+.message-expand-icon { color: var(--hongfen-text-subtle); transition: transform 160ms ease; }
 .chat-message.is-expanded .message-expand-icon { transform: rotate(90deg); }
-.message-role-icon { color: var(--rose-primary); }
-.chat-message.is-error .message-summary, .chat-message.is-error .message-role-icon { color: var(--rose-danger); }
-.markdown-body { min-width: 0; max-height: 360px; margin: 0 14px 16px 50px; padding: 12px 14px; overflow: auto; border-left: 2px solid var(--rose-border-strong); background: var(--rose-surface); color: var(--rose-text); font-size: 13px; line-height: 1.72; overflow-wrap: anywhere; scrollbar-gutter: stable; }
-.markdown-body:focus-visible { outline: 2px solid var(--rose-primary); outline-offset: 2px; }
+.message-role-icon { color: var(--hongfen-primary); }
+.chat-message.is-error .message-summary, .chat-message.is-error .message-role-icon { color: var(--hongfen-danger); }
+.markdown-body { min-width: 0; max-height: 360px; margin: 0 14px 16px 50px; padding: 12px 14px; overflow: auto; border-left: 2px solid var(--hongfen-border-strong); background: var(--hongfen-surface); color: var(--hongfen-text); font-size: 13px; line-height: 1.72; overflow-wrap: anywhere; scrollbar-gutter: stable; }
+.markdown-body:focus-visible { outline: 2px solid var(--hongfen-primary); outline-offset: 2px; }
 .markdown-body :deep(> :first-child) { margin-top: 0; }
 .markdown-body :deep(> :last-child) { margin-bottom: 0; }
 .markdown-body :deep(p), .markdown-body :deep(ul), .markdown-body :deep(ol), .markdown-body :deep(blockquote), .markdown-body :deep(pre) { margin: 0 0 10px; }
 .markdown-body :deep(ul), .markdown-body :deep(ol) { padding-left: 22px; }
-.markdown-body :deep(blockquote) { padding: 6px 12px; border-left: 3px solid var(--rose-border-strong); color: var(--rose-text-muted); }
-.markdown-body :deep(code) { padding: 2px 5px; border: 1px solid var(--rose-border); background: var(--rose-surface); font-family: var(--rose-font-mono); font-size: .92em; }
-.markdown-body :deep(pre) { max-width: 100%; padding: 12px 14px; overflow: auto; border: 1px solid var(--rose-border); background: var(--rose-surface-muted); color: var(--rose-text); }
+.markdown-body :deep(blockquote) { padding: 6px 12px; border-left: 3px solid var(--hongfen-border-strong); color: var(--hongfen-text-muted); }
+.markdown-body :deep(code) { padding: 2px 5px; border: 1px solid var(--hongfen-border); background: var(--hongfen-surface); font-family: var(--hongfen-font-mono); font-size: .92em; }
+.markdown-body :deep(pre) { max-width: 100%; padding: 12px 14px; overflow: auto; border: 1px solid var(--hongfen-border); background: var(--hongfen-surface-muted); color: var(--hongfen-text); }
 .markdown-body :deep(pre code) { padding: 0; border: 0; color: inherit; background: transparent; }
 .markdown-body :deep(table) { width: 100%; border-collapse: collapse; }
-.markdown-body :deep(th), .markdown-body :deep(td) { padding: 7px 9px; border: 1px solid var(--rose-border); text-align: left; }
-.markdown-body :deep(a) { color: var(--rose-primary-hover); }
-.chat-empty { padding: 44px 16px; color: var(--rose-text-muted); text-align: center; }
+.markdown-body :deep(th), .markdown-body :deep(td) { padding: 7px 9px; border: 1px solid var(--hongfen-border); text-align: left; }
+.markdown-body :deep(a) { color: var(--hongfen-primary-hover); }
+.chat-empty { padding: 44px 16px; color: var(--hongfen-text-muted); text-align: center; }
 @media (max-width: 640px) {
   .message-summary { grid-template-columns: 18px 20px minmax(0, 1fr) auto; padding: 11px 10px; }
   .message-summary > span { grid-column: 3 / -1; }

@@ -195,8 +195,8 @@ onMounted(loadData)
 <style scoped>
 .model-checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 18px; }
 .secret-once { display: grid; gap: 10px; }
-.secret-once p { color: var(--rose-text-muted); }
-.secret-once code { padding: 14px; border: 1px solid var(--rose-border-strong); background: var(--rose-surface-muted); color: var(--rose-text); overflow-wrap: anywhere; user-select: all; }
+.secret-once p { color: var(--hongfen-text-muted); }
+.secret-once code { padding: 14px; border: 1px solid var(--hongfen-border-strong); background: var(--hongfen-surface-muted); color: var(--hongfen-text); overflow-wrap: anywhere; user-select: all; }
 .secret-once .el-button { justify-self: start; }
 @media (max-width: 520px) { .model-checks { grid-template-columns: 1fr; } }
 </style>

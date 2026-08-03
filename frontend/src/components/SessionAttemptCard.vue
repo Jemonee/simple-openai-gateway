@@ -113,47 +113,47 @@ function costSourceType(): 'success' | 'warning' | 'info' {
 </template>
 
 <style scoped>
-.attempt-card { container-type: inline-size; display: grid; min-width: 0; border: 1px solid var(--rose-border); border-left: 3px solid var(--rose-border-strong); background: var(--rose-surface); }
-.attempt-card.is-failed { border-left-color: var(--rose-danger); }
-.attempt-card.is-canceled { border-left-color: var(--rose-warning); }
+.attempt-card { container-type: inline-size; display: grid; min-width: 0; border: 1px solid var(--hongfen-border); border-left: 3px solid var(--hongfen-border-strong); background: var(--hongfen-surface); }
+.attempt-card.is-failed { border-left-color: var(--hongfen-danger); }
+.attempt-card.is-canceled { border-left-color: var(--hongfen-warning); }
 .attempt-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 13px 14px 12px; }
 .attempt-identity { display: grid; gap: 5px; min-width: 0; }
 .attempt-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 12px; min-width: 0; }
-.attempt-title > span { color: var(--rose-text-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
-.attempt-title > strong { overflow: hidden; color: var(--rose-text); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-.attempt-route { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 16px; min-width: 0; color: var(--rose-text-muted); font-size: 10px; }
+.attempt-title > span { color: var(--hongfen-text-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.attempt-title > strong { overflow: hidden; color: var(--hongfen-text); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.attempt-route { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 16px; min-width: 0; color: var(--hongfen-text-muted); font-size: 10px; }
 .attempt-route > span { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
-.attempt-route small { color: var(--rose-text-subtle); font-size: 9px; white-space: nowrap; }
-.attempt-route code { color: var(--rose-text-muted); overflow-wrap: anywhere; }
-.attempt-url { color: var(--rose-text-muted); }
+.attempt-route small { color: var(--hongfen-text-subtle); font-size: 9px; white-space: nowrap; }
+.attempt-route code { color: var(--hongfen-text-muted); overflow-wrap: anywhere; }
+.attempt-url { color: var(--hongfen-text-muted); }
 .attempt-badges { display: flex; align-items: center; justify-content: flex-end; flex: 0 0 auto; flex-wrap: wrap; gap: 7px; }
-.attempt-error { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: start; gap: 8px; margin: 0 14px 12px; padding: 8px 10px; color: var(--rose-danger); background: var(--rose-danger-soft); }
+.attempt-error { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: start; gap: 8px; margin: 0 14px 12px; padding: 8px 10px; color: var(--hongfen-danger); background: var(--hongfen-danger-soft); }
 .attempt-error .el-icon { margin-top: 2px; }
 .attempt-error > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; min-width: 0; }
 .attempt-error strong { flex: 0 0 auto; font-size: 10px; }
-.attempt-error code { color: var(--rose-danger); font-size: 11px; overflow-wrap: anywhere; }
-.attempt-error.is-canceled { color: var(--rose-warning); background: var(--rose-warning-soft); }
-.attempt-error.is-canceled code { color: var(--rose-warning); }
-.attempt-metric-groups { display: grid; grid-template-columns: minmax(250px, .9fr) minmax(400px, 1.5fr) minmax(190px, .7fr); border-top: 1px solid var(--rose-border); }
+.attempt-error code { color: var(--hongfen-danger); font-size: 11px; overflow-wrap: anywhere; }
+.attempt-error.is-canceled { color: var(--hongfen-warning); background: var(--hongfen-warning-soft); }
+.attempt-error.is-canceled code { color: var(--hongfen-warning); }
+.attempt-metric-groups { display: grid; grid-template-columns: minmax(250px, .9fr) minmax(400px, 1.5fr) minmax(190px, .7fr); border-top: 1px solid var(--hongfen-border); }
 .attempt-metric-group { min-width: 0; padding: 11px 14px 13px; }
-.attempt-metric-group + .attempt-metric-group { border-left: 1px solid var(--rose-border); }
-.metric-group-label { display: block; margin-bottom: 8px; color: var(--rose-text-subtle); font-size: 9px; font-weight: 650; }
+.attempt-metric-group + .attempt-metric-group { border-left: 1px solid var(--hongfen-border); }
+.metric-group-label { display: block; margin-bottom: 8px; color: var(--hongfen-text-subtle); font-size: 9px; font-weight: 650; }
 .attempt-metric-group dl { display: grid; gap: 9px 12px; margin: 0; font-variant-numeric: tabular-nums; }
 .performance-metrics dl { grid-template-columns: repeat(3, minmax(68px, 1fr)); }
 .usage-metrics dl { grid-template-columns: repeat(5, minmax(64px, 1fr)); }
 .cost-metrics dl { grid-template-columns: repeat(2, minmax(78px, 1fr)); }
 .attempt-metric-group dl > div { display: grid; gap: 2px; min-width: 0; }
-.attempt-metric-group dt { color: var(--rose-text-muted); font-size: 10px; white-space: nowrap; }
-.attempt-metric-group dd { margin: 0; color: var(--rose-text); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.attempt-metric-group dt { color: var(--hongfen-text-muted); font-size: 10px; white-space: nowrap; }
+.attempt-metric-group dd { margin: 0; color: var(--hongfen-text); font-size: 12px; font-weight: 600; white-space: nowrap; }
 @container (max-width: 900px) {
   .attempt-metric-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .cost-metrics { grid-column: 1 / -1; border-top: 1px solid var(--rose-border); border-left: 0 !important; }
+  .cost-metrics { grid-column: 1 / -1; border-top: 1px solid var(--hongfen-border); border-left: 0 !important; }
 }
 @container (max-width: 620px) {
   .attempt-header { align-items: stretch; flex-direction: column; gap: 10px; }
   .attempt-badges { justify-content: flex-start; }
   .attempt-metric-groups { grid-template-columns: 1fr; }
-  .attempt-metric-group + .attempt-metric-group { border-top: 1px solid var(--rose-border); border-left: 0; }
+  .attempt-metric-group + .attempt-metric-group { border-top: 1px solid var(--hongfen-border); border-left: 0; }
   .cost-metrics { grid-column: auto; }
   .usage-metrics dl { grid-template-columns: repeat(3, minmax(64px, 1fr)); }
 }

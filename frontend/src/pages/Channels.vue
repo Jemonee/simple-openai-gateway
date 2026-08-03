@@ -41,6 +41,15 @@ interface MappingGroup {
 }
 
 const maxVisibleChannelModels = 3
+const quickStepMinimumVisibleMs = 650
+const quickCompletionVisibleMs = 300
+const quickProgressMessages = [
+  '正在验证 Base URL 和 API key，请稍候…',
+  '正在获取上游模型列表，请稍候…',
+  '正在自动映射模型并计算价格，请稍候…',
+  '正在保存渠道并刷新列表，请稍候…',
+  '渠道设置已完成，即将关闭…',
+]
 const loading = ref(true)
 const saving = ref(false)
 const errorMessage = ref('')
@@ -68,6 +77,11 @@ const resettingCircuitChannelId = ref<number | null>(null)
 const currentTime = ref(Date.now())
 const drawerTitle = computed(() => editingId.value ? '编辑渠道' : '新增渠道')
 const quickDialogTitle = computed(() => editingId.value ? '快速设置渠道' : '快速新增渠道')
+const quickProgressMessage = computed(() => quickProgressMessages[Math.min(quickStep.value, quickProgressMessages.length - 1)])
+const todayAttemptTotal = computed(() => channels.value.reduce((total, channel) => total + Math.max(0, channel.metrics.todayAttemptCount), 0))
+const hottestChannelUsageShare = computed(() => channels.value.reduce((hottest, channel) => (
+  channel.enabled ? Math.max(hottest, channelUsageShare(channel)) : hottest
+), 0))
 const sortedChannels = computed(() => [...channels.value].sort(compareChannels))
 const filteredChannels = computed(() => {
   const query = channelSearchQuery.value.trim().toLocaleLowerCase()
@@ -100,6 +114,7 @@ const modelHueByName = computed(() => {
   }
   return hues
 })
+let quickStepStartedAt = 0
 let mappingDraftSequence = 0
 let discoveryRequestVersion = 0
 let clockTimer: ReturnType<typeof setInterval> | undefined
@@ -110,9 +125,14 @@ function channelSortLatency(channel: Channel): number {
   return Number.POSITIVE_INFINITY
 }
 
+function channelUsageShare(channel: Channel): number {
+  const total = todayAttemptTotal.value
+  return total > 0 ? Math.max(0, channel.metrics.todayAttemptCount) / total : 0
+}
+
 function compareChannels(left: Channel, right: Channel): number {
   return Number(right.enabled) - Number(left.enabled)
-    || right.metrics.recentAttemptCount - left.metrics.recentAttemptCount
+    || channelUsageShare(right) - channelUsageShare(left)
     || channelSortLatency(left) - channelSortLatency(right)
     || left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' })
 }
@@ -230,6 +250,20 @@ function openQuick() {
   drawerOpen.value = false
   quickDialogOpen.value = true
   quickError.value = ''
+}
+
+function showQuickStep(step: number) {
+  quickStep.value = step
+  quickStepStartedAt = Date.now()
+}
+
+function waitForDuration(duration: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, duration))
+}
+
+async function waitForQuickStepMinimum() {
+  const remaining = quickStepMinimumVisibleMs - (Date.now() - quickStepStartedAt)
+  if (remaining > 0) await waitForDuration(remaining)
 }
 
 function inferredChannelName() {
@@ -426,25 +460,32 @@ async function quickSetup() {
   form.name = inferredChannelName()
   quickProcessing.value = true
   quickError.value = ''
-  quickStep.value = 1
-  const discovered = await discoverChannelModels(false)
+  showQuickStep(0)
+  const discoveryPromise = discoverChannelModels(false)
+  await waitForQuickStepMinimum()
+  showQuickStep(1)
+  const discovered = await discoveryPromise
+  await waitForQuickStepMinimum()
   if (!discovered) {
     quickProcessing.value = false
     quickError.value = discoveryError.value || '模型获取失败，请检查连接配置'
     return
   }
-  quickStep.value = 2
+  showQuickStep(2)
   const configuredUpstreams = new Set(mappings.value.map((mapping) => mapping.upstreamModel.trim()))
   mergeDiscoveredMappings(discoveredModels.value, true)
   for (const mapping of mappings.value) {
     if (!configuredUpstreams.has(mapping.upstreamModel.trim()) && mapping.modelId) mapping.enabled = true
   }
   applyOfficialPriceMultiplier()
-  quickStep.value = 3
+  await waitForQuickStepMinimum()
+  showQuickStep(3)
   const enabledCount = mappings.value.filter((mapping) => mapping.enabled && !configuredUpstreams.has(mapping.upstreamModel.trim())).length
   const saved = await saveChannel(false)
+  await waitForQuickStepMinimum()
   if (saved) {
     quickStep.value = 4
+    await waitForDuration(quickCompletionVisibleMs)
     quickDialogOpen.value = false
     ElMessage.success(`操作成功，新增启用模型 ${enabledCount} 个`)
   } else {
@@ -553,7 +594,25 @@ function circuitRemaining(channel: Channel): string {
 }
 
 function channelRowClassName({ row }: { row: Channel }): string {
-  return hasCircuitMark(row) ? 'channel-row--circuit-open' : ''
+  return [
+    row.enabled ? 'channel-row--enabled' : 'channel-row--disabled',
+    row.enabled && channelUsageShare(row) > 0 ? 'channel-row--has-usage' : '',
+    hasCircuitMark(row) ? 'channel-row--circuit-open' : '',
+  ].filter(Boolean).join(' ')
+}
+
+function channelRowStyle({ row }: { row: Channel }): CSSProperties {
+  const share = channelUsageShare(row)
+  const percentage = Math.min(100, Math.max(0, share * 100))
+  const temperature = hottestChannelUsageShare.value > 0
+    ? Math.min(100, Math.max(0, share / hottestChannelUsageShare.value * 100))
+    : 0
+  return {
+    '--channel-heat-stop': `${percentage.toFixed(2)}%`,
+    '--channel-heat-mid': `${(percentage * 0.58).toFixed(2)}%`,
+    '--channel-heat-edge': `${Math.min(100, percentage + 1.4).toFixed(2)}%`,
+    '--channel-heat-tone': `color-mix(in oklab, var(--hongfen-primary) ${(100 - temperature).toFixed(2)}%, var(--hongfen-danger) ${temperature.toFixed(2)}%)`,
+  }
 }
 
 async function loadData() {
@@ -708,19 +767,19 @@ onUnmounted(() => {
         <div><strong>渠道列表</strong><span>{{ filteredChannels.length }} / {{ channels.length }} 个渠道</span></div>
         <el-input v-model="channelSearchQuery" class="channel-search" clearable :prefix-icon="Search" aria-label="按渠道名称或 Base URL 筛选" placeholder="筛选名称或 Base URL" />
       </header>
-      <el-table v-loading="loading" :data="filteredChannels" row-key="id" height="var(--channel-table-height)" :empty-text="channelTableEmptyText" :row-class-name="channelRowClassName">
+      <el-table v-loading="loading" :data="filteredChannels" row-key="id" height="var(--channel-table-height)" :empty-text="channelTableEmptyText" :row-class-name="channelRowClassName" :row-style="channelRowStyle">
         <el-table-column label="渠道" width="228" fixed="left">
           <template #default="scope"><div class="primary-cell"><strong>{{ scope.row.name }}</strong><small>{{ scope.row.baseUrl }}</small></div></template>
         </el-table-column>
-        <el-table-column label="状态" width="116">
+        <el-table-column label="状态" width="260">
           <template #default="scope">
             <div class="channel-state-cell" :class="{ 'is-circuit-open': hasCircuitMark(scope.row) }">
               <div class="channel-state-heading">
                 <el-tag :type="channelState(scope.row).type" effect="plain">{{ channelState(scope.row).label }}</el-tag>
                 <strong v-if="hasCircuitMark(scope.row)">{{ circuitRemaining(scope.row) }}</strong>
               </div>
-              <el-tooltip v-if="hasCircuitMark(scope.row) && scope.row.lastError" :content="scope.row.lastError" placement="top" :show-after="250">
-                <small tabindex="0">{{ scope.row.lastError }}</small>
+              <el-tooltip v-if="scope.row.lastError" :content="scope.row.lastError" placement="top" :show-after="250" popper-class="channel-error-popper">
+                <small class="channel-error-preview" tabindex="0"><span class="channel-error-indicator" aria-hidden="true" />最近错误：{{ scope.row.lastError }}</small>
               </el-tooltip>
             </div>
           </template>
@@ -728,12 +787,14 @@ onUnmounted(() => {
         <el-table-column label="价格倍率" width="88" align="right">
           <template #default="scope"><span class="price-multiplier">{{ formatPriceMultiplier(scope.row.priceMultiplierBasisPoints) }}</span></template>
         </el-table-column>
-        <el-table-column label="近 30 分钟成功率" width="154" align="right">
+        <el-table-column label="今日使用占比" width="190" align="right">
           <template #default="scope">
             <div class="metric-copy success-metric">
-              <strong>{{ formatPercent(scope.row.metrics.recentSuccessRate) }}</strong>
-              <small v-if="scope.row.metrics.recentAttemptCount">{{ formatCompactNumber(scope.row.metrics.recentSuccessCount) }} / {{ formatCompactNumber(scope.row.metrics.recentAttemptCount) }} 次尝试</small>
-              <small v-else>暂无调用，按 100%</small>
+              <strong class="usage-share-value">{{ formatPercent(channelUsageShare(scope.row)) }}</strong>
+              <small v-if="scope.row.metrics.todayAttemptCount">今日 {{ formatCompactNumber(scope.row.metrics.todayAttemptCount) }} 次尝试</small>
+              <small v-else>今日暂无调用</small>
+              <small v-if="scope.row.metrics.recentAttemptCount">近 30 分钟成功率 {{ formatPercent(scope.row.metrics.recentSuccessRate) }} · {{ formatCompactNumber(scope.row.metrics.recentSuccessCount) }} / {{ formatCompactNumber(scope.row.metrics.recentAttemptCount) }}</small>
+              <small v-else>近 30 分钟暂无成功率样本</small>
             </div>
           </template>
         </el-table-column>
@@ -805,7 +866,7 @@ onUnmounted(() => {
 
     <el-dialog v-model="quickDialogOpen" :title="quickDialogTitle" width="min(520px, calc(100vw - 32px))" destroy-on-close :close-on-click-modal="false" :close-on-press-escape="!quickProcessing" :show-close="!quickProcessing">
       <div v-if="quickProcessing" class="quick-setup-progress" aria-live="polite">
-        <p>正在连接上游并准备模型映射，请稍候…</p>
+        <p>{{ quickProgressMessage }}</p>
         <el-steps direction="vertical" :active="quickStep" finish-status="success">
           <el-step title="验证 Base URL 和 API key" />
           <el-step title="获取上游模型列表" />
@@ -964,17 +1025,42 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+:deep(.el-table__body tr.channel-row--enabled > td.el-table__cell) {
+  background: transparent;
+  transition: background-color 180ms ease;
+}
+:deep(.el-table__body tr.channel-row--enabled) { background: var(--hongfen-surface); }
+:deep(.el-table__body tr.channel-row--enabled.channel-row--has-usage) {
+  background-image: linear-gradient(90deg,
+    color-mix(in srgb, var(--hongfen-primary) 18%, var(--hongfen-surface)) 0%,
+    color-mix(in srgb, var(--channel-heat-tone) 24%, var(--hongfen-surface)) var(--channel-heat-mid),
+    color-mix(in srgb, var(--channel-heat-tone) 13%, var(--hongfen-surface)) var(--channel-heat-stop),
+    var(--hongfen-surface) var(--channel-heat-edge),
+    var(--hongfen-surface) 100%);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+}
+:deep(.el-table__body tr.channel-row--enabled:hover > td.el-table__cell) { background: color-mix(in srgb, var(--channel-heat-tone, var(--hongfen-primary)) 5%, transparent); }
+:deep(.el-table__body tr.channel-row--disabled > td.el-table__cell),
+:deep(.el-table__body tr.channel-row--disabled:hover > td.el-table__cell) { background: color-mix(in srgb, var(--hongfen-text-subtle) 7%, var(--hongfen-surface-muted)); }
+:deep(.el-table__body tr.channel-row--disabled > td.el-table__cell:first-child) { box-shadow: inset 3px 0 0 var(--hongfen-border-strong); }
+:deep(.el-table__body tr.channel-row--disabled .primary-cell strong),
+:deep(.el-table__body tr.channel-row--disabled .metric-copy strong),
+:deep(.el-table__body tr.channel-row--disabled .price-multiplier) { color: var(--hongfen-text-muted); }
 :deep(.el-table__body tr.channel-row--circuit-open > td.el-table__cell),
-:deep(.el-table__body tr.channel-row--circuit-open:hover > td.el-table__cell) { background: var(--rose-danger-soft); }
-:deep(.el-table__body tr.channel-row--circuit-open > td.el-table__cell:first-child) { box-shadow: inset 3px 0 0 var(--rose-danger); }
+:deep(.el-table__body tr.channel-row--circuit-open:hover > td.el-table__cell) { background: var(--hongfen-danger-soft); }
+:deep(.el-table__body tr.channel-row--circuit-open > td.el-table__cell:first-child) { box-shadow: inset 3px 0 0 var(--hongfen-danger); }
 .channel-state-cell { display: grid; min-width: 0; gap: 3px; }
 .channel-state-cell :deep(.el-tag) { max-width: 100%; }
 .channel-state-heading { display: flex; align-items: center; gap: 5px; min-width: 0; }
-.channel-state-heading strong { color: var(--rose-danger); font-family: var(--rose-font-mono); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.channel-state-cell small { display: block; max-width: 100%; overflow: hidden; color: var(--rose-text-muted); font-size: 11px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
-.channel-state-cell.is-circuit-open small { color: var(--rose-danger); cursor: help; }
-.reset-circuit-button { color: var(--rose-danger); }
-.channel-page { --channel-table-height: min(660px, max(360px, calc(100dvh - var(--rose-header-height) - 220px))); }
+.channel-state-heading strong { color: var(--hongfen-danger); font-family: var(--hongfen-font-mono); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.channel-state-cell small { display: block; max-width: 100%; overflow: hidden; color: var(--hongfen-text-muted); font-size: 11px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.channel-error-preview { position: relative; display: -webkit-box !important; padding-left: 11px; color: var(--hongfen-danger) !important; line-height: 1.4 !important; overflow-wrap: anywhere; white-space: normal !important; cursor: help; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.channel-error-indicator { position: absolute; top: 5px; left: 0; width: 6px; height: 6px; border-radius: 50%; background: var(--hongfen-danger); }
+.channel-state-cell.is-circuit-open small { color: var(--hongfen-danger); cursor: help; }
+:global(.channel-error-popper) { max-width: min(560px, calc(100vw - 32px)); line-height: 1.5; overflow-wrap: anywhere; }
+.reset-circuit-button { color: var(--hongfen-danger); }
+.channel-page { --channel-table-height: min(660px, max(360px, calc(100dvh - var(--hongfen-header-height) - 220px))); }
 @media (min-width: 961px) {
   .channel-page { height: 100%; min-height: 0; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; --channel-table-height: calc(100% - 59px); }
   .channel-page > .table-panel { min-height: 0; }
@@ -982,73 +1068,79 @@ onUnmounted(() => {
 .quick-setup-form { display: grid; gap: 8px; }
 .quick-setup-form :deep(.el-input-number) { width: 100%; }
 .quick-setup-progress { min-height: 260px; padding: 8px 12px; }
-.quick-setup-progress p { margin: 0 0 18px; color: var(--rose-text-muted); font-size: 12px; }
+.quick-setup-progress p { margin: 0 0 18px; color: var(--hongfen-text-muted); font-size: 12px; }
+.quick-setup-progress :deep(.el-step__head.is-process .el-step__icon) { position: relative; border-color: var(--hongfen-primary); color: var(--hongfen-primary-hover); }
+.quick-setup-progress :deep(.el-step__head.is-process .el-step__icon::after) { position: absolute; inset: -7px; border: 1px solid var(--hongfen-primary); border-radius: 50%; content: ''; animation: quick-step-pulse 1.2s ease-out infinite; pointer-events: none; }
+.quick-setup-progress :deep(.el-step__title.is-process) { color: var(--hongfen-text); font-weight: 650; }
+@keyframes quick-step-pulse { 0% { opacity: 0; transform: scale(0.72); } 30% { opacity: 0.65; } 100% { opacity: 0; transform: scale(1.08); } }
 .quick-dialog-actions, .drawer-actions { display: flex; align-items: center; gap: 8px; }
 .quick-dialog-actions > span, .drawer-actions > span { flex: 1; }
-.channel-list-toolbar { display: flex; min-height: 58px; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--rose-border); background: var(--rose-surface-muted); }
+.channel-list-toolbar { display: flex; min-height: 58px; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--hongfen-border); background: var(--hongfen-surface-muted); }
 .channel-list-toolbar > div { display: grid; min-width: 0; gap: 2px; }
-.channel-list-toolbar strong { color: var(--rose-text); font-size: 14px; font-weight: 650; }
-.channel-list-toolbar span { color: var(--rose-text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.channel-list-toolbar strong { color: var(--hongfen-text); font-size: 14px; font-weight: 650; }
+.channel-list-toolbar span { color: var(--hongfen-text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .channel-search { width: min(360px, 44vw); }
 .model-discovery-heading { margin-top: 0; }
 .model-discovery-actions { display: flex; align-items: center; gap: 8px; }
 .model-discovery-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 0; }
-.supported-model-table { margin-bottom: 4px; border: 1px solid var(--rose-border); }
+.supported-model-table { margin-bottom: 4px; border: 1px solid var(--hongfen-border); }
 .supported-model-table :deep(.el-table__row) { cursor: pointer; }
-.supported-model-table :deep(.el-table__row.is-filtering-mappings > td.el-table__cell) { background: var(--rose-primary-soft); }
-.upstream-model-filter { max-width: 100%; padding: 0; overflow: hidden; border: 0; color: var(--rose-primary-hover); background: transparent; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-.upstream-model-filter:focus-visible { border-radius: 2px; outline: 2px solid var(--rose-primary); outline-offset: 2px; }
+.supported-model-table :deep(.el-table__row.is-filtering-mappings > td.el-table__cell) { background: var(--hongfen-primary-soft); }
+.upstream-model-filter { max-width: 100%; padding: 0; overflow: hidden; border: 0; color: var(--hongfen-primary-hover); background: transparent; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.upstream-model-filter:focus-visible { border-radius: 2px; outline: 2px solid var(--hongfen-primary); outline-offset: 2px; }
 .public-model-cell { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .public-model-cell code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.official-price { font-family: var(--rose-font-mono); font-size: 11px; white-space: nowrap; }
+.official-price { font-family: var(--hongfen-font-mono); font-size: 11px; white-space: nowrap; }
 .upstream-model-option { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
 .upstream-model-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.upstream-model-option small { flex-shrink: 0; color: var(--rose-text-subtle); font-size: 11px; }
+.upstream-model-option small { flex-shrink: 0; color: var(--hongfen-text-subtle); font-size: 11px; }
 .channel-model-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: 100%; }
 .channel-model-tag { max-width: 126px; }
 .channel-model-tag :deep(.el-tag__content) { min-width: 0; }
 .channel-model-tag-label { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .channel-model-more-tag { flex-shrink: 0; cursor: help; font-variant-numeric: tabular-nums; }
 .channel-model-overflow-content { display: flex; flex-wrap: wrap; gap: 6px; max-width: 360px; max-height: 220px; overflow-y: auto; padding: 2px; }
-.price-multiplier { color: var(--rose-text); font-family: var(--rose-font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.price-multiplier { color: var(--hongfen-text); font-family: var(--hongfen-font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
 .latency-metric-cell { display: flex; align-items: center; gap: 8px; min-height: 48px; }
 .metric-copy { display: grid; min-width: 0; gap: 2px; font-variant-numeric: tabular-nums; }
-.metric-copy strong { color: var(--rose-text); font-size: 13px; font-weight: 650; }
-.metric-copy small { color: var(--rose-text-muted); font-size: 11px; line-height: 1.35; white-space: nowrap; }
+.metric-copy strong { color: var(--hongfen-text); font-size: 13px; font-weight: 650; }
+.metric-copy small { color: var(--hongfen-text-muted); font-size: 11px; line-height: 1.35; white-space: nowrap; }
 .success-metric { justify-items: end; }
+.usage-share-value { color: var(--hongfen-primary-hover) !important; font: 700 16px/1.15 var(--hongfen-font-mono) !important; }
+:deep(.el-table__body tr.channel-row--disabled .usage-share-value) { color: var(--hongfen-text-muted) !important; }
 .cache-metric { width: 132px; }
-.cache-meter { width: 100%; height: 4px; overflow: hidden; border-radius: 2px; background: var(--rose-border); }
-.cache-meter span { display: block; height: 100%; background: var(--rose-amber); }
+.cache-meter { width: 100%; height: 4px; overflow: hidden; border-radius: 2px; background: var(--hongfen-border); }
+.cache-meter span { display: block; height: 100%; background: var(--hongfen-amber); }
 .mapping-group { display: grid; gap: 10px; margin-top: 14px; }
-.mapping-group-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--rose-border); }
-.mapping-group-heading h4 { color: var(--rose-text); font-size: 13px; font-weight: 650; }
-.mapping-group-heading span { color: var(--rose-text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-.mapping-group-empty { padding: 14px; border: 1px dashed var(--rose-border-strong); color: var(--rose-text-muted); font-size: 12px; text-align: center; }
-.mapping-editor { margin-bottom: 12px; padding: 14px; border: 1px solid var(--rose-border); border-radius: 6px; background: var(--rose-surface); }
-.mapping-editor-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--rose-border); }
+.mapping-group-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--hongfen-border); }
+.mapping-group-heading h4 { color: var(--hongfen-text); font-size: 13px; font-weight: 650; }
+.mapping-group-heading span { color: var(--hongfen-text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.mapping-group-empty { padding: 14px; border: 1px dashed var(--hongfen-border-strong); color: var(--hongfen-text-muted); font-size: 12px; text-align: center; }
+.mapping-editor { margin-bottom: 12px; padding: 14px; border: 1px solid var(--hongfen-border); border-radius: 6px; background: var(--hongfen-surface); }
+.mapping-editor-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--hongfen-border); }
 .mapping-editor-header > div:first-child { display: grid; min-width: 0; gap: 2px; }
-.mapping-editor-header strong { color: var(--rose-text); font-size: 13px; }
-.mapping-editor-header span { overflow: hidden; color: var(--rose-text-muted); font-family: var(--rose-font-mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.mapping-editor-header strong { color: var(--hongfen-text); font-size: 13px; }
+.mapping-editor-header span { overflow: hidden; color: var(--hongfen-text-muted); font-family: var(--hongfen-font-mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .mapping-editor-actions { display: flex; flex-shrink: 0; align-items: center; gap: 10px; }
-.mapping-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) auto; align-items: center; gap: 10px 16px; margin-top: 10px; padding: 10px 0; border-block: 1px solid var(--rose-border); }
+.mapping-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) auto; align-items: center; gap: 10px 16px; margin-top: 10px; padding: 10px 0; border-block: 1px solid var(--hongfen-border); }
 .mapping-bulk-actions, .mapping-price-actions, .multiplier-control { display: flex; align-items: center; gap: 8px; }
 .mapping-bulk-actions { flex-wrap: wrap; justify-content: flex-end; }
 .mapping-price-actions { flex-wrap: wrap; justify-content: flex-end; }
-.multiplier-control span { color: var(--rose-text-muted); font-size: 11px; white-space: nowrap; }
+.multiplier-control span { color: var(--hongfen-text-muted); font-size: 11px; white-space: nowrap; }
 .multiplier-control :deep(.el-input-number) { width: 116px; }
 .mapping-model-grid, .mapping-routing-grid, .mapping-price-grid { display: grid; gap: 12px; }
 .mapping-model-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .mapping-routing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.mapping-price-section { margin-top: 2px; padding-top: 12px; border-top: 1px dashed var(--rose-border-strong); }
+.mapping-price-section { margin-top: 2px; padding-top: 12px; border-top: 1px dashed var(--hongfen-border-strong); }
 .mapping-price-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .mapping-price-title { display: grid; gap: 2px; }
-.mapping-price-title strong { color: var(--rose-text); font-size: 12px; }
-.mapping-price-title span { color: var(--rose-text-muted); font-size: 11px; }
+.mapping-price-title strong { color: var(--hongfen-text); font-size: 12px; }
+.mapping-price-title span { color: var(--hongfen-text-muted); font-size: 11px; }
 .mapping-price-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .mapping-editor :deep(.el-form-item) { margin-bottom: 12px; }
 .mapping-editor :deep(.el-select), .mapping-editor :deep(.el-input-number) { width: 100%; }
-.field-note { display: block; min-height: 30px; margin-top: 5px; color: var(--rose-text-muted); font-size: 11px; line-height: 1.35; }
-.mapping-empty { padding: 24px; border: 1px dashed var(--rose-border-strong); color: var(--rose-text-muted); text-align: center; }
+.field-note { display: block; min-height: 30px; margin-top: 5px; color: var(--hongfen-text-muted); font-size: 11px; line-height: 1.35; }
+.mapping-empty { padding: 24px; border: 1px dashed var(--hongfen-border-strong); color: var(--hongfen-text-muted); text-align: center; }
 @media (max-width: 860px) { .mapping-toolbar { grid-template-columns: 1fr; } .mapping-bulk-actions { justify-content: flex-start; } }
 @media (max-width: 720px) { .channel-page { --channel-table-height: 480px; } .channel-list-toolbar, .model-discovery-heading, .mapping-editor-header, .mapping-heading, .mapping-price-heading { align-items: flex-start; flex-direction: column; } .channel-search { width: 100%; } .model-discovery-actions, .mapping-bulk-actions, .mapping-price-actions { width: 100%; justify-content: flex-start; } .mapping-model-grid, .mapping-routing-grid, .mapping-price-grid { grid-template-columns: 1fr; } .mapping-editor-header { flex-direction: column; } .mapping-editor-actions { width: 100%; justify-content: space-between; } .field-note { min-height: 0; } }
 </style>

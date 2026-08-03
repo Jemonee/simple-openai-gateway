@@ -8,10 +8,10 @@
 
 body {
   min-height: 100vh;
-  color: var(--rose-text);
-  background: var(--rose-page);
+  color: var(--hongfen-text);
+  background: var(--hongfen-page);
   line-height: 1.5;
-  font-family: var(--rose-font-sans);
+  font-family: var(--hongfen-font-sans);
   font-size: 14px;
 	letter-spacing: 0;
   text-rendering: optimizeLegibility;

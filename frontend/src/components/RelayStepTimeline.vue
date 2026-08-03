@@ -111,38 +111,38 @@ function barStyle(step: RelayStepLog): CSSProperties {
 </template>
 
 <style scoped>
-.relay-step-timeline { margin-top: 12px; border-block: 1px solid var(--rose-border); background: var(--rose-surface); }
-.relay-step-timeline > header { min-height: 38px; background: var(--rose-surface-muted); }
+.relay-step-timeline { margin-top: 12px; border-block: 1px solid var(--hongfen-border); background: var(--hongfen-surface); }
+.relay-step-timeline > header { min-height: 38px; background: var(--hongfen-surface-muted); }
 .relay-step-toggle { display: grid; width: 100%; min-height: 38px; grid-template-columns: 18px auto minmax(0, 1fr); align-items: center; gap: 8px; padding: 0 10px; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }
-.relay-step-toggle:hover { background: color-mix(in srgb, var(--rose-surface-muted) 88%, var(--rose-primary)); }
-.relay-step-toggle:focus-visible { position: relative; z-index: 1; outline: 2px solid var(--rose-primary); outline-offset: -2px; }
-.relay-step-toggle strong { color: var(--rose-text); font-size: 12px; }
-.relay-step-toggle span { justify-self: end; overflow: hidden; color: var(--rose-text-muted); font-size: 10px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-.relay-step-expand-icon { color: var(--rose-text-subtle); transition: transform 150ms ease; }
+.relay-step-toggle:hover { background: color-mix(in srgb, var(--hongfen-surface-muted) 88%, var(--hongfen-primary)); }
+.relay-step-toggle:focus-visible { position: relative; z-index: 1; outline: 2px solid var(--hongfen-primary); outline-offset: -2px; }
+.relay-step-toggle strong { color: var(--hongfen-text); font-size: 12px; }
+.relay-step-toggle span { justify-self: end; overflow: hidden; color: var(--hongfen-text-muted); font-size: 10px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.relay-step-expand-icon { color: var(--hongfen-text-subtle); transition: transform 150ms ease; }
 .relay-step-expand-icon.is-expanded { transform: rotate(90deg); }
-.relay-step-timeline ol { display: grid; max-height: min(42dvh, 288px); margin: 0; padding: 0; overflow-y: auto; overscroll-behavior: contain; list-style: none; scrollbar-color: var(--rose-border-strong) var(--rose-surface-muted); scrollbar-gutter: stable; scrollbar-width: thin; }
+.relay-step-timeline ol { display: grid; max-height: min(42dvh, 288px); margin: 0; padding: 0; overflow-y: auto; overscroll-behavior: contain; list-style: none; scrollbar-color: var(--hongfen-border-strong) var(--hongfen-surface-muted); scrollbar-gutter: stable; scrollbar-width: thin; }
 .relay-step-timeline ol::-webkit-scrollbar { width: 8px; }
-.relay-step-timeline ol::-webkit-scrollbar-track { background: var(--rose-surface-muted); }
-.relay-step-timeline ol::-webkit-scrollbar-thumb { border: 2px solid var(--rose-surface-muted); background: var(--rose-border-strong); }
-.relay-step-timeline li { display: grid; min-width: 0; grid-template-columns: 24px minmax(210px, 1fr) minmax(180px, 1.35fr) 76px; align-items: center; gap: 10px; min-height: 40px; padding: 5px 10px; border-top: 1px solid var(--rose-border); }
+.relay-step-timeline ol::-webkit-scrollbar-track { background: var(--hongfen-surface-muted); }
+.relay-step-timeline ol::-webkit-scrollbar-thumb { border: 2px solid var(--hongfen-surface-muted); background: var(--hongfen-border-strong); }
+.relay-step-timeline li { display: grid; min-width: 0; grid-template-columns: 24px minmax(210px, 1fr) minmax(180px, 1.35fr) 76px; align-items: center; gap: 10px; min-height: 40px; padding: 5px 10px; border-top: 1px solid var(--hongfen-border); }
 .relay-step-timeline li:first-child { border-top: 0; }
-.relay-step-timeline li.is-failed { background: var(--rose-danger-soft); }
-.relay-step-timeline li.is-canceled { background: var(--rose-warning-soft); }
-.step-index { display: grid; width: 20px; height: 20px; place-items: center; border: 1px solid var(--rose-border-strong); border-radius: 50%; color: var(--rose-text-muted); font: 600 9px/1 var(--rose-font-mono); }
+.relay-step-timeline li.is-failed { background: var(--hongfen-danger-soft); }
+.relay-step-timeline li.is-canceled { background: var(--hongfen-warning-soft); }
+.step-index { display: grid; width: 20px; height: 20px; place-items: center; border: 1px solid var(--hongfen-border-strong); border-radius: 50%; color: var(--hongfen-text-muted); font: 600 9px/1 var(--hongfen-font-mono); }
 .step-identity { display: grid; min-width: 0; gap: 2px; }
 .step-identity > div { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 5px 8px; }
-.step-identity strong { color: var(--rose-text); font-size: 11px; }
-.step-identity small { overflow: hidden; color: var(--rose-text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-.step-category, .step-attempt { padding: 2px 5px; border: 1px solid var(--rose-border); color: var(--rose-text-muted); background: var(--rose-surface); font-size: 8px; line-height: 1; }
-.step-category.is-upstream { border-color: var(--rose-primary); color: var(--rose-primary-hover); }
-.step-category.is-downstream { border-color: var(--rose-success); color: var(--rose-success); }
-.step-category.is-storage { border-color: var(--rose-warning); color: var(--rose-warning); }
-.step-waterfall { position: relative; height: 8px; overflow: hidden; background: var(--rose-surface-muted); }
-.step-waterfall span { position: absolute; top: 0; bottom: 0; min-width: 2px; background: var(--rose-text-subtle); }
-.step-waterfall span.is-upstream { background: var(--rose-primary); }
-.step-waterfall span.is-downstream { background: var(--rose-success); }
-.step-waterfall span.is-storage { background: var(--rose-warning); }
-.relay-step-timeline time { color: var(--rose-text); font: 600 10px/1 var(--rose-font-mono); text-align: right; white-space: nowrap; }
+.step-identity strong { color: var(--hongfen-text); font-size: 11px; }
+.step-identity small { overflow: hidden; color: var(--hongfen-text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.step-category, .step-attempt { padding: 2px 5px; border: 1px solid var(--hongfen-border); color: var(--hongfen-text-muted); background: var(--hongfen-surface); font-size: 8px; line-height: 1; }
+.step-category.is-upstream { border-color: var(--hongfen-primary); color: var(--hongfen-primary-hover); }
+.step-category.is-downstream { border-color: var(--hongfen-success); color: var(--hongfen-success); }
+.step-category.is-storage { border-color: var(--hongfen-warning); color: var(--hongfen-warning); }
+.step-waterfall { position: relative; height: 8px; overflow: hidden; background: var(--hongfen-surface-muted); }
+.step-waterfall span { position: absolute; top: 0; bottom: 0; min-width: 2px; background: var(--hongfen-text-subtle); }
+.step-waterfall span.is-upstream { background: var(--hongfen-primary); }
+.step-waterfall span.is-downstream { background: var(--hongfen-success); }
+.step-waterfall span.is-storage { background: var(--hongfen-warning); }
+.relay-step-timeline time { color: var(--hongfen-text); font: 600 10px/1 var(--hongfen-font-mono); text-align: right; white-space: nowrap; }
 @media (max-width: 760px) {
   .relay-step-timeline li { grid-template-columns: 22px minmax(0, 1fr) 68px; gap: 8px; }
   .step-waterfall { grid-column: 2 / -1; grid-row: 2; }

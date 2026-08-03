@@ -133,20 +133,20 @@ function modeLabel(): string {
 </template>
 
 <style scoped>
-.route-decision { min-width: 0; border: 1px solid var(--rose-border); background: var(--rose-surface); }
+.route-decision { min-width: 0; border: 1px solid var(--hongfen-border); background: var(--hongfen-surface); }
 .decision-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 14px; cursor: pointer; }
-.decision-header:hover, .decision-header:focus-visible { background: var(--rose-surface-muted); outline: none; }
-.decision-header[aria-expanded="true"] { border-bottom: 1px solid var(--rose-border); }
-.decision-header:focus-visible { box-shadow: inset 0 0 0 2px var(--rose-primary); }
+.decision-header:hover, .decision-header:focus-visible { background: var(--hongfen-surface-muted); outline: none; }
+.decision-header[aria-expanded="true"] { border-bottom: 1px solid var(--hongfen-border); }
+.decision-header:focus-visible { box-shadow: inset 0 0 0 2px var(--hongfen-primary); }
 .decision-title { display: flex; align-items: flex-start; gap: 9px; min-width: 0; }
-.decision-expand-icon { flex: 0 0 auto; margin-top: 2px; color: var(--rose-text-subtle); transition: transform 150ms ease; }
+.decision-expand-icon { flex: 0 0 auto; margin-top: 2px; color: var(--hongfen-text-subtle); transition: transform 150ms ease; }
 .decision-expand-icon.is-expanded { transform: rotate(90deg); }
-.route-decision h4 { color: var(--rose-text); font-size: 13px; }
-.route-decision header p, .decision-note { margin-top: 3px; color: var(--rose-text-muted); font-size: 10px; }
-.decision-summary { display: grid; justify-items: end; gap: 4px; color: var(--rose-text-muted); font-size: 10px; }
-.decision-summary strong { display: flex; align-items: baseline; gap: 7px; color: var(--rose-text); font-size: 11px; }
-.decision-summary strong span { color: var(--rose-text-subtle); font-size: 9px; font-weight: 500; }
-.decision-summary code { color: var(--rose-primary-hover); overflow-wrap: anywhere; }
+.route-decision h4 { color: var(--hongfen-text); font-size: 13px; }
+.route-decision header p, .decision-note { margin-top: 3px; color: var(--hongfen-text-muted); font-size: 10px; }
+.decision-summary { display: grid; justify-items: end; gap: 4px; color: var(--hongfen-text-muted); font-size: 10px; }
+.decision-summary strong { display: flex; align-items: baseline; gap: 7px; color: var(--hongfen-text); font-size: 11px; }
+.decision-summary strong span { color: var(--hongfen-text-subtle); font-size: 9px; font-weight: 500; }
+.decision-summary code { color: var(--hongfen-primary-hover); overflow-wrap: anywhere; }
 .decision-table-wrap { overflow-x: auto; }
 table { width: 100%; min-width: 1180px; table-layout: fixed; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
 .channel-column { width: 190px; }
@@ -157,27 +157,27 @@ table { width: 100%; min-width: 1180px; table-layout: fixed; border-collapse: co
 .share-column { width: 130px; }
 .expectation-column { width: 86px; }
 .probability-column { width: 90px; }
-th { padding: 8px 10px; color: var(--rose-text-subtle); background: var(--rose-surface-muted); font-size: 9px; font-weight: 650; text-align: left; white-space: nowrap; }
-td { padding: 9px 10px; border-top: 1px solid var(--rose-border); color: var(--rose-text-muted); white-space: nowrap; }
+th { padding: 8px 10px; color: var(--hongfen-text-subtle); background: var(--hongfen-surface-muted); font-size: 9px; font-weight: 650; text-align: left; white-space: nowrap; }
+td { padding: 9px 10px; border-top: 1px solid var(--hongfen-border); color: var(--hongfen-text-muted); white-space: nowrap; }
 tbody tr:first-child td { border-top: 0; }
-tbody tr.selected { background: var(--rose-primary-soft); }
-.affinity tbody tr.selected { background: var(--rose-success-soft); }
+tbody tr.selected { background: var(--hongfen-primary-soft); }
+.affinity tbody tr.selected { background: var(--hongfen-success-soft); }
 td:first-child { display: grid; gap: 3px; min-width: 180px; white-space: normal; }
-.channel-name { display: flex; align-items: center; gap: 6px; color: var(--rose-text); font-weight: 650; }
-.channel-name i { width: 6px; height: 6px; border-radius: 50%; background: var(--rose-border-strong); }
-.selected .channel-name i { background: var(--rose-primary); }
-.affinity .selected .channel-name i { background: var(--rose-success); }
-.channel-name em { padding: 1px 5px; border: 1px solid var(--rose-primary); color: var(--rose-primary-hover); font-size: 8px; font-style: normal; font-weight: 600; }
-.affinity .channel-name em { border-color: var(--rose-success); color: var(--rose-success); }
+.channel-name { display: flex; align-items: center; gap: 6px; color: var(--hongfen-text); font-weight: 650; }
+.channel-name i { width: 6px; height: 6px; border-radius: 50%; background: var(--hongfen-border-strong); }
+.selected .channel-name i { background: var(--hongfen-primary); }
+.affinity .selected .channel-name i { background: var(--hongfen-success); }
+.channel-name em { padding: 1px 5px; border: 1px solid var(--hongfen-primary); color: var(--hongfen-primary-hover); font-size: 8px; font-style: normal; font-weight: 600; }
+.affinity .channel-name em { border-color: var(--hongfen-success); color: var(--hongfen-success); }
 td:nth-child(2) { display: table-cell; }
-td:nth-child(2) strong { margin-right: 3px; color: var(--rose-text); }
-td code { color: var(--rose-text-muted); overflow-wrap: anywhere; }
-td > small { display: block; margin-top: 4px; color: var(--rose-text-subtle); font-size: 9px; }
+td:nth-child(2) strong { margin-right: 3px; color: var(--hongfen-text); }
+td code { color: var(--hongfen-text-muted); overflow-wrap: anywhere; }
+td > small { display: block; margin-top: 4px; color: var(--hongfen-text-subtle); font-size: 9px; }
 .efficiency-cell { min-width: 190px; }
 .efficiency-cell > span { display: inline-block; margin: 0 8px 3px 0; }
-.probability { color: var(--rose-primary-hover); font-size: 12px; }
-.affinity .selected .probability { color: var(--rose-success); }
-.decision-note { margin: 0; padding: 9px 14px; border-top: 1px solid var(--rose-border); line-height: 1.5; }
+.probability { color: var(--hongfen-primary-hover); font-size: 12px; }
+.affinity .selected .probability { color: var(--hongfen-success); }
+.decision-note { margin: 0; padding: 9px 14px; border-top: 1px solid var(--hongfen-border); line-height: 1.5; }
 @media (max-width: 560px) {
   .decision-header { flex-direction: column; gap: 8px; }
   .decision-summary { justify-items: start; }

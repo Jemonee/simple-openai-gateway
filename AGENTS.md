@@ -214,7 +214,7 @@ pnpm --dir frontend build
 
 ## UI 方向
 
-编辑 Vue 页面、应用外壳或样式前，完整读取 `docs/design/supos-industrial/THEME.md`。未指定其他风格时，使用 `frontend/src/assets/supos-industrial.css` 中的 SUPOS 工业主题变量。现有页面只演示功能，布局可以按业务重做，但必须响应式、可访问，并覆盖加载、空数据、错误和成功状态。
+编辑 Vue 页面、应用外壳或样式前，完整读取 `docs/design/hongfen/THEME.md`。未指定其他风格时，延续 `frontend/src/assets/hongfen-theme.css` 定义的“红粉”主题。现有页面只演示功能，布局可以按业务重做，但必须响应式、可访问，并覆盖加载、空数据、错误和成功状态。
 
 ## 需求提示词模板
 

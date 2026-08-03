@@ -176,27 +176,27 @@ function boundaryLabel(index: number): string {
 
 <style scoped>
 .routing-weight-editor { padding: 28px 22px 12px; }
-.weight-track { position: relative; display: flex; height: 10px; margin: 10px 10px 30px; border-radius: 2px; background: var(--rose-surface-muted); }
+.weight-track { position: relative; display: flex; height: 10px; margin: 10px 10px 30px; border-radius: 2px; background: var(--hongfen-surface-muted); }
 .weight-segment { min-width: 0; height: 100%; transition: width 120ms ease; }
 .weight-segment:first-child { border-radius: 2px 0 0 2px; }
 .weight-segment:last-of-type { border-radius: 0 2px 2px 0; }
-.is-price { --weight-color: var(--rose-primary); }
-.is-efficiency { --weight-color: var(--rose-success); }
-.is-quality { --weight-color: var(--rose-warning); }
-.is-balance { --weight-color: var(--rose-danger); }
-.weight-segment.is-price, .weight-fields .is-price i { background: var(--rose-primary); }
-.weight-segment.is-efficiency, .weight-fields .is-efficiency i { background: var(--rose-success); }
-.weight-segment.is-quality, .weight-fields .is-quality i { background: var(--rose-warning); }
-.weight-segment.is-balance, .weight-fields .is-balance i { background: var(--rose-danger); }
-.divider-handle { position: absolute; z-index: 1; top: 50%; width: 22px; height: 22px; padding: 0; border: 3px solid var(--rose-surface); border-radius: 50%; background: var(--rose-text); box-shadow: 0 0 0 1px var(--rose-border-strong); cursor: ew-resize; touch-action: none; transform: translate(-50%, -50%); }
-.divider-handle:hover { background: var(--rose-primary); }
-.divider-handle:focus-visible { outline: 3px solid color-mix(in srgb, var(--rose-primary) 28%, transparent); outline-offset: 3px; }
+.is-price { --weight-color: var(--hongfen-primary); }
+.is-efficiency { --weight-color: var(--hongfen-success); }
+.is-quality { --weight-color: var(--hongfen-warning); }
+.is-balance { --weight-color: var(--hongfen-danger); }
+.weight-segment.is-price, .weight-fields .is-price i { background: var(--hongfen-primary); }
+.weight-segment.is-efficiency, .weight-fields .is-efficiency i { background: var(--hongfen-success); }
+.weight-segment.is-quality, .weight-fields .is-quality i { background: var(--hongfen-warning); }
+.weight-segment.is-balance, .weight-fields .is-balance i { background: var(--hongfen-danger); }
+.divider-handle { position: absolute; z-index: 1; top: 50%; width: 22px; height: 22px; padding: 0; border: 3px solid var(--hongfen-surface); border-radius: 50%; background: var(--hongfen-text); box-shadow: 0 0 0 1px var(--hongfen-border-strong); cursor: ew-resize; touch-action: none; transform: translate(-50%, -50%); }
+.divider-handle:hover { background: var(--hongfen-primary); }
+.divider-handle:focus-visible { outline: 3px solid color-mix(in srgb, var(--hongfen-primary) 28%, transparent); outline-offset: 3px; }
 .weight-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 .weight-fields label { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) 112px; align-items: center; gap: 10px; }
-.weight-fields label > span { display: flex; align-items: center; gap: 7px; color: var(--rose-text); font-size: 12px; font-weight: 650; }
+.weight-fields label > span { display: flex; align-items: center; gap: 7px; color: var(--hongfen-text); font-size: 12px; font-weight: 650; }
 .weight-fields label i { width: 8px; height: 8px; flex: none; border-radius: 50%; }
 .weight-fields :deep(.el-input-number) { width: 112px; }
-.weight-hint { margin: 14px 0 0; color: var(--rose-text-muted); font-size: 11px; line-height: 1.6; }
+.weight-hint { margin: 14px 0 0; color: var(--hongfen-text-muted); font-size: 11px; line-height: 1.6; }
 .is-disabled { opacity: 0.7; }
 @media (prefers-reduced-motion: reduce) { .weight-segment { transition: none; } }
 @media (max-width: 1080px) {

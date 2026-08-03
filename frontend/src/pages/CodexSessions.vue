@@ -61,19 +61,19 @@ function sessionRowStyle({ row }: { row: CodexSessionSummary }): CSSProperties {
   const health = sessionHealth(row)
   const score = health.score ?? 50
   const risk = 1 - score / 100
-  let tone = 'var(--rose-text-subtle)'
+  let tone = 'var(--hongfen-text-subtle)'
   if (health.score !== null && score >= 50) {
     const successWeight = Math.round((score - 50) * 2)
-    tone = `color-mix(in srgb, var(--rose-warning) ${100 - successWeight}%, var(--rose-success))`
+    tone = `color-mix(in srgb, var(--hongfen-warning) ${100 - successWeight}%, var(--hongfen-success))`
   } else if (health.score !== null) {
     const warningWeight = Math.round(score * 2)
-    tone = `color-mix(in srgb, var(--rose-danger) ${100 - warningWeight}%, var(--rose-warning))`
+    tone = `color-mix(in srgb, var(--hongfen-danger) ${100 - warningWeight}%, var(--hongfen-warning))`
   }
   const tint = health.kind === 'unknown' ? 3 : Math.round(5 + risk * 5)
   return {
     '--session-row-tone': tone,
-    '--session-row-fill': `color-mix(in srgb, var(--rose-surface) ${100 - tint}%, ${tone})`,
-    '--session-row-fill-hover': `color-mix(in srgb, var(--rose-surface) ${Math.max(0, 96 - tint)}%, ${tone})`,
+    '--session-row-fill': `color-mix(in srgb, var(--hongfen-surface) ${100 - tint}%, ${tone})`,
+    '--session-row-fill-hover': `color-mix(in srgb, var(--hongfen-surface) ${Math.max(0, 96 - tint)}%, ${tone})`,
   } as CSSProperties
 }
 
@@ -82,13 +82,28 @@ function compactionStyle(count: number): CSSProperties {
   const emphasis = normalizedCount === 0 ? 0 : Math.min(1, Math.log1p(normalizedCount) / Math.log1p(8))
   const dangerWeight = Math.round(emphasis * 100)
   const tone = normalizedCount === 0
-    ? 'var(--rose-text-subtle)'
-    : `color-mix(in srgb, var(--rose-warning) ${100 - dangerWeight}%, var(--rose-danger))`
+    ? 'var(--hongfen-text-subtle)'
+    : `color-mix(in srgb, var(--hongfen-warning) ${100 - dangerWeight}%, var(--hongfen-danger))`
   return {
     '--compaction-tone': tone,
     '--compaction-size': `${Math.round(14 + emphasis * 4)}px`,
     '--compaction-width': `${Math.round(12 + emphasis * 44)}px`,
   } as CSSProperties
+}
+
+function contextWindowLabel(session: CodexSessionSummary): string {
+  return session.contextWindowTokens > 0 ? `≈${formatCompactNumber(session.contextWindowTokens)}` : '待采样'
+}
+
+function contextWindowSourceLabel(session: CodexSessionSummary): string {
+  return session.contextWindowSource === 'session_compaction' ? '本会话' : '同 Agent'
+}
+
+function contextWindowTooltip(session: CodexSessionSummary): string {
+  const model = session.primaryModel || session.latestModel || '未知模型'
+  if (session.contextWindowTokens <= 0) return `${model} 与当前 Agent 尚无自动压缩样本`
+  const source = session.contextWindowSource === 'session_compaction' ? '本会话' : '相同 Agent 与主模型'
+  return `${source}的 ${formatCompactNumber(session.contextWindowSampleCount)} 个自动压缩样本推断，主模型 ${model}`
 }
 
 function sessionClientSource(session: CodexSessionSummary): { label: string; kind: 'codex' | 'copilot' | 'other' } {
@@ -285,7 +300,8 @@ onMounted(async () => {
             <div class="route-cell">
               <div v-if="scope.row.currentChannel" class="channel-title"><strong>{{ scope.row.currentChannel.channelName }}</strong><el-tag :type="channelState(scope.row).type" effect="plain">{{ channelState(scope.row).label }}</el-tag></div>
               <div v-else class="channel-title"><strong class="muted-text">未进入上游渠道</strong><el-tag type="info" effect="plain">未分配</el-tag></div>
-              <small><span>模型</span><code>{{ scope.row.latestModel }}</code><span v-if="scope.row.currentChannel">上游</span><code v-if="scope.row.currentChannel">{{ scope.row.currentChannel.upstreamModel }}</code></small>
+              <small><span>主模型</span><code>{{ scope.row.primaryModel || scope.row.latestModel }}</code><span v-if="scope.row.latestModel && scope.row.latestModel !== scope.row.primaryModel">最近</span><code v-if="scope.row.latestModel && scope.row.latestModel !== scope.row.primaryModel">{{ scope.row.latestModel }}</code></small>
+              <small v-if="scope.row.currentChannel"><span>上游</span><code>{{ scope.row.currentChannel.upstreamModel }}</code></small>
               <small><span>令牌</span>{{ scope.row.tokenName || `令牌 #${scope.row.tokenId}` }}<code>{{ scope.row.tokenKeyPrefix || '无历史前缀' }}</code></small>
             </div>
           </template>
@@ -299,7 +315,19 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="压缩次数" width="104" align="right"><template #default="scope"><div class="compaction-cell" :style="compactionStyle(scope.row.compactionCount)"><strong>{{ formatCompactNumber(scope.row.compactionCount) }}</strong><small>次压缩</small><i aria-hidden="true" /></div></template></el-table-column>
+        <el-table-column label="上下文 / 压缩" width="142" align="right">
+          <template #default="scope">
+            <el-tooltip :content="contextWindowTooltip(scope.row)" placement="top">
+              <div class="context-window-cell" :class="{ 'is-unknown': scope.row.contextWindowTokens <= 0 }" :style="compactionStyle(scope.row.compactionCount)">
+                <strong>{{ contextWindowLabel(scope.row) }}</strong>
+                <small v-if="scope.row.contextWindowTokens > 0">{{ contextWindowSourceLabel(scope.row) }} · {{ formatCompactNumber(scope.row.contextWindowSampleCount) }} 样本</small>
+                <small v-else>等待自动压缩</small>
+                <small>{{ formatCompactNumber(scope.row.compactionCount) }} 次压缩</small>
+                <i aria-hidden="true" />
+              </div>
+            </el-tooltip>
+          </template>
+        </el-table-column>
         <el-table-column label="Token / 费用" min-width="260">
           <template #default="scope">
             <div class="usage-cell">
@@ -323,46 +351,47 @@ onMounted(async () => {
 .log-page { padding-bottom: 16px; }
 .log-table-panel { display: flex; min-width: 0; flex-direction: column; }
 .log-table-panel :deep(.el-table__inner-wrapper::before) { display: none; }
-.log-table-panel .table-pagination { flex: none; min-height: 56px; align-items: center; background: var(--rose-surface); }
+.log-table-panel .table-pagination { flex: none; min-height: 56px; align-items: center; background: var(--hongfen-surface); }
 .session-identity { display: grid; min-width: 0; gap: 6px; padding: 3px 4px; }
 .session-title-line { display: flex; min-width: 0; align-items: flex-start; gap: 8px; }
-.session-name { display: -webkit-box; min-width: 0; flex: 1; overflow: hidden; color: var(--rose-text); line-height: 1.4; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.session-client { display: inline-flex; flex: none; align-items: center; gap: 5px; color: var(--rose-text-muted); font-size: 10px; line-height: 18px; }
-.session-client i { width: 6px; height: 6px; border-radius: 50%; background: var(--rose-text-subtle); }
-.session-identity.is-codex .session-client i { background: var(--rose-success); }
-.session-identity.is-copilot .session-client i { background: var(--rose-primary); }
+.session-name { display: -webkit-box; min-width: 0; flex: 1; overflow: hidden; color: var(--hongfen-text); line-height: 1.4; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.session-client { display: inline-flex; flex: none; align-items: center; gap: 5px; color: var(--hongfen-text-muted); font-size: 10px; line-height: 18px; }
+.session-client i { width: 6px; height: 6px; border-radius: 50%; background: var(--hongfen-text-subtle); }
+.session-identity.is-codex .session-client i { background: var(--hongfen-success); }
+.session-identity.is-copilot .session-client i { background: var(--hongfen-primary); }
 .session-meta { display: flex; min-width: 0; align-items: center; gap: 8px; }
 .session-meta small { min-width: 0; flex: 1; }
-.session-origin { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 2px 6px; border: 1px solid var(--rose-border); color: var(--rose-text-muted); background: color-mix(in srgb, var(--rose-surface) 88%, transparent); font-size: 10px; line-height: 1.2; }
-.session-origin i { width: 5px; height: 5px; border-radius: 50%; background: var(--rose-text-subtle); }
-.session-origin.is-user { border-color: color-mix(in srgb, var(--rose-primary) 40%, var(--rose-border)); color: var(--rose-primary-hover); }
-.session-origin.is-user i { background: var(--rose-primary); }
-.session-origin.is-system, .session-origin.is-developer { border-color: color-mix(in srgb, var(--rose-warning) 46%, var(--rose-border)); color: var(--rose-warning); }
-.session-origin.is-system i, .session-origin.is-developer i { background: var(--rose-warning); }
-.session-origin.is-assistant { border-color: color-mix(in srgb, var(--rose-success) 42%, var(--rose-border)); color: var(--rose-success); }
-.session-origin.is-assistant i { background: var(--rose-success); }
+.session-origin { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 2px 6px; border: 1px solid var(--hongfen-border); color: var(--hongfen-text-muted); background: color-mix(in srgb, var(--hongfen-surface) 88%, transparent); font-size: 10px; line-height: 1.2; }
+.session-origin i { width: 5px; height: 5px; border-radius: 50%; background: var(--hongfen-text-subtle); }
+.session-origin.is-user { border-color: color-mix(in srgb, var(--hongfen-primary) 40%, var(--hongfen-border)); color: var(--hongfen-primary-hover); }
+.session-origin.is-user i { background: var(--hongfen-primary); }
+.session-origin.is-system, .session-origin.is-developer { border-color: color-mix(in srgb, var(--hongfen-warning) 46%, var(--hongfen-border)); color: var(--hongfen-warning); }
+.session-origin.is-system i, .session-origin.is-developer i { background: var(--hongfen-warning); }
+.session-origin.is-assistant { border-color: color-mix(in srgb, var(--hongfen-success) 42%, var(--hongfen-border)); color: var(--hongfen-success); }
+.session-origin.is-assistant i { background: var(--hongfen-success); }
 .channel-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .channel-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-identity small { overflow: hidden; color: var(--rose-text-muted); text-overflow: ellipsis; white-space: nowrap; }
+.session-identity small { overflow: hidden; color: var(--hongfen-text-muted); text-overflow: ellipsis; white-space: nowrap; }
 .route-cell, .usage-cell, .performance-cell { display: grid; min-width: 0; gap: 4px; font-variant-numeric: tabular-nums; }
-.route-cell > small, .usage-cell > small, .performance-cell > small { overflow: hidden; color: var(--rose-text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.route-cell > small, .usage-cell > small, .performance-cell > small { overflow: hidden; color: var(--hongfen-text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .route-cell > small { display: flex; align-items: center; gap: 6px; }
-.route-cell > small span { color: var(--rose-text-subtle); }
+.route-cell > small span { color: var(--hongfen-text-subtle); }
 .route-cell > small code { overflow: hidden; text-overflow: ellipsis; }
 .usage-cell > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.usage-cell > div strong, .performance-cell > strong { color: var(--rose-text); font-size: 12px; }
-.usage-cell > div span { color: var(--rose-text); font: 600 12px/1.3 var(--rose-font-mono); white-space: nowrap; }
+.usage-cell > div strong, .performance-cell > strong { color: var(--hongfen-text); font-size: 12px; }
+.usage-cell > div span { color: var(--hongfen-text); font: 600 12px/1.3 var(--hongfen-font-mono); white-space: nowrap; }
 .health-cell { display: grid; gap: 3px; font-variant-numeric: tabular-nums; }
 .health-cell > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.health-cell > div > strong { color: var(--session-row-tone); font: 700 19px/1.2 var(--rose-font-mono); }
-.health-cell > div > strong small { margin-left: 2px; color: inherit; font: 500 10px/1 var(--rose-font-sans); }
+.health-cell > div > strong { color: var(--session-row-tone); font: 700 19px/1.2 var(--hongfen-font-mono); }
+.health-cell > div > strong small { margin-left: 2px; color: inherit; font: 500 10px/1 var(--hongfen-font-sans); }
 .health-cell > div > span { display: inline-flex; align-items: center; gap: 5px; color: var(--session-row-tone); font-size: 11px; font-weight: 600; }
 .health-cell > div > span i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.health-cell > small { color: var(--rose-text-muted); font-size: 10px; }
-.compaction-cell { position: relative; display: grid; justify-items: end; gap: 2px; padding-right: 7px; font-variant-numeric: tabular-nums; }
-.compaction-cell strong { color: var(--compaction-tone); font: 700 var(--compaction-size)/1.2 var(--rose-font-mono); }
-.compaction-cell small { color: var(--rose-text-muted); font-size: 10px; }
-.compaction-cell > i { width: var(--compaction-width); height: 2px; margin-top: 3px; background: var(--compaction-tone); content: ''; }
+.health-cell > small { color: var(--hongfen-text-muted); font-size: 10px; }
+.context-window-cell { position: relative; display: grid; justify-items: end; gap: 2px; padding-right: 7px; font-variant-numeric: tabular-nums; }
+.context-window-cell strong { color: var(--hongfen-text); font: 700 16px/1.2 var(--hongfen-font-mono); }
+.context-window-cell small { color: var(--hongfen-text-muted); font-size: 10px; white-space: nowrap; }
+.context-window-cell > i { width: var(--compaction-width); height: 2px; margin-top: 2px; background: var(--compaction-tone); content: ''; }
+.context-window-cell.is-unknown strong { color: var(--hongfen-text-subtle); font: 600 12px/1.6 var(--hongfen-font-sans); }
 .session-table :deep(.el-table__body tr > td.el-table__cell) { background-color: var(--session-row-fill); transition: background-color 140ms ease; }
 .session-table :deep(.el-table__body tr:hover > td.el-table__cell) { background-color: var(--session-row-fill-hover) !important; }
 .session-table :deep(.el-table__body tr > td.el-table__cell:first-child) { box-shadow: inset 3px 0 0 var(--session-row-tone); }
@@ -371,8 +400,8 @@ onMounted(async () => {
   .log-table-panel { min-height: 0; }
   .log-table-panel > .el-table { min-height: 0; flex: 1 1 0; }
   .log-page .metric-strip { grid-template-columns: repeat(6, minmax(0, 1fr)); }
-  .log-page .metric-cell { min-height: 80px; padding-block: 10px; border-right: 1px solid var(--rose-border); border-bottom: 0; }
-  .log-page .metric-cell:nth-child(3) { border-right: 1px solid var(--rose-border); }
+  .log-page .metric-cell { min-height: 80px; padding-block: 10px; border-right: 1px solid var(--hongfen-border); border-bottom: 0; }
+  .log-page .metric-cell:nth-child(3) { border-right: 1px solid var(--hongfen-border); }
   .log-page .metric-cell:nth-child(-n + 3) { border-bottom: 0; }
   .log-page .metric-cell:last-child { border-right: 0; }
   .log-page .metric-cell strong { margin-top: 5px; font-size: 17px; }

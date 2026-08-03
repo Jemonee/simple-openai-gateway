@@ -59,7 +59,7 @@ const chartLabel = computed(() => `${channelName} 最近延迟曲线，最低 ${
 
 <style scoped>
 .latency-sparkline { display: block; width: 144px; height: 40px; overflow: visible; }
-.sparkline-guide { stroke: var(--rose-border); stroke-width: 1; }
-.sparkline-line { fill: none; stroke: var(--rose-teal); stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; vector-effect: non-scaling-stroke; }
-.sparkline-latest { fill: var(--rose-surface); stroke: var(--rose-teal); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.sparkline-guide { stroke: var(--hongfen-border); stroke-width: 1; }
+.sparkline-line { fill: none; stroke: var(--hongfen-teal); stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.sparkline-latest { fill: var(--hongfen-surface); stroke: var(--hongfen-teal); stroke-width: 2; vector-effect: non-scaling-stroke; }
 </style>

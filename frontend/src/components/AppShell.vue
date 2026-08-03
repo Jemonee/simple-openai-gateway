@@ -132,7 +132,7 @@ watch(authenticated, (isAuthenticated) => {
 
 <template>
   <div v-if="checking" class="auth-loading" aria-live="polite">
-    <span class="rose-spinner" aria-hidden="true"></span>
+    <span class="hongfen-spinner" aria-hidden="true"></span>
     <span>正在检查管理会话</span>
   </div>
 
@@ -249,7 +249,7 @@ watch(authenticated, (isAuthenticated) => {
 
 <style scoped>
 .request-progress { position: fixed; z-index: 3000; top: 0; right: 0; left: 0; height: 2px; overflow: hidden; pointer-events: none; }
-.request-progress span { display: block; width: 38%; height: 100%; background: var(--rose-primary); animation: request-progress-slide 1s ease-in-out infinite; }
+.request-progress span { display: block; width: 38%; height: 100%; background: var(--hongfen-primary); animation: request-progress-slide 1s ease-in-out infinite; }
 .account-button:disabled { cursor: wait; opacity: 0.72; }
 @keyframes request-progress-slide { from { transform: translateX(-110%); } to { transform: translateX(360%); } }
 @media (prefers-reduced-motion: reduce) { .request-progress span { width: 100%; animation: none; } }

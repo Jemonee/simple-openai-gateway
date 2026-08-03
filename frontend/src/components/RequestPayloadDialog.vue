@@ -157,18 +157,18 @@ watch(
 :global(.request-payload-modal .el-dialog__body) { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .payload-dialog { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .payload-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
-.payload-meta, .attempt-meta { display: flex; flex-wrap: wrap; gap: 10px 24px; padding-bottom: 14px; color: var(--rose-text-muted); font-size: 12px; }
+.payload-meta, .attempt-meta { display: flex; flex-wrap: wrap; gap: 10px 24px; padding-bottom: 14px; color: var(--hongfen-text-muted); font-size: 12px; }
 .payload-meta span, .attempt-meta span { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
-.payload-meta strong, .attempt-meta strong { color: var(--rose-text); }
+.payload-meta strong, .attempt-meta strong { color: var(--hongfen-text); }
 .payload-meta code, .attempt-meta code { overflow-wrap: anywhere; }
 .payload-tabs { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .payload-tabs :deep(.el-tabs__header) { flex: none; }
 .payload-tabs :deep(.el-tabs__content) { flex: 1; min-height: 0; overflow-y: auto; padding-right: 6px; scrollbar-gutter: stable; }
 .payload-tabs :deep(.el-alert) { margin-bottom: 12px; }
 .payload-dialog > .el-alert { margin-bottom: 12px; }
-.payload-section + .payload-section { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--rose-border); }
-.payload-section h3 { margin: 0 0 10px; color: var(--rose-text); font-size: 13px; }
-.payload-empty { padding: 40px 12px; color: var(--rose-text-muted); text-align: center; }
+.payload-section + .payload-section { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--hongfen-border); }
+.payload-section h3 { margin: 0 0 10px; color: var(--hongfen-text); font-size: 13px; }
+.payload-empty { padding: 40px 12px; color: var(--hongfen-text-muted); text-align: center; }
 @media (max-width: 640px) {
   :global(.request-payload-modal.el-dialog) { max-height: calc(100dvh - 24px); margin: 12px auto; }
   .payload-toolbar { align-items: stretch; flex-direction: column; }

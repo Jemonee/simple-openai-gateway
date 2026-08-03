@@ -265,24 +265,24 @@ onMounted(async () => {
 .log-page { padding-bottom: 16px; }
 .log-table-panel { display: flex; min-width: 0; flex-direction: column; }
 .log-table-panel :deep(.el-table__inner-wrapper::before) { display: none; }
-.log-table-panel .table-pagination { flex: none; min-height: 56px; align-items: center; background: var(--rose-surface); }
+.log-table-panel .table-pagination { flex: none; min-height: 56px; align-items: center; background: var(--hongfen-surface); }
 .compact-log-table :deep(.el-table__cell) { padding-block: 6px; }
-.attempt-list { display: grid; gap: 7px; padding: 12px 20px 14px 48px; background: var(--rose-surface-muted); }
-.attempt-list > header { display: flex; justify-content: space-between; color: var(--rose-text-muted); font-size: 12px; }
-.attempt-list > header strong { color: var(--rose-text); }
+.attempt-list { display: grid; gap: 7px; padding: 12px 20px 14px 48px; background: var(--hongfen-surface-muted); }
+.attempt-list > header { display: flex; justify-content: space-between; color: var(--hongfen-text-muted); font-size: 12px; }
+.attempt-list > header strong { color: var(--hongfen-text); }
 .usage-cost-cell, .performance-cell, .source-breakdown { display: grid; min-width: 0; gap: 3px; font-variant-numeric: tabular-nums; }
 .usage-cost-cell > div { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 3px 12px; }
-.usage-cost-cell > div strong, .performance-cell strong { color: var(--rose-text); font-size: 11px; line-height: 1.35; }
-.usage-cost-cell > div span { flex: none; color: var(--rose-text); font: 600 12px/1.3 var(--rose-font-mono); }
-.usage-cost-cell small, .performance-cell small, .source-breakdown small { color: var(--rose-text-muted); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
+.usage-cost-cell > div strong, .performance-cell strong { color: var(--hongfen-text); font-size: 11px; line-height: 1.35; }
+.usage-cost-cell > div span { flex: none; color: var(--hongfen-text); font: 600 12px/1.3 var(--hongfen-font-mono); }
+.usage-cost-cell small, .performance-cell small, .source-breakdown small { color: var(--hongfen-text-muted); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
 .source-breakdown { justify-items: start; }
 @media (min-width: 961px) {
   .log-page { height: 100%; min-height: 0; grid-template-rows: auto auto auto minmax(0, 1fr); overflow: hidden; padding-bottom: 0; }
   .log-table-panel { min-height: 0; }
   .log-table-panel > .el-table { min-height: 0; flex: 1 1 0; }
   .log-page .metric-strip { grid-template-columns: repeat(6, minmax(0, 1fr)); }
-  .log-page .metric-cell { min-height: 80px; padding-block: 10px; border-right: 1px solid var(--rose-border); border-bottom: 0; }
-  .log-page .metric-cell:nth-child(3) { border-right: 1px solid var(--rose-border); }
+  .log-page .metric-cell { min-height: 80px; padding-block: 10px; border-right: 1px solid var(--hongfen-border); border-bottom: 0; }
+  .log-page .metric-cell:nth-child(3) { border-right: 1px solid var(--hongfen-border); }
   .log-page .metric-cell:nth-child(-n + 3) { border-bottom: 0; }
   .log-page .metric-cell:last-child { border-right: 0; }
   .log-page .metric-cell strong { margin-top: 5px; font-size: 17px; }

@@ -122,34 +122,34 @@ async function openCurrentFeature() {
 
 <style scoped>
 .guide-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
-.guide-heading span { color: var(--rose-primary); font-size: 11px; font-weight: 700; text-transform: uppercase; }
-.guide-heading h2 { margin: 4px 0 0; color: var(--rose-text); font-size: 20px; font-weight: 650; }
-.guide-heading p { margin: 5px 0 0; color: var(--rose-text-muted); font-size: 12px; }
-.guide-heading b { flex: none; color: var(--rose-text-muted); font: 600 12px/1.5 var(--rose-font-mono); }
-.guide-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); min-height: 390px; border: 1px solid var(--rose-border); }
-.guide-steps { padding: 8px; border-right: 1px solid var(--rose-border); background: var(--rose-surface-muted); }
-.guide-steps button { display: grid; width: 100%; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 10px; padding: 9px; border: 0; border-radius: var(--rose-radius-control); color: var(--rose-text-muted); background: transparent; text-align: left; cursor: pointer; }
-.guide-steps button:hover { background: var(--rose-surface); }
-.guide-steps button.is-active { color: var(--rose-primary); background: var(--rose-primary-soft); }
-.guide-steps button > span:first-child { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid var(--rose-border-strong); border-radius: 50%; background: var(--rose-surface); font: 600 11px/1 var(--rose-font-mono); }
-.guide-steps button.is-active > span:first-child { border-color: var(--rose-primary); color: var(--rose-surface); background: var(--rose-primary); }
-.guide-steps button.is-visited > span:first-child { border-color: var(--rose-success); color: var(--rose-success); }
+.guide-heading span { color: var(--hongfen-primary); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.guide-heading h2 { margin: 4px 0 0; color: var(--hongfen-text); font-size: 20px; font-weight: 650; }
+.guide-heading p { margin: 5px 0 0; color: var(--hongfen-text-muted); font-size: 12px; }
+.guide-heading b { flex: none; color: var(--hongfen-text-muted); font: 600 12px/1.5 var(--hongfen-font-mono); }
+.guide-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); min-height: 390px; border: 1px solid var(--hongfen-border); }
+.guide-steps { padding: 8px; border-right: 1px solid var(--hongfen-border); background: var(--hongfen-surface-muted); }
+.guide-steps button { display: grid; width: 100%; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 10px; padding: 9px; border: 0; border-radius: var(--hongfen-radius-control); color: var(--hongfen-text-muted); background: transparent; text-align: left; cursor: pointer; }
+.guide-steps button:hover { background: var(--hongfen-surface); }
+.guide-steps button.is-active { color: var(--hongfen-primary); background: var(--hongfen-primary-soft); }
+.guide-steps button > span:first-child { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid var(--hongfen-border-strong); border-radius: 50%; background: var(--hongfen-surface); font: 600 11px/1 var(--hongfen-font-mono); }
+.guide-steps button.is-active > span:first-child { border-color: var(--hongfen-primary); color: var(--hongfen-surface); background: var(--hongfen-primary); }
+.guide-steps button.is-visited > span:first-child { border-color: var(--hongfen-success); color: var(--hongfen-success); }
 .guide-steps button > span:last-child { display: grid; min-width: 0; gap: 2px; }
 .guide-steps strong { color: currentColor; font-size: 12px; font-weight: 650; }
-.guide-steps small { overflow: hidden; color: var(--rose-text-subtle); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.guide-steps small { overflow: hidden; color: var(--hongfen-text-subtle); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .guide-detail { display: grid; align-content: center; justify-items: start; gap: 20px; padding: 44px; }
-.guide-icon { display: grid; width: 52px; height: 52px; place-items: center; border: 1px solid var(--rose-border); border-radius: var(--rose-radius-panel); color: var(--rose-primary); background: var(--rose-primary-soft); }
+.guide-icon { display: grid; width: 52px; height: 52px; place-items: center; border: 1px solid var(--hongfen-border); border-radius: var(--hongfen-radius-panel); color: var(--hongfen-primary); background: var(--hongfen-primary-soft); }
 .guide-icon svg { width: 26px; height: 26px; }
-.guide-detail small { color: var(--rose-text-subtle); font-size: 11px; }
-.guide-detail h3 { margin: 5px 0 0; color: var(--rose-text); font-size: 21px; font-weight: 650; }
-.guide-detail p { max-width: 470px; margin: 10px 0 0; color: var(--rose-text-muted); font-size: 13px; line-height: 1.75; }
-.guide-feature-link { padding: 0; border: 0; color: var(--rose-primary); background: transparent; font-size: 12px; font-weight: 650; cursor: pointer; }
+.guide-detail small { color: var(--hongfen-text-subtle); font-size: 11px; }
+.guide-detail h3 { margin: 5px 0 0; color: var(--hongfen-text); font-size: 21px; font-weight: 650; }
+.guide-detail p { max-width: 470px; margin: 10px 0 0; color: var(--hongfen-text-muted); font-size: 13px; line-height: 1.75; }
+.guide-feature-link { padding: 0; border: 0; color: var(--hongfen-primary); background: transparent; font-size: 12px; font-weight: 650; cursor: pointer; }
 .guide-feature-link:hover { text-decoration: underline; }
 .guide-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .guide-footer > div { display: flex; gap: 8px; }
 @media (max-width: 680px) {
   .guide-layout { grid-template-columns: 1fr; }
-  .guide-steps { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--rose-border); }
+  .guide-steps { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--hongfen-border); }
   .guide-steps button { width: auto; min-width: 52px; grid-template-columns: 1fr; justify-items: center; }
   .guide-steps button > span:last-child { display: none; }
   .guide-detail { min-height: 280px; padding: 28px; }

@@ -162,14 +162,14 @@ onBeforeUnmount(() => editor?.dispose())
 </template>
 
 <style scoped>
-.code-viewer-shell { width: 100%; min-width: 0; overflow: hidden; border: 1px solid var(--rose-border); background: var(--rose-surface); }
-.code-viewer-toolbar { min-height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--rose-border); background: var(--rose-surface-muted); }
+.code-viewer-shell { width: 100%; min-width: 0; overflow: hidden; border: 1px solid var(--hongfen-border); background: var(--hongfen-surface); }
+.code-viewer-toolbar { min-height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--hongfen-border); background: var(--hongfen-surface-muted); }
 .payload-format { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
-.payload-format strong { color: var(--rose-text); font: 650 11px/1 var(--rose-font-mono); }
-.payload-format span { color: var(--rose-text-subtle); font-size: 10px; white-space: nowrap; }
+.payload-format strong { color: var(--hongfen-text); font: 650 11px/1 var(--hongfen-font-mono); }
+.payload-format span { color: var(--hongfen-text-subtle); font-size: 10px; white-space: nowrap; }
 .viewer-actions { display: flex; align-items: center; gap: 8px; }
 .viewer-actions .el-button { width: 32px; height: 32px; padding: 0; }
-.json-code-viewer { width: 100%; min-height: 220px; overflow: hidden; background: var(--rose-surface-muted); }
+.json-code-viewer { width: 100%; min-height: 220px; overflow: hidden; background: var(--hongfen-surface-muted); }
 @media (max-width: 640px) {
   .code-viewer-toolbar { align-items: stretch; flex-direction: column; }
   .viewer-actions { justify-content: flex-end; }

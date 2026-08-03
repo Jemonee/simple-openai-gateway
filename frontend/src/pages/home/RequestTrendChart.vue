@@ -131,14 +131,14 @@ function seriesPath(series: SeriesKey): string {
 <style scoped>
 .trend-chart-scroller { width: 100%; overflow-x: auto; scrollbar-gutter: stable; }
 .trend-chart { display: block; width: max(100%, var(--trend-chart-width)); height: auto; }
-.trend-grid line { stroke: var(--rose-border); stroke-width: 1; vector-effect: non-scaling-stroke; }
-.trend-grid text, .trend-labels text { fill: var(--rose-text-muted); font: 10px var(--rose-font-mono); }
-.trend-labels line { stroke: var(--rose-border-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.trend-grid line { stroke: var(--hongfen-border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.trend-grid text, .trend-labels text { fill: var(--hongfen-text-muted); font: 10px var(--hongfen-font-mono); }
+.trend-labels line { stroke: var(--hongfen-border-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .trend-series path { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; }
-.trend-series circle { stroke: var(--rose-surface); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
-.trend-series-requests path { stroke: var(--rose-primary); }
-.trend-series-requests circle { fill: var(--rose-primary); }
-.trend-series-successes path { stroke: var(--rose-success); }
-.trend-series-successes circle { fill: var(--rose-success); }
+.trend-series circle { stroke: var(--hongfen-surface); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.trend-series-requests path { stroke: var(--hongfen-primary); }
+.trend-series-requests circle { fill: var(--hongfen-primary); }
+.trend-series-successes path { stroke: var(--hongfen-success); }
+.trend-series-successes circle { fill: var(--hongfen-success); }
 .trend-data-table { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 </style>

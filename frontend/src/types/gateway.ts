@@ -86,6 +86,8 @@ export interface ChannelMetrics {
   recentSuccessCount: number
   /** All attempts across every channel model during the last 30 minutes. */
   recentAttemptCount: number
+  /** All upstream attempts routed to this channel since 00:00 UTC+8 today. */
+  todayAttemptCount: number
 }
 
 export interface Channel {
@@ -204,10 +206,10 @@ export interface OfficialModelPrice {
   /** Billing unit used by every catalog price. */
   unit: 'per_1m_tokens'
   /** OpenAI processing and context tier represented by this price. */
-  contextTier: 'standard_short_context'
+  contextTier: 'standard_1m_context'
   /** Immutable version identifier for the embedded price catalog. */
   catalogVersion: string
-  /** Catalog review date in YYYY-MM-DD format. */
+  /** Catalog review date in YYYY-MM or YYYY-MM-DD format. */
   updatedAt: string
 }
 
@@ -794,7 +796,7 @@ export interface LogAggregateSummary {
   successCount: number
   /** Matching requests canceled by the downstream client before protocol completion. */
   canceledCount: number
-  /** Successful matching requests divided by success/failure requests; cancellations are excluded. */
+  /** Successful matching requests divided by total upstream attempts. */
   successRate: number
   /** Total upstream attempts made by matching requests. */
   attemptCount: number
@@ -930,6 +932,14 @@ export interface CodexSessionSummary {
   latestModel: string
   /** chat or responses endpoint used by the latest request. */
   latestEndpoint: string
+  /** Dominant session model after auxiliary auto-review traffic is excluded. */
+  primaryModel: string
+  /** Persisted effective context-window estimate in tokens, or zero until an automatic compaction sample exists. */
+  contextWindowTokens: number
+  /** Estimate provenance: session_compaction, agent_model, or blank while unknown. */
+  contextWindowSource: 'session_compaction' | 'agent_model' | ''
+  /** Automatic compaction samples supporting the persisted estimate. */
+  contextWindowSampleCount: number
   /** Requests retained for this session within the five-day window. */
   requestCount: number
   /** Context-compaction requests recorded for this session. */
@@ -940,7 +950,7 @@ export interface CodexSessionSummary {
   canceledCount: number
   /** Requests accepted by the gateway but not yet finalized. */
   processingCount: number
-  /** Successful retained requests divided by success/failure requests; cancellations are excluded. */
+  /** Successful retained requests divided by total upstream attempts. */
   successRate: number
   /** Total upstream attempts made by retained requests. */
   attemptCount: number
