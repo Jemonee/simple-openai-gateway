@@ -158,6 +158,7 @@ type RelayRequestLog struct {
 	CodexTitleRequest     bool      `gorm:"not null;default:false" json:"-"`
 	CodexGeneratedTitle   string    `gorm:"size:80" json:"-"`
 	IsCompaction          bool      `gorm:"not null;default:false;index" json:"isCompaction"`
+	CompactionTrigger     string    `gorm:"size:16;index" json:"-"`
 	RequestParametersJSON string    `gorm:"type:text" json:"-"`
 	PayloadLogDetail      string    `gorm:"size:16;not null;default:default" json:"payloadLogDetail"`
 	RequestBody           string    `gorm:"type:text" json:"requestBody"`
@@ -204,21 +205,39 @@ func (log *RelayRequestLog) BeforeCreate(_ *gorm.DB) error {
 // RelaySessionState keeps the small amount of state needed to name a session
 // and remove context already retained by its preceding request logs.
 type RelaySessionState struct {
-	TokenID             uint64     `gorm:"primaryKey;autoIncrement:false;index:idx_relay_session_client_recent,priority:1" json:"tokenId"`
-	SessionID           string     `gorm:"size:512;primaryKey" json:"sessionId"`
-	Title               string     `gorm:"size:80;index" json:"title"`
-	TitleCustomized     bool       `gorm:"not null;default:false" json:"titleCustomized"`
-	ThreadSource        string     `gorm:"size:48;index;index:idx_relay_session_active,priority:1" json:"threadSource"`
-	SessionSource       string     `gorm:"size:48;index" json:"sessionSource"`
-	ClientKind          string     `gorm:"size:32;index" json:"clientKind"`
-	ClientFingerprint   string     `gorm:"size:64;index;index:idx_relay_session_client_recent,priority:2" json:"-"`
-	LatestRequestID     string     `gorm:"size:36" json:"latestRequestId"`
-	LastActivityAt      *time.Time `gorm:"index:idx_relay_session_active,priority:2,sort:desc" json:"lastActivityAt"`
-	CompactionCount     int64      `gorm:"not null;default:0" json:"compactionCount"`
-	RequestManifestJSON string     `gorm:"type:text" json:"-"`
-	PayloadManifestJSON string     `gorm:"type:text" json:"-"`
-	CreatedAt           time.Time  `json:"createdAt"`
-	UpdatedAt           time.Time  `gorm:"index;index:idx_relay_session_client_recent,priority:3,sort:desc" json:"updatedAt"`
+	TokenID              uint64     `gorm:"primaryKey;autoIncrement:false;index:idx_relay_session_client_recent,priority:1" json:"tokenId"`
+	SessionID            string     `gorm:"size:512;primaryKey" json:"sessionId"`
+	Title                string     `gorm:"size:80;index" json:"title"`
+	TitleCustomized      bool       `gorm:"not null;default:false" json:"titleCustomized"`
+	ThreadSource         string     `gorm:"size:48;index;index:idx_relay_session_active,priority:1" json:"threadSource"`
+	SessionSource        string     `gorm:"size:48;index" json:"sessionSource"`
+	ClientKind           string     `gorm:"size:32;index" json:"clientKind"`
+	ClientFingerprint    string     `gorm:"size:64;index;index:idx_relay_session_client_recent,priority:2" json:"-"`
+	LatestRequestID      string     `gorm:"size:36" json:"latestRequestId"`
+	LastActivityAt       *time.Time `gorm:"index:idx_relay_session_active,priority:2,sort:desc" json:"lastActivityAt"`
+	CompactionCount      int64      `gorm:"not null;default:0" json:"compactionCount"`
+	PrimaryModel         string     `gorm:"size:200;index" json:"primaryModel"`
+	ContextWindowTokens  int64      `gorm:"not null;default:0" json:"contextWindowTokens"`
+	ContextWindowSource  string     `gorm:"size:24;index" json:"contextWindowSource"`
+	ContextWindowSamples int64      `gorm:"not null;default:0" json:"contextWindowSampleCount"`
+	ContextSamplesJSON   string     `gorm:"type:text" json:"-"`
+	RequestManifestJSON  string     `gorm:"type:text" json:"-"`
+	PayloadManifestJSON  string     `gorm:"type:text" json:"-"`
+	CreatedAt            time.Time  `json:"createdAt"`
+	UpdatedAt            time.Time  `gorm:"index;index:idx_relay_session_client_recent,priority:3,sort:desc" json:"updatedAt"`
+}
+
+// ModelAgentContextWindow retains a learned context-window profile after detailed request logs expire.
+type ModelAgentContextWindow struct {
+	TokenID                   uint64 `gorm:"primaryKey;autoIncrement:false"`
+	ClientFingerprint         string `gorm:"size:64;primaryKey"`
+	Model                     string `gorm:"size:200;primaryKey"`
+	ContextWindowTokens       int64  `gorm:"not null;default:0"`
+	CompactionThresholdTokens int64  `gorm:"not null;default:0"`
+	SampleCount               int64  `gorm:"not null;default:0"`
+	SamplesJSON               string `gorm:"type:text"`
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time `gorm:"index"`
 }
 
 // RelayChatSessionClaim maps one canonical Chat Completions history to the

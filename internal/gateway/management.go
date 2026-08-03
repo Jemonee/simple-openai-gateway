@@ -91,6 +91,7 @@ type ChannelMetrics struct {
 	RecentSuccessRate     float64               `json:"recentSuccessRate"`
 	RecentSuccessCount    int64                 `json:"recentSuccessCount"`
 	RecentAttemptCount    int64                 `json:"recentAttemptCount"`
+	TodayAttemptCount     int64                 `json:"todayAttemptCount"`
 }
 
 type GatewayModelInput struct {
@@ -336,7 +337,12 @@ func (s *ManagementService) ListChannels(ctx context.Context) ([]ChannelView, er
 	for _, model := range models {
 		channelModelIDs = append(channelModelIDs, model.ID)
 	}
-	recentSuccess, err := loadRecentSuccessMetrics(ctx, s.store.db, channelIDs, channelModelIDs, time.Now())
+	now := time.Now()
+	recentSuccess, err := loadRecentSuccessMetrics(ctx, s.store.db, channelIDs, channelModelIDs, now)
+	if err != nil {
+		return nil, err
+	}
+	todayAttempts, err := loadTodayChannelAttemptCounts(ctx, s.store.db, channelIDs, now)
 	if err != nil {
 		return nil, err
 	}
@@ -358,6 +364,7 @@ func (s *ManagementService) ListChannels(ctx context.Context) ([]ChannelView, er
 		metrics.RecentSuccessRate = recentMetric.rate()
 		metrics.RecentSuccessCount = recentMetric.Successes
 		metrics.RecentAttemptCount = recentMetric.Attempts
+		metrics.TodayAttemptCount = todayAttempts[channel.ID]
 		views = append(views, ChannelView{
 			Channel:          channel,
 			APIKeyConfigured: channel.APIKeyCipher != "",
@@ -541,7 +548,12 @@ func (s *ManagementService) channelView(ctx context.Context, channel Channel) (*
 	for _, model := range models {
 		channelModelIDs = append(channelModelIDs, model.ID)
 	}
-	recentSuccess, err := loadRecentSuccessMetrics(ctx, s.store.db, []uint64{channel.ID}, channelModelIDs, time.Now())
+	now := time.Now()
+	recentSuccess, err := loadRecentSuccessMetrics(ctx, s.store.db, []uint64{channel.ID}, channelModelIDs, now)
+	if err != nil {
+		return nil, err
+	}
+	todayAttempts, err := loadTodayChannelAttemptCounts(ctx, s.store.db, []uint64{channel.ID}, now)
 	if err != nil {
 		return nil, err
 	}
@@ -560,6 +572,7 @@ func (s *ManagementService) channelView(ctx context.Context, channel Channel) (*
 	metrics.RecentSuccessRate = recentMetric.rate()
 	metrics.RecentSuccessCount = recentMetric.Successes
 	metrics.RecentAttemptCount = recentMetric.Attempts
+	metrics.TodayAttemptCount = todayAttempts[channel.ID]
 	return &ChannelView{
 		Channel:          channel,
 		APIKeyConfigured: channel.APIKeyCipher != "",
@@ -1552,9 +1565,7 @@ func aggregateLogSummary(db *gorm.DB) (LogAggregateSummary, error) {
 		LatencySampleCount:    row.LatencySampleCount,
 		DurationSampleCount:   row.RequestCount,
 	}
-	if completedRequests := row.RequestCount - row.CanceledCount; completedRequests > 0 {
-		summary.SuccessRate = float64(row.SuccessCount) / float64(completedRequests)
-	}
+	summary.SuccessRate = attemptSuccessRate(row.SuccessCount, row.AttemptCount)
 	if row.RequestCount > 0 {
 		summary.AverageDurationMS = float64(row.TotalDurationMS) / float64(row.RequestCount)
 	}

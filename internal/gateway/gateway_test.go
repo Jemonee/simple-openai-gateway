@@ -127,7 +127,7 @@ func newTestStore(t *testing.T) *Store {
 	if err := db.AutoMigrate(
 		&AdminUser{}, &AdminSession{}, &Channel{}, &GatewayModel{}, &ChannelModel{},
 		&CircuitRecord{},
-		&ClientToken{}, &ClientTokenModel{}, &RelayRequestLog{}, &RelaySessionState{}, &RelayChatSessionClaim{}, &RelayAttemptLog{}, &RelayStepLog{}, &TokenDailyStat{}, &GatewayMigration{},
+		&ClientToken{}, &ClientTokenModel{}, &RelayRequestLog{}, &RelaySessionState{}, &ModelAgentContextWindow{}, &RelayChatSessionClaim{}, &RelayAttemptLog{}, &RelayStepLog{}, &TokenDailyStat{}, &GatewayMigration{},
 		&ResponseAffinity{}, &SessionAffinity{},
 	); err != nil {
 		t.Fatal(err)
@@ -335,9 +335,9 @@ func TestOpenAIOfficialPriceExactMatch(t *testing.T) {
 		modelID                                string
 		input, cachedInput, cacheWrite, output int64
 	}{
-		{modelID: "gpt-5.6-sol", input: 5_000_000, cachedInput: 500_000, cacheWrite: 6_250_000, output: 30_000_000},
-		{modelID: "gpt-5.6-terra", input: 2_500_000, cachedInput: 250_000, cacheWrite: 3_125_000, output: 15_000_000},
-		{modelID: "gpt-5.6-luna", input: 1_000_000, cachedInput: 100_000, cacheWrite: 1_250_000, output: 6_000_000},
+		{modelID: "gpt-5.6-sol", input: 5_000_000, cachedInput: 500_000, output: 30_000_000},
+		{modelID: "gpt-5.6-terra", input: 2_000_000, cachedInput: 250_000, output: 12_000_000},
+		{modelID: "gpt-5.6-luna", input: 200_000, cachedInput: 100_000, output: 1_200_000},
 		{modelID: "gpt-5.5", input: 5_000_000, cachedInput: 500_000, output: 30_000_000},
 		{modelID: "gpt-5.5-pro", input: 30_000_000, output: 180_000_000},
 		{modelID: "gpt-5.4", input: 2_500_000, cachedInput: 250_000, output: 15_000_000},
@@ -351,8 +351,12 @@ func TestOpenAIOfficialPriceExactMatch(t *testing.T) {
 		{modelID: "gpt-5-mini", input: 250_000, cachedInput: 25_000, output: 2_000_000},
 		{modelID: "gpt-5-nano", input: 50_000, cachedInput: 5_000, output: 400_000},
 		{modelID: "gpt-5-pro", input: 15_000_000, output: 120_000_000},
+		{modelID: "reasoning", input: 1_000_000, output: 6_000_000},
 		{modelID: "codex-auto-review", input: 5_000_000, cachedInput: 500_000, output: 3_000_000},
 		{modelID: "gpt-5.3-codex-spark", input: 3_150_000, cachedInput: 315_000, output: 25_200_000},
+		{modelID: "gpt-5-codex", input: 1_250_000, cachedInput: 125_000, output: 10_000_000},
+		{modelID: "gpt-5.1-codex", input: 1_250_000, cachedInput: 125_000, output: 10_000_000},
+		{modelID: "gpt-5.2-codex", input: 1_750_000, cachedInput: 175_000, output: 14_000_000},
 		{modelID: "gpt-4.1", input: 2_000_000, cachedInput: 500_000, output: 8_000_000},
 		{modelID: "gpt-4.1-mini", input: 400_000, cachedInput: 100_000, output: 1_600_000},
 		{modelID: "gpt-4.1-nano", input: 100_000, cachedInput: 25_000, output: 400_000},
@@ -362,6 +366,14 @@ func TestOpenAIOfficialPriceExactMatch(t *testing.T) {
 		{modelID: "o3", input: 2_000_000, cachedInput: 500_000, output: 8_000_000},
 		{modelID: "o3-mini", input: 1_100_000, cachedInput: 550_000, output: 4_400_000},
 		{modelID: "o3-pro", input: 20_000_000, output: 80_000_000},
+		{modelID: "o1", input: 15_000_000, cachedInput: 7_500_000, output: 60_000_000},
+		{modelID: "o1-mini", input: 1_100_000, cachedInput: 550_000, output: 4_400_000},
+		{modelID: "text-embedding-3-large", input: 130_000},
+		{modelID: "text-embedding-3-small", input: 20_000},
+		{modelID: "omni-moderation-latest"},
+		{modelID: "gpt-5.6-sol-realtime", input: 10_000_000, cachedInput: 1_000_000, output: 45_000_000},
+		{modelID: "gpt-5.6-terra-realtime", input: 4_000_000, cachedInput: 500_000, output: 18_000_000},
+		{modelID: "gpt-5.6-luna-realtime", input: 400_000, cachedInput: 200_000, output: 1_800_000},
 	}
 	optionalMicros := func(value int64) *int64 {
 		if value == 0 {
@@ -734,9 +746,9 @@ func TestBackfillRelayOutcomesSeparatesCanceledRequests(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().UTC()
 	requests := []RelayRequestLog{
-		{ID: "outcome-success", TokenID: 1, Endpoint: "responses", RequestedModel: "model-a", StatusCode: http.StatusOK, CreatedAt: now},
-		{ID: "outcome-canceled", TokenID: 1, Endpoint: "responses", RequestedModel: "model-a", StatusCode: statusClientClosedRequest, ErrorCode: "request_canceled", CreatedAt: now},
-		{ID: "outcome-failed", TokenID: 1, Endpoint: "responses", RequestedModel: "model-a", StatusCode: http.StatusBadGateway, CreatedAt: now},
+		{ID: "outcome-success", TokenID: 1, Endpoint: "responses", RequestedModel: "model-a", StatusCode: http.StatusOK, AttemptCount: 1, CreatedAt: now},
+		{ID: "outcome-canceled", TokenID: 1, Endpoint: "responses", RequestedModel: "model-a", StatusCode: statusClientClosedRequest, ErrorCode: "request_canceled", AttemptCount: 1, CreatedAt: now},
+		{ID: "outcome-failed", TokenID: 1, Endpoint: "responses", RequestedModel: "model-a", StatusCode: http.StatusBadGateway, AttemptCount: 1, CreatedAt: now},
 	}
 	if err := store.db.Create(&requests).Error; err != nil {
 		t.Fatal(err)
@@ -794,7 +806,7 @@ func TestBackfillRelayOutcomesSeparatesCanceledRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.RequestCount != 3 || summary.SuccessCount != 1 || summary.CanceledCount != 1 || summary.SuccessRate != 0.5 {
+	if summary.RequestCount != 3 || summary.SuccessCount != 1 || summary.CanceledCount != 1 || math.Abs(summary.SuccessRate-float64(1)/3) > 1e-12 {
 		t.Fatalf("outcome summary = %+v", summary)
 	}
 }
@@ -907,9 +919,9 @@ func TestDashboardIncludesHourlyTrendAndTopCostRatios(t *testing.T) {
 	store := newTestStore(t)
 	currentHour := time.Now().In(eastEightLocation).Truncate(time.Hour)
 	requests := []RelayRequestLog{
-		{ID: "ratio-two-a", TokenID: 1, Endpoint: "responses", RequestedModel: "gpt-5", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, InputTokens: 1_000_000, NormalInputTokens: 1_000_000, UpstreamCost: 2_500_000, CreatedAt: currentHour.Add(time.Minute).UTC()},
-		{ID: "ratio-two-b", TokenID: 1, Endpoint: "responses", RequestedModel: "gpt-5", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, InputTokens: 1_000_000, NormalInputTokens: 1_000_000, UpstreamCost: 2_500_000, CreatedAt: currentHour.Add(2 * time.Minute).UTC()},
-		{ID: "ratio-one-half", TokenID: 1, Endpoint: "responses", RequestedModel: "gpt-5", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, InputTokens: 1_000_000, NormalInputTokens: 1_000_000, UpstreamCost: 1_875_000, CreatedAt: currentHour.Add(3 * time.Minute).UTC()},
+		{ID: "ratio-two-a", TokenID: 1, Endpoint: "responses", RequestedModel: "gpt-5.6-terra", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, InputTokens: 1_000_000, NormalInputTokens: 1_000_000, UpstreamCost: 4_000_000, CreatedAt: currentHour.Add(time.Minute).UTC()},
+		{ID: "ratio-two-b", TokenID: 1, Endpoint: "responses", RequestedModel: "gpt-5.6-terra", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, InputTokens: 1_000_000, NormalInputTokens: 1_000_000, UpstreamCost: 4_000_000, CreatedAt: currentHour.Add(2 * time.Minute).UTC()},
+		{ID: "ratio-one-half", TokenID: 1, Endpoint: "responses", RequestedModel: "gpt-5.6-terra", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, InputTokens: 1_000_000, NormalInputTokens: 1_000_000, UpstreamCost: 3_000_000, CreatedAt: currentHour.Add(3 * time.Minute).UTC()},
 	}
 	if err := store.db.Create(&requests).Error; err != nil {
 		t.Fatal(err)
@@ -1196,7 +1208,7 @@ func TestListChannelsIncludesRecentLatencyAndCacheMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	latencyAttempts := make([]RelayAttemptLog, 0, 50)
 	for index := 0; index < 50; index++ {
 		latencyAttempts = append(latencyAttempts, RelayAttemptLog{
@@ -1271,7 +1283,7 @@ func TestListChannelsIncludesRecentLatencyAndCacheMetrics(t *testing.T) {
 
 func TestRecentSuccessMetricsUseThirtyMinuteWindowAndAggregateChannelModels(t *testing.T) {
 	store := newTestStore(t)
-	now := time.Now()
+	now := time.Date(2026, time.August, 1, 3, 0, 0, 0, time.UTC)
 	attempts := []RelayAttemptLog{
 		{RequestID: "model-a-success-1", ChannelID: 10, ChannelModelID: 101, UpstreamModel: "model-a", Success: true, CreatedAt: now.Add(-29 * time.Minute)},
 		{RequestID: "model-a-success-2", ChannelID: 10, ChannelModelID: 101, UpstreamModel: "model-a", Success: true, CreatedAt: now.Add(-20 * time.Minute)},
@@ -1285,7 +1297,7 @@ func TestRecentSuccessMetricsUseThirtyMinuteWindowAndAggregateChannelModels(t *t
 		t.Fatal(err)
 	}
 
-	metrics, err := loadRecentSuccessMetrics(context.Background(), store.db, []uint64{10, 20, 30}, []uint64{101, 102, 201, 301}, now)
+	metrics, err := loadRecentSuccessMetrics(context.Background(), store.db, []uint64{10, 20, 30}, []uint64{101, 102, 201, 301}, now.In(eastEightLocation))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1306,14 +1318,45 @@ func TestRecentSuccessMetricsUseThirtyMinuteWindowAndAggregateChannelModels(t *t
 	}
 }
 
+func TestTodayChannelAttemptCountsUseEastEightCalendarDay(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Date(2026, time.August, 1, 1, 0, 0, 0, time.UTC)
+	start := eastEightStartOfDay(now).UTC()
+	attempts := []RelayAttemptLog{
+		{RequestID: "previous-day", ChannelID: 10, ChannelModelID: 101, UpstreamModel: "model-a", CreatedAt: start.Add(-time.Second)},
+		{RequestID: "today-start", ChannelID: 10, ChannelModelID: 101, UpstreamModel: "model-a", CreatedAt: start.Add(time.Second)},
+		{RequestID: "today-latest", ChannelID: 10, ChannelModelID: 101, UpstreamModel: "model-a", CreatedAt: now.Add(-time.Second)},
+		{RequestID: "today-canceled", ChannelID: 20, ChannelModelID: 201, UpstreamModel: "model-b", Outcome: RelayOutcomeCanceled, CreatedAt: now.Add(-time.Minute)},
+		{RequestID: "future", ChannelID: 20, ChannelModelID: 201, UpstreamModel: "model-b", CreatedAt: now.Add(time.Hour)},
+	}
+	if err := store.db.Create(&attempts).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	counts, err := loadTodayChannelAttemptCounts(context.Background(), store.db, []uint64{10, 20, 30}, now.In(eastEightLocation))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts[10] != 2 || counts[20] != 1 || counts[30] != 0 {
+		t.Fatalf("today channel attempt counts = %+v", counts)
+	}
+}
+
 func TestListChannelsIncludesRecentModelSuccessMetrics(t *testing.T) {
 	store := newTestStore(t)
 	_, _, channels, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, "http://one.invalid", "http://two.invalid")
-	now := time.Now()
+	now := time.Now().UTC()
 	attempts := []RelayAttemptLog{
 		{RequestID: "recent-model-success", ChannelID: channels[0].ID, ChannelModelID: mappings[0].ID, UpstreamModel: mappings[0].UpstreamModel, Success: true, CreatedAt: now.Add(-10 * time.Minute)},
 		{RequestID: "recent-model-failure", ChannelID: channels[0].ID, ChannelModelID: mappings[0].ID, UpstreamModel: mappings[0].UpstreamModel, Success: false, CreatedAt: now.Add(-5 * time.Minute)},
 		{RequestID: "expired-other-model-failure", ChannelID: channels[1].ID, ChannelModelID: mappings[1].ID, UpstreamModel: mappings[1].UpstreamModel, Success: false, CreatedAt: now.Add(-31 * time.Minute)},
+	}
+	expectedTodayAttempts := int64(0)
+	todayStart := eastEightStartOfDay(now).UTC()
+	for _, attempt := range attempts {
+		if attempt.ChannelID == channels[0].ID && !attempt.CreatedAt.Before(todayStart) && !attempt.CreatedAt.After(now) {
+			expectedTodayAttempts++
+		}
 	}
 	if err := store.db.Create(&attempts).Error; err != nil {
 		t.Fatal(err)
@@ -1341,6 +1384,9 @@ func TestListChannelsIncludesRecentModelSuccessMetrics(t *testing.T) {
 	}
 	if metrics := metricsByChannelID[channels[0].ID]; metrics.RecentSuccessRate != 0.5 || metrics.RecentSuccessCount != 1 || metrics.RecentAttemptCount != 2 {
 		t.Fatalf("measured channel = %+v", metrics)
+	}
+	if metrics := metricsByChannelID[channels[0].ID]; metrics.TodayAttemptCount != expectedTodayAttempts {
+		t.Fatalf("measured channel today attempts = %+v", metrics)
 	}
 	if metrics := metricsByChannelID[channels[1].ID]; metrics.RecentSuccessRate != 1 || metrics.RecentAttemptCount != 0 {
 		t.Fatalf("empty channel = %+v", metrics)
@@ -1429,7 +1475,7 @@ func TestDiscoverChannelModelsIncludesExactOfficialPrice(t *testing.T) {
 	store := newTestStore(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"gpt-4.1-custom"}]}`))
+		_, _ = writer.Write([]byte(`{"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-sol-custom"}]}`))
 	}))
 	defer upstream.Close()
 	discovery, err := NewManagementService(store).DiscoverChannelModels(context.Background(), ChannelModelDiscoveryInput{
@@ -1674,7 +1720,7 @@ func TestRouterRecentSuccessRateInfluencesEveryStrategy(t *testing.T) {
 func TestRouterPlanLoadsRecentModelSuccessRates(t *testing.T) {
 	store := newTestStore(t)
 	token, model, channels, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, "http://one.invalid", "http://two.invalid")
-	now := time.Now()
+	now := time.Now().UTC()
 	attempts := []RelayAttemptLog{
 		{RequestID: "recent-success", ChannelID: channels[0].ID, ChannelModelID: mappings[0].ID, UpstreamModel: mappings[0].UpstreamModel, Success: true, CreatedAt: now.Add(-20 * time.Minute)},
 		{RequestID: "recent-failure", ChannelID: channels[0].ID, ChannelModelID: mappings[0].ID, UpstreamModel: mappings[0].UpstreamModel, Success: false, CreatedAt: now.Add(-10 * time.Minute)},

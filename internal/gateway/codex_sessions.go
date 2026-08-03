@@ -74,6 +74,11 @@ func codexThreadSourceFromPayload(payload map[string]any) string {
 }
 
 func codexCompactionRequestFromPayload(payload map[string]any) bool {
+	isCompaction, _ := codexCompactionMetadataFromPayload(payload)
+	return isCompaction
+}
+
+func codexCompactionMetadataFromPayload(payload map[string]any) (bool, string) {
 	for _, metadataKey := range []string{"client_metadata", "metadata"} {
 		metadata, _ := payload[metadataKey].(map[string]any)
 		if metadata == nil {
@@ -81,10 +86,15 @@ func codexCompactionRequestFromPayload(payload map[string]any) bool {
 		}
 		turnMetadata := codexTurnMetadata(metadata["x-codex-turn-metadata"])
 		if strings.EqualFold(stringValue(turnMetadata["request_kind"]), "compaction") {
-			return true
+			compaction, _ := turnMetadata["compaction"].(map[string]any)
+			trigger := strings.ToLower(strings.TrimSpace(stringValue(compaction["trigger"])))
+			if trigger == "" && strings.EqualFold(stringValue(compaction["reason"]), "context_limit") {
+				trigger = contextWindowAutoCompactionTrigger
+			}
+			return true, truncateRunes(trigger, 16)
 		}
 	}
-	return false
+	return false, ""
 }
 
 func codexTurnMetadata(value any) map[string]any {
@@ -101,16 +111,21 @@ func codexTurnMetadata(value any) map[string]any {
 }
 
 func codexCompactionRequestFromBody(body []byte) bool {
+	isCompaction, _ := codexCompactionMetadataFromBody(body)
+	return isCompaction
+}
+
+func codexCompactionMetadataFromBody(body []byte) (bool, string) {
 	payload, ok := decodeJSONObject(body)
 	if !ok {
-		return false
+		return false, ""
 	}
 	if _, isDelta := payload["_gatewayLog"]; isDelta {
 		if nested, nestedOK := payload["payload"].(map[string]any); nestedOK {
 			payload = nested
 		}
 	}
-	return codexCompactionRequestFromPayload(payload)
+	return codexCompactionMetadataFromPayload(payload)
 }
 
 func codexThreadSourceFromBody(body []byte) string {

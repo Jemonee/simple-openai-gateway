@@ -63,6 +63,7 @@ func (s *Store) migrate() error {
 		&ClientTokenModel{},
 		&RelayRequestLog{},
 		&RelaySessionState{},
+		&ModelAgentContextWindow{},
 		&RelayChatSessionClaim{},
 		&RelayAttemptLog{},
 		&RelayStepLog{},
@@ -110,6 +111,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.backfillCodexCompactionTracking(); err != nil {
+		return err
+	}
+	if err := s.backfillModelAgentContextWindows(); err != nil {
 		return err
 	}
 	if err := s.backfillRelaySessionActivity(); err != nil {

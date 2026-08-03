@@ -50,7 +50,7 @@ func loadRecentSuccessMetrics(ctx context.Context, db *gorm.DB, channelIDs []uin
 	var rows []aggregateRow
 	query := db.WithContext(ctx).Model(&RelayAttemptLog{}).
 		Select("channel_id, channel_model_id, SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS successes, COUNT(*) AS attempts").
-		Where("created_at >= ? AND outcome <> ?", now.Add(-recentSuccessWindow), RelayOutcomeCanceled)
+		Where("created_at >= ? AND outcome <> ?", utcQueryTime(now.Add(-recentSuccessWindow)), RelayOutcomeCanceled)
 	if len(channelIDs) > 0 {
 		query = query.Where("channel_id IN ?", channelIDs)
 	} else {
@@ -67,4 +67,30 @@ func loadRecentSuccessMetrics(ctx context.Context, db *gorm.DB, channelIDs []uin
 		metrics.ByChannelModel[row.ChannelModelID] = recentSuccessMetric{Successes: row.Successes, Attempts: row.Attempts}
 	}
 	return metrics, nil
+}
+
+func loadTodayChannelAttemptCounts(ctx context.Context, db *gorm.DB, channelIDs []uint64, now time.Time) (map[uint64]int64, error) {
+	counts := make(map[uint64]int64, len(channelIDs))
+	for _, channelID := range channelIDs {
+		counts[channelID] = 0
+	}
+	if len(channelIDs) == 0 {
+		return counts, nil
+	}
+
+	type aggregateRow struct {
+		ChannelID uint64
+		Attempts  int64
+	}
+	var rows []aggregateRow
+	if err := db.WithContext(ctx).Model(&RelayAttemptLog{}).
+		Select("channel_id, COUNT(*) AS attempts").
+		Where("channel_id IN ? AND created_at >= ? AND created_at <= ?", channelIDs, eastEightStartOfDay(now).UTC(), now.UTC()).
+		Group("channel_id").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		counts[row.ChannelID] = row.Attempts
+	}
+	return counts, nil
 }

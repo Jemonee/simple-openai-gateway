@@ -80,6 +80,10 @@ type SessionLogSummary struct {
 	TokenKeyPrefix        string              `json:"tokenKeyPrefix"`
 	LatestModel           string              `json:"latestModel"`
 	LatestEndpoint        string              `json:"latestEndpoint"`
+	PrimaryModel          string              `json:"primaryModel"`
+	ContextWindowTokens   int64               `json:"contextWindowTokens"`
+	ContextWindowSource   string              `json:"contextWindowSource"`
+	ContextWindowSamples  int64               `json:"contextWindowSampleCount"`
 	RequestCount          int64               `json:"requestCount"`
 	CompactionCount       int64               `json:"compactionCount"`
 	SuccessCount          int64               `json:"successCount"`
@@ -230,9 +234,7 @@ func finishSessionSummary(summary *SessionLogSummary, totalFirstTokenMS int64, t
 	if summary.LatencySampleCount > 0 {
 		summary.AverageLatencyMS = float64(totalLatencyMS) / float64(summary.LatencySampleCount)
 	}
-	if completedRequests := summary.RequestCount - summary.CanceledCount - summary.ProcessingCount; completedRequests > 0 {
-		summary.SuccessRate = float64(summary.SuccessCount) / float64(completedRequests)
-	}
+	summary.SuccessRate = attemptSuccessRate(summary.SuccessCount, summary.AttemptCount)
 	if durationSamples := summary.RequestCount - summary.ProcessingCount; durationSamples > 0 {
 		summary.AverageDurationMS = float64(totalDurationMS) / float64(durationSamples)
 		summary.DurationSampleCount = durationSamples
@@ -247,6 +249,13 @@ func finishSessionSummary(summary *SessionLogSummary, totalFirstTokenMS int64, t
 	if summary.InputTokens > 0 {
 		summary.CacheHitRate = float64(summary.CachedTokens) / float64(summary.InputTokens)
 	}
+}
+
+func attemptSuccessRate(successCount int64, attemptCount int64) float64 {
+	if successCount <= 0 || attemptCount <= 0 {
+		return 0
+	}
+	return float64(min(successCount, attemptCount)) / float64(attemptCount)
 }
 
 func (s *ManagementService) SessionLogDetail(ctx context.Context, query SessionDetailQuery) (*SessionLogDetail, error) {
@@ -398,6 +407,10 @@ func (s *ManagementService) populateSessionSummary(ctx context.Context, summary 
 			summary.ClientKind = state.ClientKind
 			summary.ThreadSource = state.ThreadSource
 			summary.CompactionCount = state.CompactionCount
+			summary.PrimaryModel = state.PrimaryModel
+			summary.ContextWindowTokens = state.ContextWindowTokens
+			summary.ContextWindowSource = state.ContextWindowSource
+			summary.ContextWindowSamples = state.ContextWindowSamples
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
@@ -441,6 +454,9 @@ func (s *ManagementService) populateSessionSummary(ctx context.Context, summary 
 		summary.ThreadSource = codexThreadSourceUnknown
 	}
 	summary.LatestModel = latest.RequestedModel
+	if summary.PrimaryModel == "" {
+		summary.PrimaryModel = latest.RequestedModel
+	}
 	summary.LatestEndpoint = latest.Endpoint
 	current, err := s.currentSessionChannel(ctx, *summary, latest.RequestedModel, cutoff)
 	if err != nil {

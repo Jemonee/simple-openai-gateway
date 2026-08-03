@@ -74,6 +74,8 @@ func (s *ManagementService) ActiveSessions(ctx context.Context, query ActiveSess
 				"COALESCE(NULLIF(session_state.client_kind, ''), latest_request.client_kind) AS client_kind, " +
 				"session_state.thread_source AS thread_source, 1 AS identified, session_state.token_id AS token_id, " +
 				"session_state.compaction_count AS compaction_count, " +
+				"session_state.primary_model AS primary_model, session_state.context_window_tokens AS context_window_tokens, " +
+				"session_state.context_window_source AS context_window_source, session_state.context_window_samples AS context_window_samples, " +
 				"COALESCE(NULLIF(latest_request.token_name, ''), client_token.name) AS token_name, " +
 				"COALESCE(NULLIF(latest_request.token_key_prefix, ''), client_token.key_prefix) AS token_key_prefix, " +
 				"latest_request.requested_model AS latest_model, latest_request.endpoint AS latest_endpoint, " +

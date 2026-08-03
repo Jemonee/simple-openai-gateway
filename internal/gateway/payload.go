@@ -20,6 +20,7 @@ type RelayPayload struct {
 	ClientFingerprint     string
 	ThreadSource          string
 	IsCompactionRequest   bool
+	CompactionTrigger     string
 	RequestParametersJSON string
 	DeclaredMaxOutput     int64
 }
@@ -40,7 +41,7 @@ func ParseRelayPayload(data []byte) (*RelayPayload, error) {
 	payload.Stream, _ = values["stream"].(bool)
 	payload.PreviousResponseID, _ = values["previous_response_id"].(string)
 	applyCodexPayloadSession(payload, values)
-	payload.IsCompactionRequest = codexCompactionRequestFromPayload(values)
+	payload.IsCompactionRequest, payload.CompactionTrigger = codexCompactionMetadataFromPayload(values)
 	for _, key := range []string{"max_output_tokens", "max_completion_tokens", "max_tokens"} {
 		if value, ok := values[key].(json.Number); ok {
 			parsed, _ := value.Int64()

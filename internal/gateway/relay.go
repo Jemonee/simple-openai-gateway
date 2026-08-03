@@ -1660,6 +1660,7 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 		CodexTitleRequest:     codexTitleRequest,
 		CodexGeneratedTitle:   codexGeneratedTitle,
 		IsCompaction:          execution.payload.IsCompactionRequest,
+		CompactionTrigger:     execution.payload.CompactionTrigger,
 		RequestParametersJSON: requestParametersJSON,
 		PayloadLogDetail:      execution.payloadLogDetail,
 		ResponseBody:          responseBody,
@@ -1808,6 +1809,11 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 		}
 		if log.IsCompaction && !previousLog.IsCompaction && log.CodexSessionID != "" {
 			if err := incrementSessionCompactionCount(db, log.TokenID, log.CodexSessionID, now); err != nil {
+				return err
+			}
+		}
+		if log.CodexSessionID != "" {
+			if err := updateSessionContextWindow(db, log, execution.payload.ClientFingerprint, !previousLog.IsCompaction, now); err != nil {
 				return err
 			}
 		}
