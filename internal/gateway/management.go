@@ -1337,7 +1337,7 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int) (*Dashboard
 	var officialUsage []officialUsageRow
 	if err := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).
 		Select("requested_model, input_tokens, normal_input_tokens, output_tokens, cached_tokens, cache_write_tokens, upstream_cost").
-		Where("created_at >= ? AND created_at < ?", startTime, endTime).Find(&officialUsage).Error; err != nil {
+		Where("created_at >= ? AND created_at < ? AND outcome IN ?", startTime, endTime, []string{RelayOutcomeSuccess, RelayOutcomeCanceled}).Find(&officialUsage).Error; err != nil {
 		return nil, err
 	}
 	costRatioCounts := make(map[int64]int64)
