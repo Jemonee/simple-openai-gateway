@@ -166,7 +166,7 @@ func (r *Router) Plan(ctx context.Context, token *ClientToken, modelName string,
 	}
 	var candidates []RouteCandidate
 	modelSwitched := previousSessionRoute != nil &&
-		previousSessionRoute.Successful &&
+		previousSessionRoute.reusable() &&
 		previousSessionRoute.RequestedModel != "" &&
 		previousSessionRoute.RequestedModel != model.Name
 	if modelSwitched {
@@ -276,6 +276,11 @@ type sessionRouteSnapshot struct {
 	ChannelID      uint64
 	ChannelName    string
 	Successful     bool
+	Outcome        string
+}
+
+func (s sessionRouteSnapshot) reusable() bool {
+	return s.Successful || s.Outcome == RelayOutcomeCanceled
 }
 
 func (r *Router) previousSessionRoute(ctx context.Context, tokenID uint64, sessionKey string) (*sessionRouteSnapshot, error) {
@@ -285,7 +290,7 @@ func (r *Router) previousSessionRoute(ctx context.Context, tokenID uint64, sessi
 	var snapshot sessionRouteSnapshot
 	db := r.store.db.WithContext(ctx)
 	err := db.Table("relay_session_states AS state").
-		Select("request.requested_model, attempt.channel_id, attempt.channel_name, attempt.success AS successful").
+		Select("request.requested_model, attempt.channel_id, attempt.channel_name, attempt.success AS successful, attempt.outcome").
 		Joins("JOIN relay_request_logs AS request ON request.id = state.latest_request_id").
 		Joins("JOIN relay_attempt_logs AS attempt ON attempt.request_id = request.id").
 		Where("state.token_id = ? AND state.session_id = ?", tokenID, sessionKey).
@@ -300,7 +305,7 @@ func (r *Router) previousSessionRoute(ctx context.Context, tokenID uint64, sessi
 
 	// Legacy state and route-stage failures may not point at a request with attempts.
 	err = db.Table("relay_attempt_logs AS attempt").
-		Select("request.requested_model, attempt.channel_id, attempt.channel_name, attempt.success AS successful").
+		Select("request.requested_model, attempt.channel_id, attempt.channel_name, attempt.success AS successful, attempt.outcome").
 		Joins("JOIN relay_request_logs AS request ON request.id = attempt.request_id").
 		Where("request.token_id = ? AND request.codex_session_id = ?", tokenID, sessionKey).
 		Order("request.created_at DESC, attempt.created_at DESC, attempt.id DESC").

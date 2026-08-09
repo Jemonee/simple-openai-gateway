@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -44,6 +45,13 @@ type notifyingStreamWriter struct {
 	mu         sync.Mutex
 	firstWrite chan []byte
 	once       sync.Once
+}
+
+type deadlineStreamWriter struct {
+	header     http.Header
+	deadlines  []time.Time
+	flushErr   error
+	flushPanic any
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
@@ -111,6 +119,28 @@ func (w *notifyingStreamWriter) Write(data []byte) (int, error) {
 
 func (w *notifyingStreamWriter) Flush() {}
 
+func (w *deadlineStreamWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *deadlineStreamWriter) WriteHeader(int) {}
+
+func (w *deadlineStreamWriter) Write(data []byte) (int, error) {
+	return len(data), nil
+}
+
+func (w *deadlineStreamWriter) FlushError() error {
+	if w.flushPanic != nil {
+		panic(w.flushPanic)
+	}
+	return w.flushErr
+}
+
+func (w *deadlineStreamWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
+}
+
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
@@ -127,7 +157,7 @@ func newTestStore(t *testing.T) *Store {
 	if err := db.AutoMigrate(
 		&AdminUser{}, &AdminSession{}, &Channel{}, &GatewayModel{}, &ChannelModel{},
 		&CircuitRecord{},
-		&ClientToken{}, &ClientTokenModel{}, &RelayRequestLog{}, &RelaySessionState{}, &ModelAgentContextWindow{}, &RelayChatSessionClaim{}, &RelayAttemptLog{}, &RelayStepLog{}, &TokenDailyStat{}, &ChannelModelDailyStat{}, &GatewayMigration{},
+		&ClientToken{}, &ClientTokenModel{}, &RelayRequestLog{}, &GatewayResource{}, &RequestResource{}, &RelaySessionState{}, &ModelAgentContextWindow{}, &RelayChatSessionClaim{}, &RelayAttemptLog{}, &RelayStepLog{}, &TokenDailyStat{}, &ChannelModelDailyStat{}, &GatewayMigration{},
 		&ResponseAffinity{}, &SessionAffinity{},
 	); err != nil {
 		t.Fatal(err)
@@ -622,7 +652,7 @@ func TestBackfillTokenStatsAndLogFieldsRunOnce(t *testing.T) {
 	if err := store.db.First(&stat, "date = ? AND token_id = ?", "2026-07-20", 7).Error; err != nil {
 		t.Fatal(err)
 	}
-	if stat.RequestCount != 2 || stat.SuccessCount != 1 || stat.InputTokens != 16 || stat.NormalInputTokens != 11 || stat.OutputTokens != 4 || stat.CachedTokens != 3 || stat.CacheWriteTokens != 2 || stat.SentTokens != 16 || stat.EstimatedCost != 17 || stat.UpstreamCost != 17 || stat.FirstTokenMS != 50 || stat.FirstTokenSamples != 1 || stat.LatencyMS != 90 || stat.LatencySamples != 2 || stat.DurationMS != 400 || stat.AttemptCount != 3 {
+	if stat.RequestCount != 2 || stat.SuccessCount != 1 || stat.InputTokens != 10 || stat.NormalInputTokens != 5 || stat.OutputTokens != 4 || stat.CachedTokens != 3 || stat.CacheWriteTokens != 2 || stat.SentTokens != 10 || stat.EstimatedCost != 17 || stat.UpstreamCost != 17 || stat.FirstTokenMS != 50 || stat.FirstTokenSamples != 1 || stat.LatencyMS != 90 || stat.LatencySamples != 2 || stat.DurationMS != 400 || stat.AttemptCount != 3 {
 		t.Fatalf("backfilled stat = %+v", stat)
 	}
 	var backfilledRequest RelayRequestLog
@@ -637,7 +667,7 @@ func TestBackfillTokenStatsAndLogFieldsRunOnce(t *testing.T) {
 		t.Fatalf("backfilled token details = request %+v attempt %+v", backfilledRequest, backfilledAttempt)
 	}
 	statistics, err := NewManagementService(store).tokenStatistics(context.Background(), 7)
-	if err != nil || statistics.NormalInputTokens != 11 || statistics.CacheWriteTokens != 2 || statistics.SentTokens != 16 || statistics.UpstreamCost != 17 || statistics.AverageFirstTokenMS != 50 || statistics.AverageLatency != 45 || statistics.AverageDurationMS != 200 {
+	if err != nil || statistics.NormalInputTokens != 5 || statistics.CacheWriteTokens != 2 || statistics.SentTokens != 10 || statistics.UpstreamCost != 17 || statistics.AverageFirstTokenMS != 50 || statistics.AverageLatency != 45 || statistics.AverageDurationMS != 200 {
 		t.Fatalf("token statistics = %+v, error = %v", statistics, err)
 	}
 }
@@ -749,7 +779,7 @@ func TestBackfillCostFieldsZerosRecentFailuresAndPreservesOlderAggregates(t *tes
 	if err := store.db.First(&recentStat, "date = ? AND token_id = ?", recentDate, 9).Error; err != nil {
 		t.Fatal(err)
 	}
-	if recentStat.RequestCount != 2 || recentStat.SuccessCount != 1 || recentStat.EstimatedCost != 11 || recentStat.UpstreamCost != 11 {
+	if recentStat.RequestCount != 2 || recentStat.SuccessCount != 1 || recentStat.InputTokens != 0 || recentStat.OutputTokens != 0 || recentStat.EstimatedCost != 11 || recentStat.UpstreamCost != 11 {
 		t.Fatalf("rebuilt recent stat = %+v", recentStat)
 	}
 	var oldStat TokenDailyStat
@@ -786,7 +816,7 @@ func TestBackfillRelayOutcomesSeparatesCanceledRequests(t *testing.T) {
 	if err := store.db.Model(&RelayAttemptLog{}).Where("request_id IN ?", []string{requests[0].ID, requests[1].ID}).Updates(map[string]any{"outcome": RelayOutcomeFailed}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.Create(&TokenDailyStat{Date: now.Format(time.DateOnly), TokenID: 1, RequestCount: 3, SuccessCount: 1}).Error; err != nil {
+	if err := store.db.Create(&TokenDailyStat{Date: eastEightDate(now), TokenID: 1, RequestCount: 3, SuccessCount: 1}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := store.db.Delete(&GatewayMigration{}, "name = ?", "relay_outcomes_v1").Error; err != nil {
@@ -815,7 +845,7 @@ func TestBackfillRelayOutcomesSeparatesCanceledRequests(t *testing.T) {
 		t.Fatalf("canceled attempt = %+v", canceledAttempt)
 	}
 	var stat TokenDailyStat
-	if err := store.db.Where("date = ? AND token_id = ?", now.Format(time.DateOnly), 1).First(&stat).Error; err != nil {
+	if err := store.db.Where("date = ? AND token_id = ?", eastEightDate(now), 1).First(&stat).Error; err != nil {
 		t.Fatal(err)
 	}
 	if stat.CanceledCount != 1 {
@@ -941,6 +971,7 @@ func TestDashboardIncludesHourlyTrendAndTopCostRatios(t *testing.T) {
 		{ID: "ratio-two-a", TokenID: 1, Endpoint: "responses", RequestedModel: "gpt-5.6-terra", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, InputTokens: 1_000_000, NormalInputTokens: 1_000_000, UpstreamCost: 4_000_000, CreatedAt: currentHour.Add(time.Minute).UTC()},
 		{ID: "ratio-two-b", TokenID: 1, Endpoint: "responses", RequestedModel: "gpt-5.6-terra", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, InputTokens: 1_000_000, NormalInputTokens: 1_000_000, UpstreamCost: 4_000_000, CreatedAt: currentHour.Add(2 * time.Minute).UTC()},
 		{ID: "ratio-one-half", TokenID: 1, Endpoint: "responses", RequestedModel: "gpt-5.6-terra", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, InputTokens: 1_000_000, NormalInputTokens: 1_000_000, UpstreamCost: 3_000_000, CreatedAt: currentHour.Add(3 * time.Minute).UTC()},
+		{ID: "ratio-failed", TokenID: 1, Endpoint: "responses", RequestedModel: "gpt-5.6-terra", StatusCode: http.StatusBadGateway, Outcome: RelayOutcomeFailed, InputTokens: 1_000_000, NormalInputTokens: 1_000_000, UpstreamCost: 0, CreatedAt: currentHour.Add(4 * time.Minute).UTC()},
 	}
 	if err := store.db.Create(&requests).Error; err != nil {
 		t.Fatal(err)
@@ -954,8 +985,11 @@ func TestDashboardIncludesHourlyTrendAndTopCostRatios(t *testing.T) {
 		t.Fatal("dashboard hourly trend is empty")
 	}
 	latest := summary.Hourly[len(summary.Hourly)-1]
-	if latest.Hour != currentHour.Format("2006-01-02T15:00:00-07:00") || latest.Requests != 3 || latest.Successes != 3 {
+	if latest.Hour != currentHour.Format("2006-01-02T15:00:00-07:00") || latest.Requests != 4 || latest.Successes != 3 {
 		t.Fatalf("latest hourly bucket = %+v", latest)
+	}
+	if summary.OfficialCost != 6_000_000 || math.Abs(summary.UpstreamCostRatio-(11.0/6.0)) > 0.0001 {
+		t.Fatalf("failed request affected dashboard cost ratio = %+v", summary)
 	}
 	if len(summary.CostRatios) != 2 {
 		t.Fatalf("cost ratio distribution = %+v", summary.CostRatios)
@@ -1056,7 +1090,7 @@ func TestRetryFailureUsageIsNotAddedToRequestTotals(t *testing.T) {
 	}
 	canceled := &attemptResult{usage: Usage{InputTokens: 10, OutputTokens: 2, Source: "estimated_tiktoken"}, estimatedCost: 5, upstreamCost: 5, costSource: CostSourceFallback, outcome: RelayOutcomeCanceled}
 	relay.addCanceledAttemptUsage(execution, canceled)
-	if execution.usage.InputTokens != 10 || execution.usage.OutputTokens != 2 || execution.estimatedCost != 5 || execution.upstreamCost != 5 {
+	if execution.usage.InputTokens != 10 || execution.usage.OutputTokens != 2 || execution.estimatedCost != 0 || execution.upstreamCost != 0 {
 		t.Fatalf("canceled final attempt usage was not retained: %+v", execution)
 	}
 }
@@ -1094,7 +1128,7 @@ func TestBackfillRequestStatisticsUsesFinalAttemptAndRebuildsTokenStats(t *testi
 		t.Fatalf("corrected request = %+v", corrected)
 	}
 	var stat TokenDailyStat
-	if err := store.db.First(&stat, "date = ? AND token_id = ?", now.Format(time.DateOnly), 7).Error; err != nil {
+	if err := store.db.First(&stat, "date = ? AND token_id = ?", eastEightDate(now), 7).Error; err != nil {
 		t.Fatal(err)
 	}
 	if stat.RequestCount != 1 || stat.InputTokens != 10 || stat.OutputTokens != 5 || stat.EstimatedCost != 15 || stat.UpstreamCost != 42 || stat.AttemptCount != 2 {
@@ -2638,7 +2672,7 @@ func TestSessionLogsAggregateExistingFiveDayDetails(t *testing.T) {
 	if page.Total != 2 || len(page.Items) != 2 {
 		t.Fatalf("session page = %+v", page)
 	}
-	if page.Summary.RequestCount != 3 || page.Summary.SuccessCount != 2 || page.Summary.AttemptCount != 3 || page.Summary.InputTokens != 160 || page.Summary.OutputTokens != 30 {
+	if page.Summary.RequestCount != 3 || page.Summary.SuccessCount != 2 || page.Summary.AttemptCount != 3 || page.Summary.InputTokens != 150 || page.Summary.OutputTokens != 30 {
 		t.Fatalf("session page summary = %+v", page.Summary)
 	}
 	var identified, unknown *SessionLogSummary
@@ -2652,7 +2686,7 @@ func TestSessionLogsAggregateExistingFiveDayDetails(t *testing.T) {
 	if identified == nil || unknown == nil {
 		t.Fatalf("session summaries = %+v", page.Items)
 	}
-	if identified.RequestCount != 2 || identified.SuccessCount != 1 || identified.AttemptCount != 3 || identified.InputTokens != 110 || identified.NormalInputTokens != 70 || identified.OutputTokens != 20 || identified.CachedTokens != 30 || identified.CacheWriteTokens != 10 || identified.SentTokens != 120 || identified.EstimatedCost != 70 || identified.UpstreamCost != 60 || identified.AverageFirstTokenMS != 50 || identified.FirstTokenSampleCount != 1 || identified.AverageLatencyMS != 30 || identified.LatencySampleCount != 2 || identified.AverageDurationMS != 200 || identified.DurationSampleCount != 2 {
+	if identified.RequestCount != 2 || identified.SuccessCount != 1 || identified.AttemptCount != 3 || identified.InputTokens != 100 || identified.NormalInputTokens != 60 || identified.OutputTokens != 20 || identified.CachedTokens != 30 || identified.CacheWriteTokens != 10 || identified.SentTokens != 100 || identified.EstimatedCost != 70 || identified.UpstreamCost != 60 || identified.AverageFirstTokenMS != 50 || identified.FirstTokenSampleCount != 1 || identified.AverageLatencyMS != 30 || identified.LatencySampleCount != 2 || identified.AverageDurationMS != 200 || identified.DurationSampleCount != 2 {
 		t.Fatalf("identified summary = %+v", identified)
 	}
 	if identified.CurrentChannel == nil || identified.CurrentChannel.ChannelID != channels[1].ID || identified.CurrentChannel.AssignmentSource != "session_affinity" {
@@ -2676,7 +2710,7 @@ func TestSessionLogsAggregateExistingFiveDayDetails(t *testing.T) {
 	if detail.RequestTotal != 2 || detail.Summary.CompactionCount != 1 || len(detail.Requests) != 2 || detail.Requests[0].ID != "session-request-2" || len(detail.Requests[0].Attempts) != 2 || detail.Requests[1].ID != "session-request-1" {
 		t.Fatalf("session detail = %+v", detail)
 	}
-	if detail.Summary.NormalInputTokens != 70 || detail.Summary.CacheWriteTokens != 10 || detail.Summary.SentTokens != 120 || detail.Summary.UpstreamCost != 60 || detail.Summary.AverageFirstTokenMS != 50 || detail.Summary.AverageLatencyMS != 30 || detail.Summary.AverageDurationMS != 200 || detail.Requests[1].CacheWriteTokens != 10 || detail.Requests[1].Attempts[0].CacheWriteTokens != 10 || detail.Requests[1].Attempts[0].SentTokens != 100 {
+	if detail.Summary.NormalInputTokens != 60 || detail.Summary.CacheWriteTokens != 10 || detail.Summary.SentTokens != 100 || detail.Summary.UpstreamCost != 60 || detail.Summary.AverageFirstTokenMS != 50 || detail.Summary.AverageLatencyMS != 30 || detail.Summary.AverageDurationMS != 200 || detail.Requests[1].CacheWriteTokens != 10 || detail.Requests[1].Attempts[0].CacheWriteTokens != 10 || detail.Requests[1].Attempts[0].SentTokens != 100 {
 		t.Fatalf("session cache-write detail = %+v", detail)
 	}
 	if detail.Summary.AverageFirstResponseMS != 30 || detail.Summary.FirstResponseSampleCount != 2 {
@@ -3015,6 +3049,59 @@ func TestCodexSessionModelSwitchFallsBackWhenPreviousChannelDoesNotSupportModel(
 	}
 	if plan.InitialSelection.Reason != SelectionReasonModelSwitch || plan.InitialSelection.Decision == nil || plan.InitialSelection.Decision.Mode != "probability" {
 		t.Fatalf("model-switch fallback selection = %+v", plan.InitialSelection)
+	}
+}
+
+func TestCodexSessionModelSwitchReusesCanceledRoute(t *testing.T) {
+	store := newTestStore(t)
+	token, firstModel, channels, firstMappings := createRouteFixture(t, store, RoutingPriorityWeighted, "http://one.invalid", "http://two.invalid")
+	secondModel := GatewayModel{Name: "canceled-route-model", RoutingStrategy: RoutingPriorityWeighted, Enabled: true}
+	if err := store.db.Create(&secondModel).Error; err != nil {
+		t.Fatal(err)
+	}
+	preferredMapping := ChannelModel{
+		ChannelID: channels[0].ID, ModelID: secondModel.ID, UpstreamModel: "canceled-route-upstream",
+		Priority: 1, Weight: 1, Enabled: true,
+	}
+	if err := store.db.Create(&preferredMapping).Error; err != nil {
+		t.Fatal(err)
+	}
+	fallbackMapping := ChannelModel{
+		ChannelID: channels[1].ID, ModelID: secondModel.ID, UpstreamModel: "higher-priority-upstream",
+		Priority: 100, Weight: 100, Enabled: true,
+	}
+	if err := store.db.Create(&fallbackMapping).Error; err != nil {
+		t.Fatal(err)
+	}
+	previousRequest := RelayRequestLog{
+		ID: "canceled-model-switch", TokenID: token.ID, RequestedModel: firstModel.Name,
+		CodexSessionID: "canceled-model-switch-session", Outcome: RelayOutcomeCanceled, CreatedAt: time.Now().Add(-time.Minute),
+	}
+	if err := store.db.Create(&previousRequest).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Create(&RelaySessionState{
+		TokenID: token.ID, SessionID: previousRequest.CodexSessionID, LatestRequestID: previousRequest.ID,
+		CreatedAt: previousRequest.CreatedAt, UpdatedAt: previousRequest.CreatedAt,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Create(&RelayAttemptLog{
+		RequestID: previousRequest.ID, ChannelID: channels[0].ID, ChannelName: channels[0].Name,
+		ChannelModelID: firstMappings[0].ID, UpstreamModel: firstMappings[0].UpstreamModel,
+		Outcome: RelayOutcomeCanceled, Success: false, CreatedAt: previousRequest.CreatedAt,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := NewRouter(store, NewClientAccessService(store), nil).Plan(
+		context.Background(), token, secondModel.Name, 10, 10, "", previousRequest.CodexSessionID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.InitialSelection.Reason != SelectionReasonModelSwitch || plan.Candidates[0].Mapping.ID != preferredMapping.ID || !plan.RefreshSessionAffinity {
+		t.Fatalf("model-switch route after cancellation = %+v", plan)
 	}
 }
 
@@ -3558,6 +3645,106 @@ func TestSSEEventHasData(t *testing.T) {
 	}
 }
 
+func TestReadSSEEventPreservesTerminalFraming(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "done marker", input: "data: [DONE]\n\n", want: "data: [DONE]\n\n"},
+		{name: "completed without separator", input: "data: {\"type\":\"response.completed\"}\n", want: "data: {\"type\":\"response.completed\"}\n\n"},
+		{name: "done alias with CRLF", input: "data: {\"type\":\"response.done\"}\r\n", want: "data: {\"type\":\"response.done\"}\r\n\r\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			event, err := readSSEEvent(bufio.NewReader(strings.NewReader(test.input)), "responses")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(event) != test.want {
+				t.Fatalf("event = %q, want %q", event, test.want)
+			}
+		})
+	}
+}
+
+func TestReadSSEEventRejectsOversizedEvent(t *testing.T) {
+	input := "data: " + strings.Repeat("x", 64) + "\n\n"
+	event, err := readSSEEventWithLimit(bufio.NewReader(strings.NewReader(input)), "responses", 32)
+	if !errors.Is(err, errSSEEventTooLarge) || len(event) != 0 {
+		t.Fatalf("event bytes = %d error = %v", len(event), err)
+	}
+}
+
+func TestReadUpstreamResponseBodyRejectsOversizedPayload(t *testing.T) {
+	body, err := readUpstreamResponseBodyWithLimit(strings.NewReader("123456789"), 8)
+	if !errors.Is(err, errBufferedResponseTooLarge) || string(body) != "12345678" {
+		t.Fatalf("body = %q error = %v", body, err)
+	}
+}
+
+func TestFlushStreamResponseUsesDeadlineAndRecoversPanics(t *testing.T) {
+	flushFailure := errors.New("flush failed")
+	writer := &deadlineStreamWriter{header: make(http.Header), flushErr: flushFailure}
+	if err := flushStreamResponse(http.NewResponseController(writer)); !errors.Is(err, flushFailure) {
+		t.Fatalf("flush error = %v, want %v", err, flushFailure)
+	}
+	if len(writer.deadlines) != 1 || writer.deadlines[0].Before(time.Now()) {
+		t.Fatalf("write deadlines = %+v", writer.deadlines)
+	}
+
+	panicWriter := &deadlineStreamWriter{header: make(http.Header), flushPanic: "flush panic"}
+	if err := flushStreamResponse(http.NewResponseController(panicWriter)); err == nil || !strings.Contains(err.Error(), "flush panic") {
+		t.Fatalf("panic flush error = %v", err)
+	}
+}
+
+func TestBufferedDownstreamDisconnectIsCanceledAndKeepsSessionRoute(t *testing.T) {
+	store := newTestStore(t)
+	upstream := successfulResponseServer()
+	defer upstream.Close()
+	token, model, _, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, upstream.URL)
+	body := []byte(`{"model":"public-model","prompt_cache_key":"buffered-cancel-session","input":"hello"}`)
+	payload, err := ParseRelayPayload(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := &disconnectedStreamWriter{header: make(http.Header)}
+	relay := newTestRelay(store)
+	if publicErr := relay.Relay(context.Background(), writer, nil, "", "responses", token, payload, body); publicErr != nil {
+		t.Fatal(publicErr)
+	}
+	var requestLog RelayRequestLog
+	if err := store.db.First(&requestLog).Error; err != nil {
+		t.Fatal(err)
+	}
+	if requestLog.Outcome != RelayOutcomeCanceled || requestLog.StatusCode != statusClientClosedRequest || requestLog.ErrorCode != "request_canceled" || requestLog.EstimatedCost != 0 || requestLog.UpstreamCost != 0 || requestLog.CostSource != CostSourceFailedZero {
+		t.Fatalf("request log = %+v", requestLog)
+	}
+	attempts := relayAttempts(t, store)
+	if len(attempts) != 1 || attempts[0].Outcome != RelayOutcomeCanceled || attempts[0].Success || attempts[0].EstimatedCost != 0 || attempts[0].UpstreamCost != 0 || attempts[0].CostSource != CostSourceFailedZero || !strings.Contains(attempts[0].ErrorMessage, "client disconnected") {
+		t.Fatalf("attempts = %+v", attempts)
+	}
+	var responseAffinityCount int64
+	if err := store.db.Model(&ResponseAffinity{}).Count(&responseAffinityCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	var sessionAffinity SessionAffinity
+	if err := store.db.Where("token_id = ? AND model_id = ? AND session_hash = ?", token.ID, model.ID, hashSecret(payload.SessionKey)).First(&sessionAffinity).Error; err != nil {
+		t.Fatal(err)
+	}
+	if responseAffinityCount != 0 || sessionAffinity.ChannelModelID != mappings[0].ID {
+		t.Fatalf("affinity = response count %d session %+v", responseAffinityCount, sessionAffinity)
+	}
+	plan, err := relay.router.Plan(context.Background(), token, payload.Model, 1, 1, "", payload.SessionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.InitialSelection.Reason != SelectionReasonSessionAffinity || plan.Candidates[0].Mapping.ID != mappings[0].ID {
+		t.Fatalf("next route plan = %+v", plan)
+	}
+}
+
 func TestRequestSessionNameUsesLatestUserText(t *testing.T) {
 	tests := []struct {
 		name string
@@ -3568,10 +3755,18 @@ func TestRequestSessionNameUsesLatestUserText(t *testing.T) {
 		{name: "chat accumulated context", body: `{"messages":[{"role":"user","content":"old context"},{"role":"assistant","content":"old answer"},{"role":"user","content":"current user request"}]}`, want: "current us"},
 		{name: "chat parts", body: `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"private"}},{"type":"text","text":"inspect this image"}]}]}`, want: "inspect th"},
 		{name: "chat Codex image attachment", body: `{"messages":[{"role":"user","content":"# Files mentioned by the user:\n\n## screenshot.png: /tmp/screenshot.png\n\n## My request for Codex:\n修复一下这个问题\n<image name=[Image #1] path=\"/tmp/screenshot.png\">\n</image>"}]}`, want: "修复一下这个问题"},
+		{name: "chat current Codex attachment", body: `{"messages":[{"role":"user","content":"# Files mentioned by the user:\n\n## screenshot.png: /tmp/screenshot.png\n\n## My request:\n适配新版会话名称\n<image name=[Image #1] path=\"/tmp/screenshot.png\">\n</image>"}]}`, want: "适配新版会话名称"},
+		{name: "chat skill context", body: `{"messages":[{"role":"user","content":"$agent-orchestrator add project member id"},{"role":"user","content":"<skill>\n<name>agent-orchestrator</name>\n<path>/tmp/SKILL.md</path>\n</skill>"}]}`, want: "add projec"},
 		{name: "responses string", body: `{"input":"生成一份设备运行日报表"}`, want: "生成一份设备运行日报"},
 		{name: "responses messages", body: `{"input":[{"role":"developer","content":"ignored"},{"role":"user","content":[{"type":"input_text","text":"line one"},{"type":"input_text","text":"line two"}]}]}`, want: "line one l"},
 		{name: "responses accumulated context", body: `{"input":[{"role":"user","content":"older prompt"},{"role":"assistant","content":"older answer"},{"role":"user","content":"latest prompt"}]}`, want: "latest pro"},
 		{name: "responses Codex image attachment", body: `{"input":[{"role":"user","content":[{"type":"input_text","text":"# Files mentioned by the user:\n\n## screenshot.png: /tmp/screenshot.png\n\n## My request for Codex:\ninspect session naming"},{"type":"input_text","text":"<image name=[Image #1] path=\"/tmp/screenshot.png\">"},{"type":"input_image","image_url":"data:image/png;base64,AA=="},{"type":"input_text","text":"</image>"}]}]}`, want: "inspect se"},
+		{name: "responses current Codex attachment", body: `{"input":[{"role":"user","content":[{"type":"input_text","text":"# Files mentioned by the user:\n\n## screenshot.png: /tmp/screenshot.png\n\n## My request:\nadapt current attachment naming"},{"type":"input_text","text":"<image name=[Image #1] path=\"/tmp/screenshot.png\">"}]}]}`, want: "adapt curr"},
+		{name: "responses skill context", body: `{"input":[{"role":"user","content":"$agent-orchestrator 我想要现在项目人员添加一个字段"},{"role":"user","content":"<skill>\n<name>agent-orchestrator</name>\n<path>/tmp/SKILL.md</path>\n</skill>"}]}`, want: "我想要现在项目人员添"},
+		{name: "responses markdown skill link", body: `{"input":[{"role":"user","content":"[$agent-orchestrator](/Users/dudu/.codex/skills/agent-orchestrator/SKILL.md)\n1. 这里不需要展示用户的十六进制 ID"}]}`, want: "1. 这里不需要展示"},
+		{name: "responses multiple skill links", body: `{"input":[{"role":"user","content":"[$one](/tmp/one/SKILL.md) [$two](/tmp/two/SKILL.md)\n真实请求内容"}]}`, want: "真实请求内容"},
+		{name: "responses skill block and attached marker", body: `{"input":[{"role":"user","content":"<skill>\n<name>one</name>\n</skill>\n# Files mentioned by the user:\n\n## note.txt: /tmp/note.txt\n\n## My request:\n处理这个文件"}]}`, want: "处理这个文件"},
+		{name: "responses punctuation skill invocation", body: `{"input":[{"role":"user","content":"$one: 处理这个问题"}]}`, want: "处理这个问题"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -3579,6 +3774,38 @@ func TestRequestSessionNameUsesLatestUserText(t *testing.T) {
 				t.Fatalf("requestSessionName() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestSessionPayloadReplacesOnlySyntheticAutomaticTitle(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now().UTC()
+	body := []byte(`{"model":"model-a","input":"hello"}`)
+	for _, test := range []struct {
+		sessionID string
+		title     string
+		custom    bool
+		want      string
+	}{
+		{sessionID: "files-title", title: "# Files me", want: "真实用户请求"},
+		{sessionID: "skill-title", title: "<skill> <n", want: "真实用户请求"},
+		{sessionID: "valid-title", title: "保留原始标题", want: "保留原始标题"},
+		{sessionID: "custom-title", title: "# Files me", custom: true, want: "# Files me"},
+	} {
+		if err := store.db.Create(&RelaySessionState{
+			TokenID: 11, SessionID: test.sessionID, Title: test.title, TitleCustomized: test.custom,
+			CreatedAt: now, UpdatedAt: now,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+		compactSessionPayload(store.db, 11, test.sessionID, "request-"+test.sessionID, "真实用户请求", codexThreadSourceUser, body, nil, now)
+		var state RelaySessionState
+		if err := store.db.Where("token_id = ? AND session_id = ?", 11, test.sessionID).First(&state).Error; err != nil {
+			t.Fatal(err)
+		}
+		if state.Title != test.want {
+			t.Fatalf("session %s title = %q, want %q", test.sessionID, state.Title, test.want)
+		}
 	}
 }
 
@@ -3780,7 +4007,7 @@ func TestBackfillApplicationOutcomesCorrectsCompressedHistoricalSuccess(t *testi
 	if err := store.db.Create(&attempt).Error; err != nil {
 		t.Fatal(err)
 	}
-	stat := TokenDailyStat{Date: now.Format(time.DateOnly), TokenID: requestLog.TokenID, RequestCount: 1, SuccessCount: 1, EstimatedCost: 120, UpstreamCost: 90}
+	stat := TokenDailyStat{Date: eastEightDate(now), TokenID: requestLog.TokenID, RequestCount: 1, SuccessCount: 1, EstimatedCost: 120, UpstreamCost: 90}
 	if err := store.db.Create(&stat).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -3820,7 +4047,7 @@ func TestBackfillApplicationOutcomesCorrectsCompressedHistoricalSuccess(t *testi
 	if err := store.db.First(&correctedStat, "date = ? AND token_id = ?", stat.Date, stat.TokenID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if correctedStat.SuccessCount != 0 || correctedStat.EstimatedCost != 0 || correctedStat.UpstreamCost != 0 {
+	if correctedStat.SuccessCount != 0 || correctedStat.EstimatedCost != 0 || correctedStat.UpstreamCost != 0 || correctedStat.InputTokens != 0 || correctedStat.OutputTokens != 0 {
 		t.Fatalf("corrected stat = %+v", correctedStat)
 	}
 	var affinityCount int64
@@ -4344,7 +4571,7 @@ func TestRelayKeepsCodexSessionAffinityUntilOriginalChannelIsUnavailable(t *test
 	}
 }
 
-func TestRelayStopsAfterClientCancellationWithoutPenalizingChannels(t *testing.T) {
+func TestRelayStopsAfterClientCancellationWithoutPenalizingOrSwitchingChannels(t *testing.T) {
 	store := newTestStore(t)
 	started := make(chan struct{})
 	releaseUpstream := make(chan struct{})
@@ -4360,16 +4587,17 @@ func TestRelayStopsAfterClientCancellationWithoutPenalizingChannels(t *testing.T
 		writer.WriteHeader(http.StatusOK)
 	}))
 	defer second.Close()
-	token, _, channels, _ := createRouteFixture(t, store, RoutingPriorityWeighted, first.URL, second.URL)
-	body := []byte(`{"model":"public-model","messages":[{"role":"user","content":"hello"}]}`)
+	token, model, channels, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, first.URL, second.URL)
+	body := []byte(`{"model":"public-model","prompt_cache_key":"header-cancel-session","messages":[{"role":"user","content":"hello"}]}`)
 	payload, err := ParseRelayPayload(body)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan *PublicError, 1)
+	relay := newTestRelay(store)
 	go func() {
-		done <- newTestRelay(store).Relay(ctx, httptest.NewRecorder(), http.Header{}, "", "chat", token, payload, body)
+		done <- relay.Relay(ctx, httptest.NewRecorder(), http.Header{}, "", "chat", token, payload, body)
 	}()
 	<-started
 	cancel()
@@ -4396,6 +4624,20 @@ func TestRelayStopsAfterClientCancellationWithoutPenalizingChannels(t *testing.T
 	if requestLog.StatusCode != statusClientClosedRequest || requestLog.AttemptCount != 1 || requestLog.ErrorCode != "request_canceled" {
 		t.Fatalf("request log = %+v", requestLog)
 	}
+	var affinity SessionAffinity
+	if err := store.db.Where("token_id = ? AND model_id = ? AND session_hash = ?", token.ID, model.ID, hashSecret(payload.SessionKey)).First(&affinity).Error; err != nil {
+		t.Fatal(err)
+	}
+	if affinity.ChannelModelID != mappings[0].ID {
+		t.Fatalf("session affinity = %+v", affinity)
+	}
+	plan, err := relay.router.Plan(context.Background(), token, payload.Model, 1, 1, "", payload.SessionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.InitialSelection.Reason != SelectionReasonSessionAffinity || plan.Candidates[0].Mapping.ID != mappings[0].ID {
+		t.Fatalf("next route plan = %+v", plan)
+	}
 }
 
 func TestSSEClientDisconnectDoesNotOpenCircuit(t *testing.T) {
@@ -4406,14 +4648,15 @@ func TestSSEClientDisconnectDoesNotOpenCircuit(t *testing.T) {
 		writer.(http.Flusher).Flush()
 	}))
 	defer upstream.Close()
-	token, _, channels, _ := createRouteFixture(t, store, RoutingPriorityWeighted, upstream.URL)
-	body := []byte(`{"model":"public-model","stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	token, model, channels, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, upstream.URL)
+	body := []byte(`{"model":"public-model","stream":true,"prompt_cache_key":"stream-cancel-session","messages":[{"role":"user","content":"hello"}]}`)
 	payload, err := ParseRelayPayload(body)
 	if err != nil {
 		t.Fatal(err)
 	}
 	writer := &disconnectedStreamWriter{header: make(http.Header)}
-	if publicErr := newTestRelay(store).Relay(context.Background(), writer, http.Header{}, "", "chat", token, payload, body); publicErr != nil {
+	relay := newTestRelay(store)
+	if publicErr := relay.Relay(context.Background(), writer, http.Header{}, "", "chat", token, payload, body); publicErr != nil {
 		t.Fatal(publicErr)
 	}
 	var channel Channel
@@ -4430,15 +4673,22 @@ func TestSSEClientDisconnectDoesNotOpenCircuit(t *testing.T) {
 	if requestLog.StatusCode != statusClientClosedRequest || requestLog.ErrorCode != "request_canceled" {
 		t.Fatalf("request log = %+v", requestLog)
 	}
-	if requestLog.Outcome != RelayOutcomeCanceled || requestLog.CostSource == CostSourceFailedZero {
+	if requestLog.Outcome != RelayOutcomeCanceled || requestLog.EstimatedCost != 0 || requestLog.UpstreamCost != 0 || requestLog.CostSource != CostSourceFailedZero {
 		t.Fatalf("canceled request outcome/cost = %+v", requestLog)
 	}
 	var attemptLog RelayAttemptLog
 	if err := store.db.First(&attemptLog).Error; err != nil {
 		t.Fatal(err)
 	}
-	if attemptLog.Outcome != RelayOutcomeCanceled || attemptLog.Success || attemptLog.CostSource == CostSourceFailedZero {
+	if attemptLog.Outcome != RelayOutcomeCanceled || attemptLog.Success || attemptLog.EstimatedCost != 0 || attemptLog.UpstreamCost != 0 || attemptLog.CostSource != CostSourceFailedZero {
 		t.Fatalf("canceled attempt = %+v", attemptLog)
+	}
+	var affinity SessionAffinity
+	if err := store.db.Where("token_id = ? AND model_id = ? AND session_hash = ?", token.ID, model.ID, hashSecret(payload.SessionKey)).First(&affinity).Error; err != nil {
+		t.Fatal(err)
+	}
+	if affinity.ChannelModelID != mappings[0].ID {
+		t.Fatalf("session affinity = %+v", affinity)
 	}
 }
 
@@ -4478,6 +4728,87 @@ func TestSSEResponseCompletedRemainsSuccessfulWhenUpstreamKeepsConnectionOpen(t 
 	}
 	if !attemptLog.Success || attemptLog.Outcome != RelayOutcomeSuccess {
 		t.Fatalf("completed attempt = %+v", attemptLog)
+	}
+}
+
+func TestResponsesTerminalEventsDoNotWaitForUpstreamClose(t *testing.T) {
+	tests := []struct {
+		name          string
+		terminalEvent string
+		wantOutcome   string
+		wantErrorCode string
+	}{
+		{
+			name:          "done compatibility marker",
+			terminalEvent: "data: [DONE]\n\n",
+			wantOutcome:   RelayOutcomeSuccess,
+		},
+		{
+			name:          "completed without trailing separator",
+			terminalEvent: "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_completed\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n",
+			wantOutcome:   RelayOutcomeSuccess,
+		},
+		{
+			name:          "done event without trailing separator",
+			terminalEvent: "data: {\"type\":\"response.done\",\"response\":{\"id\":\"resp_done\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n",
+			wantOutcome:   RelayOutcomeSuccess,
+		},
+		{
+			name:          "incomplete without trailing separator",
+			terminalEvent: "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_incomplete\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"upstream_interrupted\"}}}\n",
+			wantOutcome:   RelayOutcomeFailed,
+			wantErrorCode: "upstream_interrupted",
+		},
+		{
+			name:          "response error without trailing separator",
+			terminalEvent: "data: {\"type\":\"response.error\"}\n",
+			wantOutcome:   RelayOutcomeFailed,
+			wantErrorCode: "response_error",
+		},
+		{
+			name:          "canceled alias without trailing separator",
+			terminalEvent: "data: {\"type\":\"response.canceled\"}\n",
+			wantOutcome:   RelayOutcomeFailed,
+			wantErrorCode: "response_cancelled",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newTestStore(t)
+			upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Content-Type", "text/event-stream")
+				_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n"))
+				_, _ = writer.Write([]byte(test.terminalEvent))
+				writer.(http.Flusher).Flush()
+				<-request.Context().Done()
+			}))
+			defer upstream.Close()
+			token, _, _, _ := createRouteFixture(t, store, RoutingPriorityWeighted, upstream.URL)
+			body := []byte(`{"model":"public-model","stream":true,"input":"hello"}`)
+			payload, err := ParseRelayPayload(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			recorder := httptest.NewRecorder()
+			if publicErr := newTestRelay(store).Relay(ctx, recorder, http.Header{}, "", "responses", token, payload, body); publicErr != nil {
+				t.Fatal(publicErr)
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("relay waited for the upstream connection to close: %v", ctx.Err())
+			}
+			var requestLog RelayRequestLog
+			if err := store.db.First(&requestLog).Error; err != nil {
+				t.Fatal(err)
+			}
+			if requestLog.Outcome != test.wantOutcome || requestLog.ErrorCode != test.wantErrorCode {
+				t.Fatalf("request outcome = %s code = %s, want %s code = %s", requestLog.Outcome, requestLog.ErrorCode, test.wantOutcome, test.wantErrorCode)
+			}
+			if !strings.HasSuffix(recorder.Body.String(), "\n\n") {
+				t.Fatalf("terminal SSE event is not framed with a blank line: %q", recorder.Body.String())
+			}
+		})
 	}
 }
 
@@ -5112,6 +5443,38 @@ func TestChatStreamFinishReasonIsSuccessfulWithoutDoneSentinel(t *testing.T) {
 	}
 	if publicErr := newTestRelay(store).Relay(context.Background(), httptest.NewRecorder(), nil, "", "chat", token, payload, body); publicErr != nil {
 		t.Fatal(publicErr)
+	}
+	var requestLog RelayRequestLog
+	if err := store.db.First(&requestLog).Error; err != nil {
+		t.Fatal(err)
+	}
+	if requestLog.Outcome != RelayOutcomeSuccess || requestLog.StatusCode != http.StatusOK {
+		t.Fatalf("request log = %+v", requestLog)
+	}
+}
+
+func TestChatStreamWaitsForEveryRequestedChoice(t *testing.T) {
+	store := newTestStore(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"id\":\"chatcmpl_multi\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"id\":\"chatcmpl_multi\",\"choices\":[{\"index\":1,\"delta\":{\"content\":\"second\"}}]}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"id\":\"chatcmpl_multi\",\"choices\":[{\"index\":1,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+	}))
+	defer upstream.Close()
+	token, _, _, _ := createRouteFixture(t, store, RoutingPriorityWeighted, upstream.URL)
+	body := []byte(`{"model":"public-model","stream":true,"n":2,"messages":[{"role":"user","content":"hello"}]}`)
+	payload, err := ParseRelayPayload(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	if publicErr := newTestRelay(store).Relay(context.Background(), recorder, nil, "", "chat", token, payload, body); publicErr != nil {
+		t.Fatal(publicErr)
+	}
+	output := recorder.Body.String()
+	if !strings.Contains(output, `"content":"first"`) || !strings.Contains(output, `"content":"second"`) || strings.Count(output, `"finish_reason":"stop"`) != 2 {
+		t.Fatalf("downstream body = %s", output)
 	}
 	var requestLog RelayRequestLog
 	if err := store.db.First(&requestLog).Error; err != nil {

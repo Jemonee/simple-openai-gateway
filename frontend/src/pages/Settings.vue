@@ -4,7 +4,7 @@ import { Check, Delete, Link, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import projectMeta from '@/config/project.generated.js'
 import RoutingWeightEditor from '@/components/RoutingWeightEditor.vue'
-import type { ApplicationSettings, LogPayloadCleanupResult, LogStorageUsage, PayloadLogDetail } from '@/types/gateway'
+import type { ApplicationSettings, LogDeleteResult, LogPayloadCleanupResult, LogStorageUsage, PayloadLogDetail } from '@/types/gateway'
 import type { RoutingWeightValues } from '@/types/routing'
 import { request } from '@/utils/api'
 
@@ -16,6 +16,10 @@ const errorMessage = ref('')
 const logStorage = ref<LogStorageUsage | null>(null)
 const logStorageLoading = ref(false)
 const clearingPayloads = ref(false)
+const deletingLogs = ref(false)
+const cleanupDays = ref(7)
+const cleanupDaysMode = ref('7')
+const cleanupDayOptions = [1, 3, 5, 7, 15, 30, 90]
 let storageTimer: ReturnType<typeof setInterval> | undefined
 const payloadLogDetailOptions: Array<{ label: string; value: PayloadLogDetail }> = [
   { label: '默认', value: 'default' },
@@ -49,6 +53,7 @@ const form = reactive<ApplicationSettings>({
     routingBalanceWeightPercent: defaultRoutingBalanceWeightPercent,
     sessionTTLHours: 12,
     secureCookie: false,
+    detailedLogRetentionDays: 0,
     payloadLogDetail: 'default',
     commonModelNames: [...defaultCommonModelNames],
   },
@@ -140,7 +145,9 @@ async function loadLogStorage() {
 }
 
 async function clearHistoricalPayloads() {
-  const cutoff = logStorage.value?.cutoffAt ? formatCutoff(logStorage.value.cutoffAt) : '当前时间前 30 分钟'
+  const days = selectedCleanupDays()
+  if (!days) return
+  const cutoff = formatCutoff(new Date(Date.now() - days * 86400000).toISOString())
   try {
     await ElMessageBox.confirm(
       `将永久清空 ${cutoff} 之前调用日志中的请求参数、请求正文和响应正文。状态、Token、费用和耗时统计会保留。`,
@@ -152,7 +159,7 @@ async function clearHistoricalPayloads() {
   }
   clearingPayloads.value = true
   try {
-    const result = await request<LogPayloadCleanupResult>('/admin/gateway/logs/clear-payloads', { method: 'POST' })
+    const result = await request<LogPayloadCleanupResult>('/admin/gateway/logs/clear-payloads', { method: 'POST', body: JSON.stringify({ days }) })
     ElMessage.success(`已清理 ${result.requestLogsCleared} 条调用和 ${result.attemptLogsCleared} 条上游尝试的参数与明细`)
     await loadLogStorage()
   } catch (error) {
@@ -160,6 +167,36 @@ async function clearHistoricalPayloads() {
   } finally {
     clearingPayloads.value = false
   }
+}
+
+function selectedCleanupDays(): number | null {
+  const value = cleanupDaysMode.value === 'custom' ? cleanupDays.value : Number(cleanupDaysMode.value)
+  if (!Number.isInteger(value) || value <= 0) {
+    ElMessage.error('清理天数必须为正整数')
+    return null
+  }
+  return value
+}
+
+async function deleteHistoricalLogs() {
+  const days = selectedCleanupDays()
+  if (!days) return
+  const cutoff = formatCutoff(new Date(Date.now() - days * 86400000).toISOString())
+  try {
+    await ElMessageBox.confirm(
+      `将永久删除 ${cutoff} 之前的完整调用日志、上游尝试、阶段明细和资源引用，删除后不可恢复。`,
+      '删除调用日志',
+      { type: 'error', confirmButtonText: '确认删除', cancelButtonText: '取消' },
+    )
+  } catch { return }
+  deletingLogs.value = true
+  try {
+    const result = await request<LogDeleteResult>('/admin/gateway/logs/delete', { method: 'POST', body: JSON.stringify({ days }) })
+    ElMessage.success(`已删除 ${result.requestLogsDeleted} 条调用日志和 ${result.attemptLogsDeleted} 条上游尝试`)
+    await loadLogStorage()
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '调用日志删除失败')
+  } finally { deletingLogs.value = false }
 }
 
 async function saveSettings() {
@@ -235,9 +272,10 @@ onUnmounted(() => {
       </section>
 
       <section class="surface-panel settings-section">
-        <header class="panel-heading"><div><h2>会话与数据</h2><p>调用明细固定保留 5 天，更早数据仅保留按令牌汇总的每日统计</p></div></header>
+        <header class="panel-heading"><div><h2>会话与数据</h2><p>调用明细默认永不清理，可设置 7 天、15 天或 1 个月；每日汇总长期保留</p></div></header>
         <div class="settings-fields settings-grid">
           <el-form-item label="管理会话时长（小时）"><el-input-number v-model="form.gatewayConfig.sessionTTLHours" :min="1" :max="168" controls-position="right" /></el-form-item>
+          <el-form-item label="调用明细保留"><el-select v-model="form.gatewayConfig.detailedLogRetentionDays"><el-option label="永不清理" :value="0" /><el-option label="7 天" :value="7" /><el-option label="15 天" :value="15" /><el-option label="1 个月（30 天）" :value="30" /></el-select></el-form-item>
           <el-form-item label="Cookie 安全属性"><el-switch v-model="form.gatewayConfig.secureCookie" active-text="仅 HTTPS 发送" inactive-text="允许本地 HTTP" /></el-form-item>
           <el-form-item label="调用日志参数 / 返回记录细节" class="payload-detail-field">
             <div class="payload-detail-control">
@@ -245,9 +283,14 @@ onUnmounted(() => {
               <small>{{ payloadLogDetailDescriptions[form.gatewayConfig.payloadLogDetail] }} 保存后立即作用于新进入的调用。</small>
               <div class="payload-storage-row">
                 <span class="payload-storage-metric"><strong>当前占用空间</strong><b v-if="!logStorageLoading && logStorage">{{ formatBytes(logStorage.payloadBytes) }}</b><b v-else-if="!logStorageLoading">--</b><el-skeleton v-else :rows="1" animated /></span>
-                <el-button type="danger" plain size="small" :icon="Delete" :loading="clearingPayloads" @click="clearHistoricalPayloads">清理</el-button>
+                <div class="payload-actions">
+                <el-select v-model="cleanupDaysMode" size="small" class="cleanup-days-select"><el-option v-for="days in cleanupDayOptions" :key="days" :label="`${days} 天之前`" :value="String(days)" /><el-option label="自定义天数" value="custom" /></el-select>
+                <el-input-number v-if="cleanupDaysMode === 'custom'" v-model="cleanupDays" size="small" :min="1" :max="36500" controls-position="right" />
+                <el-button type="warning" plain size="small" :icon="Delete" :loading="clearingPayloads" @click="clearHistoricalPayloads">清洗详细数据</el-button>
+                <el-button type="danger" size="small" :icon="Delete" :loading="deletingLogs" @click="deleteHistoricalLogs">删除调用日志</el-button>
+                </div>
               </div>
-              <small v-if="logStorage">清理范围：{{ formatCutoff(logStorage.cutoffAt) }} 之前的参数与正文；每 10 秒刷新。</small>
+              <small v-if="logStorage">{{ logStorage.cutoffAt ? `自动保留窗口：${formatCutoff(logStorage.cutoffAt)} 之后；` : '自动保留窗口：永不清理；' }}手动清理每 10 秒刷新存储占用。</small>
             </div>
           </el-form-item>
           <el-form-item label="首次渠道配置自动启用模型" class="payload-detail-field">
@@ -295,6 +338,8 @@ onUnmounted(() => {
 .payload-detail-control { display: grid; justify-items: start; gap: 8px; }
 .payload-detail-control small { color: var(--hongfen-text-muted); font-size: 11px; line-height: 1.6; }
 .payload-storage-row { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 12px; border: 1px solid var(--hongfen-border); background: var(--hongfen-surface-muted); }
+.payload-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.cleanup-days-select { width: 140px; }
 .payload-storage-metric { display: flex; align-items: baseline; gap: 10px; color: var(--hongfen-text-muted); font-size: 11px; }
 .payload-storage-metric b { color: var(--hongfen-text); font-family: var(--hongfen-font-mono); font-size: 16px; }
 .payload-storage-metric :deep(.el-skeleton) { width: 70px; }

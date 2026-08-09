@@ -28,8 +28,24 @@ func TestGatewayConfigDefaultsPayloadLogDetail(t *testing.T) {
 	if gatewayConfig.PayloadLogDetail != PayloadLogDetailDefault {
 		t.Fatalf("payload log detail = %q, want %q", gatewayConfig.PayloadLogDetail, PayloadLogDetailDefault)
 	}
+	if gatewayConfig.DetailedLogRetentionDays != DefaultDetailedLogRetentionDays {
+		t.Fatalf("detailed log retention = %d, want %d", gatewayConfig.DetailedLogRetentionDays, DefaultDetailedLogRetentionDays)
+	}
 	if gatewayConfig.RoutingPriceWeightPercent != DefaultRoutingPriceWeightPercent || gatewayConfig.RoutingEfficiencyWeightPercent != DefaultRoutingEfficiencyWeightPercent || gatewayConfig.RoutingQualityWeightPercent != DefaultRoutingQualityWeightPercent || gatewayConfig.RoutingBalanceWeightPercent != DefaultRoutingBalanceWeightPercent {
 		t.Fatalf("routing weights = %d/%d/%d/%d", gatewayConfig.RoutingPriceWeightPercent, gatewayConfig.RoutingEfficiencyWeightPercent, gatewayConfig.RoutingQualityWeightPercent, gatewayConfig.RoutingBalanceWeightPercent)
+	}
+}
+
+func TestDetailedLogRetentionDaysValidation(t *testing.T) {
+	for _, value := range []int{0, 7, 15, 30} {
+		if err := normalizeDetailedLogRetentionDays(value); err != nil {
+			t.Fatalf("value %d rejected: %v", value, err)
+		}
+	}
+	for _, value := range []int{-1, 1, 5, 31} {
+		if err := normalizeDetailedLogRetentionDays(value); err == nil {
+			t.Fatalf("value %d accepted", value)
+		}
 	}
 }
 

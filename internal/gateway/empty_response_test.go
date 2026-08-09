@@ -149,7 +149,7 @@ func TestBackfillApplicationOutcomesCorrectsHistoricalEmptyResponse(t *testing.T
 	if err := store.db.First(&correctedStat, "date = ? AND token_id = ?", stat.Date, stat.TokenID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if correctedStat.SuccessCount != 0 || correctedStat.EstimatedCost != 0 || correctedStat.UpstreamCost != 0 || correctedStat.InputTokens != 100 || correctedStat.OutputTokens != 9 {
+	if correctedStat.SuccessCount != 0 || correctedStat.EstimatedCost != 0 || correctedStat.UpstreamCost != 0 || correctedStat.InputTokens != 0 || correctedStat.OutputTokens != 0 {
 		t.Fatalf("corrected stat = %+v", correctedStat)
 	}
 	var migrations int64

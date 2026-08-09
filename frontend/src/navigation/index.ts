@@ -3,6 +3,7 @@ import type { RouteRecordRaw } from 'vue-router'
 import {
   ChatDotRound,
   ChatLineSquare,
+  Collection,
   Connection,
   DataBoard,
   Grid,
@@ -106,6 +107,14 @@ export const navigationGroups: NavigationGroup[] = [
         label: '会话日志',
         icon: ChatLineSquare,
         component: () => import('@/pages/CodexSessions.vue'),
+      },
+      {
+        key: 'resources',
+        path: '/resources',
+        routeName: 'resources',
+        label: '资源中心',
+        icon: Collection,
+        component: () => import('@/pages/Resources.vue'),
       },
     ],
   },

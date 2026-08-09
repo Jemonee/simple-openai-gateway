@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/Jemonee/simple-openai-gateway/internal/config"
@@ -11,6 +12,10 @@ import (
 
 const historicalPayloadCleanupAge = 30 * time.Minute
 
+type LogCleanupInput struct {
+	Days int `json:"days"`
+}
+
 type LogPayloadCleanupResult struct {
 	CutoffAt           time.Time `json:"cutoffAt"`
 	RequestLogsCleared int64     `json:"requestLogsCleared"`
@@ -18,11 +23,22 @@ type LogPayloadCleanupResult struct {
 }
 
 func (s *ManagementService) ClearHistoricalLogPayloads(ctx context.Context) (*LogPayloadCleanupResult, error) {
-	return s.clearHistoricalLogPayloads(ctx, time.Now().UTC())
+	return s.ClearHistoricalLogPayloadsBefore(ctx, 1)
+}
+
+func (s *ManagementService) ClearHistoricalLogPayloadsBefore(ctx context.Context, days int) (*LogPayloadCleanupResult, error) {
+	if days <= 0 {
+		return nil, errors.New("清洗天数必须为正整数")
+	}
+	return s.clearHistoricalLogPayloadsBeforeAge(ctx, time.Now().UTC(), time.Duration(days)*24*time.Hour)
 }
 
 func (s *ManagementService) clearHistoricalLogPayloads(ctx context.Context, now time.Time) (*LogPayloadCleanupResult, error) {
-	cutoff := now.UTC().Add(-historicalPayloadCleanupAge)
+	return s.clearHistoricalLogPayloadsBeforeAge(ctx, now, historicalPayloadCleanupAge)
+}
+
+func (s *ManagementService) clearHistoricalLogPayloadsBeforeAge(ctx context.Context, now time.Time, age time.Duration) (*LogPayloadCleanupResult, error) {
+	cutoff := now.UTC().Add(-age)
 	result := &LogPayloadCleanupResult{CutoffAt: cutoff}
 	err := s.store.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		requestIDs := db.Model(&RelayRequestLog{}).Select("id").Where("created_at < ?", cutoff)

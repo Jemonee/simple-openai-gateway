@@ -3,6 +3,67 @@ export type CostSource = 'upstream' | 'estimated_fallback' | 'mixed' | 'failed_z
 export type RelayOutcome = 'success' | 'canceled' | 'failed' | 'processing'
 export type PayloadLogDetail = 'default' | 'summary' | 'none'
 
+export interface ResourceView {
+  id: number
+  fingerprint: string
+  kind: string
+  name: string
+  mimeType: string
+  uri: string
+  sizeBytes: number
+  sha256: string
+  preview: string
+  /** Bounded data URI for image previews; empty for non-image resources. */
+  previewData: string
+  firstSeenAt: string
+  lastSeenAt: string
+  /** Whether the administrator marked this resource as globally sensitive. */
+  sensitive: boolean
+  locations: string[]
+}
+
+export interface ResourceSummary extends Omit<ResourceView, 'locations'> {
+  requestCount: number
+  useCount: number
+}
+
+export interface ResourceCatalogItem extends ResourceSummary {
+  /** Number of distinct sessions that referenced this resource. */
+  sessionCount: number
+}
+
+export interface ResourcePage {
+  /** Resources on the current page. */
+  items: ResourceCatalogItem[]
+  /** Total resources matching the active filters. */
+  total: number
+  page: number
+  pageSize: number
+}
+
+export interface ResourceSessionRef {
+  tokenId: number
+  sessionId: string
+  sessionName: string
+  requestCount: number
+}
+
+export interface ResourceRequestRef {
+  id: string
+  sessionId: string
+  sessionName: string
+  requestedModel: string
+  endpoint: string
+  createdAt: string
+  location: string
+}
+
+export interface ResourceDetail {
+  resource: ResourceView
+  sessions: ResourceSessionRef[]
+  requests: ResourceRequestRef[]
+}
+
 export interface AdminSession {
   /** Persistent administrator identifier. */
   id: number
@@ -722,6 +783,10 @@ export interface RelayRequestLog {
   responseBody: string
   /** Whether responseBody was truncated at the four MiB retention limit. */
   responseBodyTruncated: boolean
+  /** Resources detected in the retained request payload. */
+  resources: ResourceView[]
+  /** True when this request referenced at least one globally sensitive resource. */
+  sensitiveResourceLeak: boolean
   /** Final HTTP status returned to the client. */
   statusCode: number
   /** Business outcome independent of the final HTTP status. */
@@ -858,9 +923,27 @@ export interface LogPayloadCleanupResult {
   attemptLogsCleared: number
 }
 
+export interface LogCleanupInput {
+  /** Number of whole days before now included in the cleanup cutoff. */
+  days: number
+}
+
+export interface LogDeleteResult {
+  /** Exclusive UTC cutoff used to delete request logs. */
+  cutoffAt: string
+  /** Number of deleted request-log rows. */
+  requestLogsDeleted: number
+  /** Number of deleted upstream-attempt rows. */
+  attemptLogsDeleted: number
+  /** Number of deleted stage-detail rows. */
+  stepLogsDeleted: number
+  /** Number of deleted request-resource references. */
+  resourceRefsDeleted: number
+}
+
 export interface LogStorageUsage {
   /** UTC cutoff used by the cleanup action shown alongside this metric. */
-  cutoffAt: string
+  cutoffAt: string | null
   /** Combined bytes retained in request and attempt payload fields. */
   payloadBytes: number
   /** Bytes retained in request parameters and request/response bodies. */
@@ -935,6 +1018,10 @@ export interface CodexSessionSummary {
   clientKind: string
   /** Codex thread origin such as user or ambient_suggestions, or unavailable for legacy and generic clients. */
   threadSource: string
+  /** Direct parent Codex session identifier for a delegated subagent session. */
+  parentSessionId: string
+  /** Number of direct child sessions associated with this session. */
+  childCount: number
   /** Whether multiple requests can be reliably grouped into this session. */
   identified: boolean
   /** Request identifier used as the conservative group key when no session ID exists. */
@@ -1011,6 +1098,10 @@ export interface CodexSessionSummary {
   lastSeenAt: string
   /** Current affinity assignment or latest historical channel, when available. */
   currentChannel: SessionChannel | null
+  /** De-duplicated resources used by this session when loaded in detail. */
+  resources: ResourceSummary[]
+  /** True when this session referenced at least one globally sensitive resource. */
+  sensitiveResourceLeak: boolean
 }
 
 export interface CodexSessionPage {
@@ -1050,6 +1141,8 @@ export interface CodexSessionDetail {
   page: number
   /** Maximum request details returned on this page. */
   pageSize: number
+  /** De-duplicated resources used by all retained requests in this session. */
+  resources: ResourceSummary[]
 }
 
 export interface ApplicationSettings {
@@ -1085,6 +1178,8 @@ export interface ApplicationSettings {
     routingBalanceWeightPercent: number
     /** Administrator login session lifetime in hours. */
     sessionTTLHours: number
+    /** Automatic detailed-log retention in days; zero means never delete automatically. */
+    detailedLogRetentionDays: number
     /** Whether the administrator cookie is restricted to HTTPS. */
     secureCookie: boolean
     /** Detail retained for request parameters and responses on newly entering calls. */

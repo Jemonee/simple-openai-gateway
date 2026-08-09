@@ -8,8 +8,11 @@ import (
 	"gorm.io/gorm"
 )
 
+var defaultActiveSessionSources = []string{codexThreadSourceUser, codexThreadSourceSubagent}
+
 type ActiveSessionQuery struct {
 	Session     string
+	Sources     []string
 	ActiveSince time.Time
 	Page        int
 	PageSize    int
@@ -40,7 +43,7 @@ func activeSessionRows(db *gorm.DB, query ActiveSessionQuery) *gorm.DB {
 	db = db.Table("relay_session_states AS session_state").
 		Joins("JOIN relay_request_logs AS latest_request ON latest_request.id = session_state.latest_request_id").
 		Joins("LEFT JOIN client_tokens AS client_token ON client_token.id = session_state.token_id").
-		Where("session_state.thread_source = ?", codexThreadSourceUser).
+		Where("session_state.thread_source IN ?", query.Sources).
 		Where("session_state.last_activity_at >= ?", utcQueryTime(query.ActiveSince))
 	if value := strings.TrimSpace(query.Session); value != "" {
 		pattern := "%" + value + "%"
@@ -52,13 +55,34 @@ func activeSessionRows(db *gorm.DB, query ActiveSessionQuery) *gorm.DB {
 	return db
 }
 
+func normalizeActiveSessionSources(sources []string) []string {
+	normalized := make([]string, 0, len(sources))
+	seen := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		source = normalizeCodexThreadSource(source)
+		if source == "" {
+			continue
+		}
+		if _, exists := seen[source]; exists {
+			continue
+		}
+		seen[source] = struct{}{}
+		normalized = append(normalized, source)
+	}
+	if len(normalized) == 0 {
+		return append([]string(nil), defaultActiveSessionSources...)
+	}
+	return normalized
+}
+
 func (s *ManagementService) ActiveSessions(ctx context.Context, query ActiveSessionQuery) (*ActiveSessionPage, error) {
 	// Page from materialized session state first, then aggregate only the visible sessions.
 	normalizeSessionPage(&query.Page, &query.PageSize)
+	query.Sources = normalizeActiveSessionSources(query.Sources)
 	if query.ActiveSince.IsZero() {
 		query.ActiveSince = time.Now().UTC().Add(-30 * time.Minute)
 	}
-	detailCutoff := time.Now().UTC().Add(-DetailedLogRetentionDays * 24 * time.Hour)
+	detailCutoff, hasCutoff := s.store.detailedLogCutoff(time.Now())
 
 	var total int64
 	if err := activeSessionRows(s.store.db.WithContext(ctx), query).Count(&total).Error; err != nil {
@@ -69,6 +93,7 @@ func (s *ManagementService) ActiveSessions(ctx context.Context, query ActiveSess
 	if err := activeSessionRows(s.store.db.WithContext(ctx), query).
 		Select(
 			"session_state.session_id AS session_id, " +
+				"session_state.parent_session_id AS parent_session_id, " +
 				"COALESCE(NULLIF(session_state.title, ''), latest_request.session_name) AS session_name, " +
 				"COALESCE(NULLIF(session_state.session_source, ''), NULLIF(latest_request.codex_session_source, ''), 'unavailable') AS session_source, " +
 				"COALESCE(NULLIF(session_state.client_kind, ''), latest_request.client_kind) AS client_kind, " +
@@ -99,17 +124,20 @@ func (s *ManagementService) ActiveSessions(ctx context.Context, query ActiveSess
 	}
 
 	aggregates := make([]activeSessionAggregate, 0, len(items))
-	if err := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).
-		Where("created_at >= ?", detailCutoff).
-		Where("("+strings.Join(conditions, " OR ")+")", conditionArgs...).
+	aggregateDB := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).
+		Where("("+strings.Join(conditions, " OR ")+")", conditionArgs...)
+	if hasCutoff {
+		aggregateDB = aggregateDB.Where("created_at >= ?", detailCutoff)
+	}
+	if err := aggregateDB.
 		Select("token_id, codex_session_id AS session_id, COUNT(*) AS request_count, " +
 			"SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS success_count, " +
 			"SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END) AS canceled_count, " +
 			"SUM(CASE WHEN outcome = 'processing' THEN 1 ELSE 0 END) AS processing_count, " +
-			"COALESCE(SUM(attempt_count), 0) AS attempt_count, COALESCE(SUM(input_tokens), 0) AS input_tokens, " +
-			"COALESCE(SUM(normal_input_tokens), 0) AS normal_input_tokens, " +
-			"COALESCE(SUM(output_tokens), 0) AS output_tokens, COALESCE(SUM(cached_tokens), 0) AS cached_tokens, " +
-			"COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens, COALESCE(SUM(sent_tokens), 0) AS sent_tokens, " +
+			"COALESCE(SUM(attempt_count), 0) AS attempt_count, COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END), 0) AS input_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN normal_input_tokens ELSE 0 END), 0) AS normal_input_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END), 0) AS output_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cached_tokens ELSE 0 END), 0) AS cached_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN cache_write_tokens ELSE 0 END), 0) AS cache_write_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN sent_tokens ELSE 0 END), 0) AS sent_tokens, " +
 			"COALESCE(SUM(estimated_cost), 0) AS estimated_cost, COALESCE(SUM(upstream_cost), 0) AS upstream_cost, " +
 			"COALESCE(SUM(first_token_ms), 0) AS total_first_token_ms, SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_sample_count, " +
 			"COALESCE(SUM(latency_ms), 0) AS total_latency_ms, SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END) AS latency_sample_count, " +
@@ -151,6 +179,14 @@ func (s *ManagementService) ActiveSessions(ctx context.Context, query ActiveSess
 			return nil, err
 		}
 		items[index].CurrentChannel = current
+		sensitive, err := hasSensitiveSessionResources(s.store.db.WithContext(ctx), items[index].TokenID, items[index].SessionID, items[index].FallbackRequestID, items[index].Identified)
+		if err != nil {
+			return nil, err
+		}
+		items[index].SensitiveResourceLeak = sensitive
+	}
+	if err := s.populateSessionRelations(ctx, items); err != nil {
+		return nil, err
 	}
 	return &ActiveSessionPage{Items: items, Total: total, Page: query.Page, PageSize: query.PageSize}, nil
 }

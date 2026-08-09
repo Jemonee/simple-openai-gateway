@@ -4,7 +4,8 @@ import type { CSSProperties } from 'vue'
 import { Coin, Connection, DataLine, EditPen, Refresh, RefreshLeft, Search, Tickets, Timer, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import SessionLogDrawer from '@/components/SessionLogDrawer.vue'
-import type { Channel, ClientToken, CodexSessionPage, CodexSessionSummary, GatewayModel, LogAggregateSummary } from '@/types/gateway'
+import SessionRelationBadge from '@/components/SessionRelationBadge.vue'
+import type { Channel, ClientToken, CodexSessionDetail, CodexSessionPage, CodexSessionSummary, GatewayModel, LogAggregateSummary } from '@/types/gateway'
 import { request } from '@/utils/api'
 import { formatCompactNumber, formatDuration } from '@/utils/formatters'
 import { logDateDefaultTimes, logDateRangeShortcuts, toEastEightISOString, todayLogRange } from '@/utils/logDateRanges'
@@ -116,9 +117,10 @@ function sessionClientSource(session: CodexSessionSummary): { label: string; kin
   return { label: '其他', kind: 'other' }
 }
 
-function sessionOrigin(value: string): { label: string; kind: 'user' | 'system' | 'assistant' | 'developer' | 'other' } {
+function sessionOrigin(value: string): { label: string; kind: 'user' | 'subagent' | 'system' | 'assistant' | 'developer' | 'other' } {
   const source = value?.trim().toLowerCase() ?? ''
   if (source === 'user') return { label: '用户', kind: 'user' }
+  if (source === 'subagent') return { label: '子 Agent', kind: 'subagent' }
   if (source === 'system' || source === 'ambient_suggestions') return { label: 'System', kind: 'system' }
   if (source === 'assistant') return { label: 'Assistant', kind: 'assistant' }
   if (source === 'developer') return { label: 'Developer', kind: 'developer' }
@@ -181,6 +183,21 @@ function openSession(session: CodexSessionSummary) {
   drawerOpen.value = true
 }
 
+async function openParentSession(sessionId: string, tokenId: number) {
+  const visibleParent = sessions.value.find(session => session.identified && session.tokenId === tokenId && session.sessionId === sessionId)
+  if (visibleParent) {
+    openSession(visibleParent)
+    return
+  }
+  const query = new URLSearchParams({ sessionId, tokenId: String(tokenId), page: '1', pageSize: '1' })
+  try {
+    const detail = await request<CodexSessionDetail>(`/admin/gateway/sessions/detail?${query}`)
+    openSession(detail.summary)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '父会话详情加载失败')
+  }
+}
+
 async function renameSession(session: CodexSessionSummary) {
   try {
     const result = await ElMessageBox.prompt('输入新的会话名称，最多 80 个字符', '修改会话名称', {
@@ -232,7 +249,7 @@ onMounted(async () => {
 <template>
   <div class="page-stack log-page">
     <header class="page-heading">
-      <div><h1>会话日志</h1><p>默认按东八区显示今天，可查询 5 天内的会话、渠道、模型、令牌与用量</p></div>
+      <div><h1>会话日志</h1><p>默认按东八区显示今天；可查询当前保留窗口内的会话、渠道、模型、令牌与用量</p></div>
       <div class="page-actions"><el-tooltip content="刷新会话日志" placement="bottom"><el-button class="page-refresh-button" :icon="Refresh" :loading="loading" aria-label="刷新会话日志" @click="loadSessions" /></el-tooltip></div>
     </header>
 
@@ -285,13 +302,14 @@ onMounted(async () => {
           <template #default="scope">
             <div class="session-identity" :class="`is-${sessionClientSource(scope.row).kind}`" :aria-label="`来源 ${sessionClientSource(scope.row).label}`">
               <div class="session-title-line">
-                <strong class="session-name" :title="scope.row.sessionName || '未命名会话'">{{ scope.row.sessionName || '未命名会话' }}</strong>
+                <strong class="session-name" :title="scope.row.sessionName || '未命名会话'">{{ scope.row.sessionName || '未命名会话' }}</strong><el-tag v-if="scope.row.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag>
                 <span class="session-client"><i aria-hidden="true" />{{ sessionClientSource(scope.row).label }}</span>
               </div>
               <div class="session-meta">
                 <small><code>{{ scope.row.identified ? scope.row.sessionId : scope.row.fallbackRequestId }}</code></small>
                 <span class="session-origin" :class="`is-${sessionOrigin(scope.row.threadSource).kind}`" :title="`原始来源：${scope.row.threadSource || 'unavailable'}`"><i aria-hidden="true" />{{ sessionOrigin(scope.row.threadSource).label }}</span>
               </div>
+              <SessionRelationBadge :session="scope.row" :on-open-parent="openParentSession" />
             </div>
           </template>
         </el-table-column>
@@ -365,6 +383,8 @@ onMounted(async () => {
 .session-origin i { width: 5px; height: 5px; border-radius: 50%; background: var(--hongfen-text-subtle); }
 .session-origin.is-user { border-color: color-mix(in srgb, var(--hongfen-primary) 40%, var(--hongfen-border)); color: var(--hongfen-primary-hover); }
 .session-origin.is-user i { background: var(--hongfen-primary); }
+.session-origin.is-subagent { border-color: color-mix(in srgb, var(--hongfen-purple-gray) 44%, var(--hongfen-border)); color: var(--hongfen-purple-gray); }
+.session-origin.is-subagent i { background: var(--hongfen-purple-gray); }
 .session-origin.is-system, .session-origin.is-developer { border-color: color-mix(in srgb, var(--hongfen-warning) 46%, var(--hongfen-border)); color: var(--hongfen-warning); }
 .session-origin.is-system i, .session-origin.is-developer i { background: var(--hongfen-warning); }
 .session-origin.is-assistant { border-color: color-mix(in srgb, var(--hongfen-success) 42%, var(--hongfen-border)); color: var(--hongfen-success); }

@@ -22,8 +22,8 @@ func (s *Store) backfillRequestStatisticsFromFinalAttempts() error {
 			return err
 		}
 
-		cutoff := time.Now().UTC().Add(-DetailedLogRetentionDays * 24 * time.Hour)
-		if err := db.Exec(`
+		cutoff, hasCutoff := s.detailedLogCutoff(time.Now())
+		statisticsSQL := `
 			UPDATE relay_request_logs
 			SET input_tokens = COALESCE((SELECT a.input_tokens FROM relay_attempt_logs a WHERE a.request_id = relay_request_logs.id ORDER BY a.id DESC LIMIT 1), input_tokens),
 				normal_input_tokens = COALESCE((SELECT a.normal_input_tokens FROM relay_attempt_logs a WHERE a.request_id = relay_request_logs.id ORDER BY a.id DESC LIMIT 1), normal_input_tokens),
@@ -34,8 +34,15 @@ func (s *Store) backfillRequestStatisticsFromFinalAttempts() error {
 				upstream_cost = COALESCE((SELECT a.upstream_cost FROM relay_attempt_logs a WHERE a.request_id = relay_request_logs.id ORDER BY a.id DESC LIMIT 1), upstream_cost),
 				cost_source = COALESCE((SELECT a.cost_source FROM relay_attempt_logs a WHERE a.request_id = relay_request_logs.id ORDER BY a.id DESC LIMIT 1), cost_source),
 				usage_source = COALESCE((SELECT a.usage_source FROM relay_attempt_logs a WHERE a.request_id = relay_request_logs.id ORDER BY a.id DESC LIMIT 1), usage_source)
-			WHERE created_at >= ? AND EXISTS (SELECT 1 FROM relay_attempt_logs a WHERE a.request_id = relay_request_logs.id)
-		`, cutoff).Error; err != nil {
+			WHERE EXISTS (SELECT 1 FROM relay_attempt_logs a WHERE a.request_id = relay_request_logs.id)`
+		if hasCutoff {
+			statisticsSQL += " AND created_at >= ?"
+		}
+		args := []any{}
+		if hasCutoff {
+			args = append(args, cutoff)
+		}
+		if err := db.Exec(statisticsSQL, args...).Error; err != nil {
 			return err
 		}
 		if err := rebuildTokenDailyStats(db); err != nil {
@@ -87,9 +94,9 @@ func rebuildTokenDailyStats(db *gorm.DB) error {
 		sqliteEastEightCreatedDate + " AS date, token_id, COUNT(*) AS request_count, " +
 			"SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS success_count, " +
 			"SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END) AS canceled_count, " +
-			"COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(normal_input_tokens),0) AS normal_input_tokens, " +
-			"COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(cached_tokens),0) AS cached_tokens, " +
-			"COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens, COALESCE(SUM(sent_tokens),0) AS sent_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN normal_input_tokens ELSE 0 END),0) AS normal_input_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END),0) AS output_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cached_tokens ELSE 0 END),0) AS cached_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN cache_write_tokens ELSE 0 END),0) AS cache_write_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN sent_tokens ELSE 0 END),0) AS sent_tokens, " +
 			"COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(upstream_cost),0) AS upstream_cost, " +
 			"COALESCE(SUM(first_token_ms),0) AS first_token_ms, SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_samples, " +
 			"COALESCE(SUM(latency_ms),0) AS latency_ms, SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END) AS latency_samples, " +
@@ -115,9 +122,9 @@ func rebuildTokenDailyStatsForDates(db *gorm.DB, dates []string) error {
 		sqliteEastEightCreatedDate+" AS date, token_id, COUNT(*) AS request_count, "+
 			"SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS success_count, "+
 			"SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END) AS canceled_count, "+
-			"COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(normal_input_tokens),0) AS normal_input_tokens, "+
-			"COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(cached_tokens),0) AS cached_tokens, "+
-			"COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens, COALESCE(SUM(sent_tokens),0) AS sent_tokens, "+
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN normal_input_tokens ELSE 0 END),0) AS normal_input_tokens, "+
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END),0) AS output_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cached_tokens ELSE 0 END),0) AS cached_tokens, "+
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN cache_write_tokens ELSE 0 END),0) AS cache_write_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN sent_tokens ELSE 0 END),0) AS sent_tokens, "+
 			"COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(upstream_cost),0) AS upstream_cost, "+
 			"COALESCE(SUM(first_token_ms),0) AS first_token_ms, SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_samples, "+
 			"COALESCE(SUM(latency_ms),0) AS latency_ms, SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END) AS latency_samples, "+

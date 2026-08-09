@@ -1,22 +1,39 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import type { CSSProperties } from 'vue'
 import { ChatDotRound, Refresh, Search, View } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import SessionLogDrawer from '@/components/SessionLogDrawer.vue'
-import type { ActiveSessionPage, CodexSessionSummary } from '@/types/gateway'
+import SessionRelationBadge from '@/components/SessionRelationBadge.vue'
+import type { ActiveSessionPage, CodexSessionDetail, CodexSessionSummary } from '@/types/gateway'
 import { request } from '@/utils/api'
 import { formatCompactNumber, formatDuration } from '@/utils/formatters'
 
 const ACTIVE_WINDOW_MINUTES = 30
+const ACTIVE_SESSION_SOURCE_OPTIONS = [
+  { value: 'user', label: '用户' },
+  { value: 'subagent', label: '子 Agent' },
+  { value: 'system', label: 'System' },
+  { value: 'ambient_suggestions', label: '环境建议' },
+  { value: 'assistant', label: 'Assistant' },
+  { value: 'developer', label: 'Developer' },
+] as const
+
+type ActiveSessionSource = typeof ACTIVE_SESSION_SOURCE_OPTIONS[number]['value']
 
 const loading = ref(true)
 const errorMessage = ref('')
 const sessions = ref<CodexSessionSummary[]>([])
 const total = ref(0)
 const searchText = ref('')
+const selectedSources = ref<ActiveSessionSource[]>(['user', 'subagent'])
 const pagination = reactive({ page: 1, pageSize: 25 })
 const drawerOpen = ref(false)
 const selectedSession = ref<CodexSessionSummary | null>(null)
+const selectedSourceLabel = computed(() => ACTIVE_SESSION_SOURCE_OPTIONS
+  .filter(option => selectedSources.value.includes(option.value))
+  .map(option => option.label)
+  .join(' / '))
 
 function formatDate(value: string): string {
   return new Intl.DateTimeFormat('zh-CN', {
@@ -126,9 +143,10 @@ function sessionClientSource(session: CodexSessionSummary): { label: string; kin
   return { label: '其他', kind: 'other' }
 }
 
-function sessionOrigin(value: string): { label: string; kind: 'user' | 'system' | 'assistant' | 'developer' | 'other' } {
+function sessionOrigin(value: string): { label: string; kind: 'user' | 'subagent' | 'system' | 'assistant' | 'developer' | 'other' } {
   const source = value?.trim().toLowerCase() ?? ''
   if (source === 'user') return { label: '用户', kind: 'user' }
+  if (source === 'subagent') return { label: '子 Agent', kind: 'subagent' }
   if (source === 'system' || source === 'ambient_suggestions') return { label: 'System', kind: 'system' }
   if (source === 'assistant') return { label: 'Assistant', kind: 'assistant' }
   if (source === 'developer') return { label: 'Developer', kind: 'developer' }
@@ -151,6 +169,7 @@ async function loadSessions() {
     pageSize: String(pagination.pageSize),
   })
   if (searchText.value.trim()) query.set('session', searchText.value.trim())
+  selectedSources.value.forEach(source => query.append('source', source))
 
   try {
     const page = await request<ActiveSessionPage>(`/admin/gateway/active-sessions?${query}`)
@@ -181,6 +200,21 @@ function openSession(session: CodexSessionSummary) {
   drawerOpen.value = true
 }
 
+async function openParentSession(sessionId: string, tokenId: number) {
+  const visibleParent = sessions.value.find(session => session.identified && session.tokenId === tokenId && session.sessionId === sessionId)
+  if (visibleParent) {
+    openSession(visibleParent)
+    return
+  }
+  const query = new URLSearchParams({ sessionId, tokenId: String(tokenId), page: '1', pageSize: '1' })
+  try {
+    const detail = await request<CodexSessionDetail>(`/admin/gateway/sessions/detail?${query}`)
+    openSession(detail.summary)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '父会话详情加载失败')
+  }
+}
+
 onMounted(() => {
   void loadSessions()
 })
@@ -191,10 +225,10 @@ onMounted(() => {
     <header class="page-heading">
       <div>
         <h1>活跃会话</h1>
-        <p>仅展示用户发起且最近 30 分钟内仍有调用的会话，按最近活跃时间排序</p>
+        <p>展示所选来源且最近 30 分钟内仍有调用的会话，按最近活跃时间排序</p>
       </div>
       <div class="page-actions">
-        <span class="active-rule"><i aria-hidden="true" />用户会话 · 30 分钟</span>
+        <span class="active-rule"><i aria-hidden="true" />{{ selectedSourceLabel }} · 30 分钟</span>
         <el-tooltip content="刷新活跃会话" placement="bottom">
           <el-button
             class="page-refresh-button"
@@ -217,6 +251,12 @@ onMounted(() => {
         @clear="clearSearch"
         @keyup.enter="searchSessions"
       />
+      <div class="source-filter" role="group" aria-label="会话来源">
+        <span>来源</span>
+        <el-checkbox-group v-model="selectedSources" :min="1">
+          <el-checkbox v-for="option in ACTIVE_SESSION_SOURCE_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</el-checkbox>
+        </el-checkbox-group>
+      </div>
       <el-button type="primary" :icon="Search" :loading="loading" @click="searchSessions">查询</el-button>
       <span class="active-count"><ChatDotRound />{{ loading ? '正在查询' : `${formatCompactNumber(total)} 个活跃会话` }}</span>
     </section>
@@ -235,20 +275,21 @@ onMounted(() => {
         :row-key="sessionRowKey"
         :row-style="sessionRowStyle"
         height="100%"
-        empty-text="最近 30 分钟内没有活跃的用户会话"
+        empty-text="最近 30 分钟内没有符合来源条件的活跃会话"
         @row-click="openSession"
       >
         <el-table-column label="会话" min-width="300">
           <template #default="scope">
             <div class="session-identity" :class="`is-${sessionClientSource(scope.row).kind}`" :aria-label="`来源 ${sessionClientSource(scope.row).label}`">
               <div class="session-title-line">
-                <strong class="session-name" :title="scope.row.sessionName || '未命名会话'">{{ scope.row.sessionName || '未命名会话' }}</strong>
+                <strong class="session-name" :title="scope.row.sessionName || '未命名会话'">{{ scope.row.sessionName || '未命名会话' }}</strong><el-tag v-if="scope.row.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag>
                 <span class="session-client"><i aria-hidden="true" />{{ sessionClientSource(scope.row).label }}</span>
               </div>
               <div class="session-meta">
                 <small><code :title="scope.row.sessionId">{{ scope.row.identified ? scope.row.sessionId : scope.row.fallbackRequestId }}</code></small>
                 <span class="session-origin" :class="`is-${sessionOrigin(scope.row.threadSource).kind}`" :title="`原始来源：${scope.row.threadSource || 'unavailable'}`"><i aria-hidden="true" />{{ sessionOrigin(scope.row.threadSource).label }}</span>
               </div>
+              <SessionRelationBadge :session="scope.row" :on-open-parent="openParentSession" />
             </div>
           </template>
         </el-table-column>
@@ -339,9 +380,14 @@ onMounted(() => {
 .active-session-page { padding-bottom: 16px; }
 .active-rule { display: inline-flex; min-height: 34px; align-items: center; gap: 7px; padding: 0 10px; border: 1px solid var(--hongfen-border); border-radius: var(--hongfen-radius-control); color: var(--hongfen-text-muted); background: var(--hongfen-surface); font-size: 12px; }
 .active-rule i { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--hongfen-success); }
-.active-query-bar { display: grid; grid-template-columns: minmax(240px, 520px) auto minmax(140px, 1fr); align-items: center; justify-content: start; gap: 8px; padding: 12px; border: 1px solid var(--hongfen-border); border-radius: var(--hongfen-radius-panel); background: var(--hongfen-surface); }
+.active-query-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; border: 1px solid var(--hongfen-border); border-radius: var(--hongfen-radius-panel); background: var(--hongfen-surface); }
+.active-query-bar > .el-input { max-width: 520px; flex: 1 1 260px; }
 .active-query-bar .el-button { min-width: 88px; }
-.active-count { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; color: var(--hongfen-text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.source-filter { display: flex; min-height: 32px; flex: 1 1 480px; align-items: center; gap: 10px; padding: 0 9px; border: 1px solid var(--hongfen-border); border-radius: var(--hongfen-radius-control); background: var(--hongfen-page); }
+.source-filter > span { flex: none; color: var(--hongfen-text-subtle); font-size: 11px; }
+.source-filter :deep(.el-checkbox-group) { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; column-gap: 12px; row-gap: 2px; }
+.source-filter :deep(.el-checkbox) { height: 30px; margin-right: 0; }
+.active-count { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; margin-left: auto; color: var(--hongfen-text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .active-count svg { width: 15px; height: 15px; color: var(--hongfen-success); }
 .active-table-panel { display: flex; min-width: 0; flex-direction: column; }
 .active-table-panel :deep(.el-table__inner-wrapper::before) { display: none; }
@@ -359,6 +405,8 @@ onMounted(() => {
 .session-origin i { width: 5px; height: 5px; border-radius: 50%; background: var(--hongfen-text-subtle); }
 .session-origin.is-user { border-color: color-mix(in srgb, var(--hongfen-primary) 40%, var(--hongfen-border)); color: var(--hongfen-primary-hover); }
 .session-origin.is-user i { background: var(--hongfen-primary); }
+.session-origin.is-subagent { border-color: color-mix(in srgb, var(--hongfen-purple-gray) 44%, var(--hongfen-border)); color: var(--hongfen-purple-gray); }
+.session-origin.is-subagent i { background: var(--hongfen-purple-gray); }
 .session-origin.is-system, .session-origin.is-developer { border-color: color-mix(in srgb, var(--hongfen-warning) 46%, var(--hongfen-border)); color: var(--hongfen-warning); }
 .session-origin.is-system i, .session-origin.is-developer i { background: var(--hongfen-warning); }
 .session-origin.is-assistant { border-color: color-mix(in srgb, var(--hongfen-success) 42%, var(--hongfen-border)); color: var(--hongfen-success); }
@@ -399,12 +447,13 @@ onMounted(() => {
 }
 
 @media (max-width: 720px) {
-  .active-query-bar { grid-template-columns: minmax(0, 1fr) auto; }
-  .active-count { grid-column: 1 / -1; justify-content: flex-start; }
+  .active-query-bar > .el-input { max-width: none; }
+  .source-filter { flex-basis: 100%; }
+  .active-count { width: 100%; margin-left: 0; justify-content: flex-start; }
 }
 
 @media (max-width: 460px) {
-  .active-query-bar { grid-template-columns: 1fr; }
+  .active-query-bar > .el-input { flex-basis: 100%; }
   .active-query-bar .el-button { width: 100%; }
 }
 </style>

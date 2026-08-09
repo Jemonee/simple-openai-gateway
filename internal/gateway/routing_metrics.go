@@ -63,8 +63,8 @@ func loadRecentRoutingMetrics(ctx context.Context, db *gorm.DB, mappingIDs []uin
 			"COALESCE(SUM(CASE WHEN success = ? AND first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0) AS first_token_total, SUM(CASE WHEN success = ? AND first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_samples, "+
 			"COALESCE(SUM(CASE WHEN success = ? AND output_tokens > 0 AND first_token_ms > 0 AND duration_ms > first_token_ms THEN output_tokens ELSE 0 END), 0) AS output_tokens, "+
 			"COALESCE(SUM(CASE WHEN success = ? AND output_tokens > 0 AND first_token_ms > 0 AND duration_ms > first_token_ms THEN duration_ms - first_token_ms ELSE 0 END), 0) AS generation_ms, "+
-			"COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(cached_tokens), 0) AS cached_tokens, SUM(CASE WHEN input_tokens > 0 AND cached_tokens > 0 THEN 1 ELSE 0 END) AS cache_hits, SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) AS cache_samples",
-			true, true, true, true, true, true).
+			"COALESCE(SUM(CASE WHEN success = ? THEN input_tokens ELSE 0 END), 0) AS input_tokens, COALESCE(SUM(CASE WHEN success = ? THEN cached_tokens ELSE 0 END), 0) AS cached_tokens, SUM(CASE WHEN success = ? AND input_tokens > 0 AND cached_tokens > 0 THEN 1 ELSE 0 END) AS cache_hits, SUM(CASE WHEN success = ? AND input_tokens > 0 THEN 1 ELSE 0 END) AS cache_samples",
+			true, true, true, true, true, true, true, true, true, true).
 		Where("channel_model_id IN ? AND created_at >= ?", mappingIDs, now.Add(-routingMetricWindow)).
 		Group("channel_model_id").Scan(&rows).Error
 	if err != nil {

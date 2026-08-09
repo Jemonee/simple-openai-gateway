@@ -64,3 +64,17 @@ func TestClearHistoricalLogPayloadsOnlyClearsRowsOlderThanThirtyMinutes(t *testi
 		t.Fatalf("recent request payload fields changed: %+v", kept)
 	}
 }
+
+func TestClearHistoricalLogPayloadsBeforeDays(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	old := RelayRequestLog{ID: "old-day", PayloadLogDetail: config.PayloadLogDetailDefault, RequestBody: "old", CreatedAt: now.Add(-8 * 24 * time.Hour)}
+	keep := RelayRequestLog{ID: "keep-day", PayloadLogDetail: config.PayloadLogDetailDefault, RequestBody: "keep", CreatedAt: now.Add(-6 * 24 * time.Hour)}
+	if err := store.db.Create(&[]RelayRequestLog{old, keep}).Error; err != nil {
+		t.Fatal(err)
+	}
+	result, err := NewManagementService(store).clearHistoricalLogPayloadsBeforeAge(context.Background(), now, 7*24*time.Hour)
+	if err != nil || result.RequestLogsCleared != 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}

@@ -47,6 +47,19 @@ func (s *Store) DB() *gorm.DB {
 	return s.db
 }
 
+func (s *Store) detailedLogCutoff(now time.Time) (time.Time, bool) {
+	days := DetailedLogRetentionDays
+	if s.configManager != nil {
+		if cfg := s.configManager.GetConfig(); cfg != nil {
+			days = config.EffectiveDetailedLogRetentionDays(cfg)
+		}
+	}
+	if days <= 0 {
+		return time.Time{}, false
+	}
+	return now.UTC().Add(-time.Duration(days) * 24 * time.Hour), true
+}
+
 func (s *Store) SecretBox() *SecretBox {
 	return s.secretBox
 }
@@ -62,6 +75,8 @@ func (s *Store) migrate() error {
 		&ClientToken{},
 		&ClientTokenModel{},
 		&RelayRequestLog{},
+		&GatewayResource{},
+		&RequestResource{},
 		&RelaySessionState{},
 		&ModelAgentContextWindow{},
 		&RelayChatSessionClaim{},
@@ -112,6 +127,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.backfillCodexThreadSources(); err != nil {
+		return err
+	}
+	if err := s.backfillCodexSessionParents(); err != nil {
 		return err
 	}
 	if err := s.backfillCodexCompactionTracking(); err != nil {
@@ -353,10 +371,10 @@ func (s *Store) backfillTokenDailyStats() error {
 			sqliteEastEightCreatedDate + " AS date, token_id, COUNT(*) AS request_count, " +
 				"SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS success_count, " +
 				"SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END) AS canceled_count, " +
-				"COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(normal_input_tokens),0) AS normal_input_tokens, " +
-				"COALESCE(SUM(output_tokens),0) AS output_tokens, " +
-				"COALESCE(SUM(cached_tokens),0) AS cached_tokens, COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens, " +
-				"COALESCE(SUM(sent_tokens),0) AS sent_tokens, " +
+				"COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN normal_input_tokens ELSE 0 END),0) AS normal_input_tokens, " +
+				"COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END),0) AS output_tokens, " +
+				"COALESCE(SUM(CASE WHEN outcome = 'success' THEN cached_tokens ELSE 0 END),0) AS cached_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cache_write_tokens ELSE 0 END),0) AS cache_write_tokens, " +
+				"COALESCE(SUM(CASE WHEN outcome = 'success' THEN sent_tokens ELSE 0 END),0) AS sent_tokens, " +
 				"COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(estimated_cost),0) AS upstream_cost, " +
 				"COALESCE(SUM(first_token_ms),0) AS first_token_ms, SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_samples, " +
 				"COALESCE(SUM(latency_ms),0) AS latency_ms, SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END) AS latency_samples, " +
@@ -391,29 +409,46 @@ func (s *Store) backfillCostFields() error {
 			return err
 		}
 
-		requestCutoff := time.Now().UTC().Add(-DetailedLogRetentionDays * 24 * time.Hour)
-		attemptCutoff := time.Now().Add(-DetailedLogRetentionDays * 24 * time.Hour)
-		if err := db.Model(&RelayRequestLog{}).Where("created_at >= ? AND outcome = ?", requestCutoff, RelayOutcomeFailed).Updates(map[string]any{
+		requestCutoff, hasRequestCutoff := s.detailedLogCutoff(time.Now())
+		attemptCutoff := requestCutoff
+		if !hasRequestCutoff {
+			requestCutoff = time.Time{}
+		}
+		requestScope := db.Model(&RelayRequestLog{}).Where("outcome = ?", RelayOutcomeFailed)
+		attemptScope := db.Model(&RelayAttemptLog{}).Where("outcome = ?", RelayOutcomeFailed)
+		if hasRequestCutoff {
+			requestScope = requestScope.Where("created_at >= ?", requestCutoff)
+			attemptScope = attemptScope.Where("created_at >= ?", attemptCutoff)
+		}
+		if err := requestScope.Updates(map[string]any{
 			"estimated_cost": 0,
 			"upstream_cost":  0,
 			"cost_source":    CostSourceFailedZero,
 		}).Error; err != nil {
 			return err
 		}
-		if err := db.Model(&RelayRequestLog{}).Where("created_at >= ? AND status_code BETWEEN 200 AND 299 AND cost_source = ''", requestCutoff).Updates(map[string]any{
+		requestScope = db.Model(&RelayRequestLog{}).Where("status_code BETWEEN 200 AND 299 AND cost_source = ''")
+		if hasRequestCutoff {
+			requestScope = requestScope.Where("created_at >= ?", requestCutoff)
+		}
+		if err := requestScope.Updates(map[string]any{
 			"upstream_cost": gorm.Expr("estimated_cost"),
 			"cost_source":   CostSourceFallback,
 		}).Error; err != nil {
 			return err
 		}
-		if err := db.Model(&RelayAttemptLog{}).Where("created_at >= ? AND outcome = ?", attemptCutoff, RelayOutcomeFailed).Updates(map[string]any{
+		if err := attemptScope.Updates(map[string]any{
 			"estimated_cost": 0,
 			"upstream_cost":  0,
 			"cost_source":    CostSourceFailedZero,
 		}).Error; err != nil {
 			return err
 		}
-		if err := db.Model(&RelayAttemptLog{}).Where("created_at >= ? AND success = ? AND status_code BETWEEN 200 AND 299 AND cost_source = ''", attemptCutoff, true).Updates(map[string]any{
+		attemptScope = db.Model(&RelayAttemptLog{}).Where("success = ? AND status_code BETWEEN 200 AND 299 AND cost_source = ''", true)
+		if hasRequestCutoff {
+			attemptScope = attemptScope.Where("created_at >= ?", attemptCutoff)
+		}
+		if err := attemptScope.Updates(map[string]any{
 			"upstream_cost": gorm.Expr("estimated_cost"),
 			"cost_source":   CostSourceFallback,
 		}).Error; err != nil {
@@ -421,7 +456,11 @@ func (s *Store) backfillCostFields() error {
 		}
 
 		var dates []string
-		if err := db.Model(&RelayRequestLog{}).Distinct(sqliteEastEightCreatedDate).Where("created_at >= ?", requestCutoff).Pluck(sqliteEastEightCreatedDate, &dates).Error; err != nil {
+		dateScope := db.Model(&RelayRequestLog{}).Distinct(sqliteEastEightCreatedDate)
+		if hasRequestCutoff {
+			dateScope = dateScope.Where("created_at >= ?", requestCutoff)
+		}
+		if err := dateScope.Pluck(sqliteEastEightCreatedDate, &dates).Error; err != nil {
 			return err
 		}
 		if len(dates) > 0 {
@@ -433,9 +472,9 @@ func (s *Store) backfillCostFields() error {
 				sqliteEastEightCreatedDate+" AS date, token_id, COUNT(*) AS request_count, "+
 					"SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS success_count, "+
 					"SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END) AS canceled_count, "+
-					"COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(normal_input_tokens),0) AS normal_input_tokens, "+
-					"COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(cached_tokens),0) AS cached_tokens, "+
-					"COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens, COALESCE(SUM(sent_tokens),0) AS sent_tokens, "+
+					"COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN normal_input_tokens ELSE 0 END),0) AS normal_input_tokens, "+
+					"COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END),0) AS output_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cached_tokens ELSE 0 END),0) AS cached_tokens, "+
+					"COALESCE(SUM(CASE WHEN outcome = 'success' THEN cache_write_tokens ELSE 0 END),0) AS cache_write_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN sent_tokens ELSE 0 END),0) AS sent_tokens, "+
 					"COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(upstream_cost),0) AS upstream_cost, "+
 					"COALESCE(SUM(first_token_ms),0) AS first_token_ms, SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_samples, "+
 					"COALESCE(SUM(latency_ms),0) AS latency_ms, SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END) AS latency_samples, "+
@@ -513,13 +552,15 @@ func (s *Store) cleanupExpired() {
 	_ = s.db.Where("expires_at < ?", now).Delete(&AdminSession{}).Error
 	_ = s.db.Where("expires_at < ?", now).Delete(&ResponseAffinity{}).Error
 	_ = s.db.Where("expires_at < ?", now).Delete(&SessionAffinity{}).Error
-	detailCutoff := now.Add(-DetailedLogRetentionDays * 24 * time.Hour)
-	requestCutoff := now.UTC().Add(-DetailedLogRetentionDays * 24 * time.Hour)
-	_ = s.db.Where("created_at < ?", detailCutoff).Delete(&RelayAttemptLog{}).Error
-	_ = s.db.Where("created_at < ?", detailCutoff).Delete(&RelayStepLog{}).Error
-	_ = s.db.Where("created_at < ?", requestCutoff).Delete(&RelayRequestLog{}).Error
-	_ = s.db.Where("updated_at < ?", detailCutoff).Delete(&RelaySessionState{}).Error
-	_ = s.db.Where("updated_at < ?", detailCutoff).Delete(&RelayChatSessionClaim{}).Error
+	if detailCutoff, ok := s.detailedLogCutoff(now); ok {
+		requestIDs := s.db.Model(&RelayRequestLog{}).Select("id").Where("created_at < ?", detailCutoff)
+		_ = s.db.Where("created_at < ? OR request_id IN (?)", detailCutoff, requestIDs).Delete(&RelayAttemptLog{}).Error
+		_ = s.db.Where("created_at < ? OR request_id IN (?)", detailCutoff, requestIDs).Delete(&RelayStepLog{}).Error
+		_ = s.db.Where("request_id IN (?)", requestIDs).Delete(&RequestResource{}).Error
+		_ = s.db.Where("created_at < ?", detailCutoff).Delete(&RelayRequestLog{}).Error
+		_ = s.db.Where("updated_at < ?", detailCutoff).Delete(&RelaySessionState{}).Error
+		_ = s.db.Where("updated_at < ?", detailCutoff).Delete(&RelayChatSessionClaim{}).Error
+	}
 	s.checkpointSQLiteWAL()
 }
 

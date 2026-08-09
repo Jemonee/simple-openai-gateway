@@ -29,6 +29,7 @@ const (
 	DefaultRoutingQualityWeightPercent    = 15
 	DefaultRoutingBalanceWeightPercent    = 10
 	MinimumRoutingQualityWeightPercent    = 5
+	DefaultDetailedLogRetentionDays       = 0
 	PayloadLogDetailDefault               = "default"
 	PayloadLogDetailSummary               = "summary"
 	PayloadLogDetailNone                  = "none"
@@ -88,6 +89,9 @@ func (acm *ApplicationConfigManager) Load() {
 		panic(err)
 	}
 	cfg.GatewayConfig.PayloadLogDetail = payloadLogDetail
+	if err := normalizeDetailedLogRetentionDays(cfg.GatewayConfig.DetailedLogRetentionDays); err != nil {
+		panic(err)
+	}
 	cfg.GatewayConfig.CommonModelNames = normalizeCommonModelNames(cfg.GatewayConfig.CommonModelNames)
 	routingWeightsMigrated := completeRoutingDecisionWeights(&cfg.GatewayConfig, presence)
 	if err := normalizeRoutingDecisionWeights(&cfg.GatewayConfig); err != nil {
@@ -154,6 +158,7 @@ type GatewayConfig struct {
 	RoutingQualityWeightPercent    int      `toml:"routing_quality_weight_percent" json:"routingQualityWeightPercent" default:"15"`
 	RoutingBalanceWeightPercent    int      `toml:"routing_balance_weight_percent" json:"routingBalanceWeightPercent" default:"10"`
 	SessionTTLHours                int      `toml:"session_ttl_hours" json:"sessionTTLHours" default:"12"`
+	DetailedLogRetentionDays       int      `toml:"detailed_log_retention_days" json:"detailedLogRetentionDays" default:"0"`
 	SecureCookie                   bool     `toml:"secure_cookie" json:"secureCookie" default:"false"`
 	PayloadLogDetail               string   `toml:"payload_log_detail" json:"payloadLogDetail" default:"default"`
 	CommonModelNames               []string `toml:"common_model_names" json:"commonModelNames"`
@@ -172,6 +177,9 @@ func (acm *ApplicationConfigManager) Save(cfg *ApplicationConfig) error {
 		return err
 	}
 	configCopy.GatewayConfig.PayloadLogDetail = payloadLogDetail
+	if err := normalizeDetailedLogRetentionDays(configCopy.GatewayConfig.DetailedLogRetentionDays); err != nil {
+		return err
+	}
 	configCopy.GatewayConfig.CommonModelNames = normalizeCommonModelNames(configCopy.GatewayConfig.CommonModelNames)
 	if err := normalizeRoutingDecisionWeights(&configCopy.GatewayConfig); err != nil {
 		return err
@@ -299,6 +307,25 @@ func EffectivePayloadLogDetail(cfg *ApplicationConfig) string {
 		return PayloadLogDetailDefault
 	}
 	return value
+}
+
+func normalizeDetailedLogRetentionDays(value int) error {
+	switch value {
+	case 0, 7, 15, 30:
+		return nil
+	default:
+		return fmt.Errorf("调用明细保留天数仅支持 0、7、15 或 30 天")
+	}
+}
+
+func EffectiveDetailedLogRetentionDays(cfg *ApplicationConfig) int {
+	if cfg == nil {
+		return DefaultDetailedLogRetentionDays
+	}
+	if normalizeDetailedLogRetentionDays(cfg.GatewayConfig.DetailedLogRetentionDays) != nil {
+		return DefaultDetailedLogRetentionDays
+	}
+	return cfg.GatewayConfig.DetailedLogRetentionDays
 }
 
 func generateSharedToken() (string, error) {

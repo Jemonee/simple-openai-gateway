@@ -81,6 +81,8 @@ type SessionLogSummary struct {
 	SessionSource            string              `json:"sessionSource"`
 	ClientKind               string              `json:"clientKind"`
 	ThreadSource             string              `json:"threadSource"`
+	ParentSessionID          string              `json:"parentSessionId"`
+	ChildCount               int64               `gorm:"-" json:"childCount"`
 	Identified               bool                `json:"identified"`
 	FallbackRequestID        string              `json:"fallbackRequestId"`
 	TokenID                  uint64              `json:"tokenId"`
@@ -119,6 +121,8 @@ type SessionLogSummary struct {
 	FirstSeenAt              time.Time           `json:"firstSeenAt"`
 	LastSeenAt               time.Time           `json:"lastSeenAt"`
 	CurrentChannel           *SessionChannelView `gorm:"-" json:"currentChannel"`
+	Resources                []ResourceSummary   `gorm:"-" json:"resources"`
+	SensitiveResourceLeak    bool                `gorm:"-" json:"sensitiveResourceLeak"`
 }
 
 type SessionLogPage struct {
@@ -136,6 +140,7 @@ type SessionLogDetail struct {
 	RequestTotal int64                 `json:"requestTotal"`
 	Page         int                   `json:"page"`
 	PageSize     int                   `json:"pageSize"`
+	Resources    []ResourceSummary     `json:"resources"`
 }
 
 func normalizeSessionPage(page *int, pageSize *int) {
@@ -149,16 +154,16 @@ func normalizeSessionPage(page *int, pageSize *int) {
 
 func (s *ManagementService) SessionLogs(ctx context.Context, query SessionLogQuery) (*SessionLogPage, error) {
 	normalizeSessionPage(&query.Page, &query.PageSize)
-	cutoff := time.Now().UTC().Add(-DetailedLogRetentionDays * 24 * time.Hour)
+	cutoff, hasCutoff := s.store.detailedLogCutoff(time.Now())
 
-	grouped := applySessionLogFilters(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), query, cutoff).
+	grouped := applySessionLogFilters(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), query, cutoff, hasCutoff).
 		Select("token_id, " + sessionGroupExpression + " AS group_id").
 		Group("token_id, " + sessionGroupExpression)
 	var total int64
 	if err := s.store.db.WithContext(ctx).Table("(?) AS session_groups", grouped).Count(&total).Error; err != nil {
 		return nil, err
 	}
-	summary, err := aggregateLogSummary(applySessionLogFilters(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), query, cutoff))
+	summary, err := aggregateLogSummary(applySessionLogFilters(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), query, cutoff, hasCutoff))
 	if err != nil {
 		return nil, err
 	}
@@ -171,11 +176,11 @@ func (s *ManagementService) SessionLogs(ctx context.Context, query SessionLogQue
 		"COUNT(*) AS request_count, SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS success_count, " +
 		"SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END) AS canceled_count, " +
 		"SUM(CASE WHEN outcome = 'processing' THEN 1 ELSE 0 END) AS processing_count, " +
-		"COALESCE(SUM(attempt_count), 0) AS attempt_count, COALESCE(SUM(input_tokens), 0) AS input_tokens, " +
-		"COALESCE(SUM(normal_input_tokens), 0) AS normal_input_tokens, " +
-		"COALESCE(SUM(output_tokens), 0) AS output_tokens, COALESCE(SUM(cached_tokens), 0) AS cached_tokens, " +
-		"COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens, " +
-		"COALESCE(SUM(sent_tokens), 0) AS sent_tokens, " +
+		"COALESCE(SUM(attempt_count), 0) AS attempt_count, COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END), 0) AS input_tokens, " +
+		"COALESCE(SUM(CASE WHEN outcome = 'success' THEN normal_input_tokens ELSE 0 END), 0) AS normal_input_tokens, " +
+		"COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END), 0) AS output_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cached_tokens ELSE 0 END), 0) AS cached_tokens, " +
+		"COALESCE(SUM(CASE WHEN outcome = 'success' THEN cache_write_tokens ELSE 0 END), 0) AS cache_write_tokens, " +
+		"COALESCE(SUM(CASE WHEN outcome = 'success' THEN sent_tokens ELSE 0 END), 0) AS sent_tokens, " +
 		"COALESCE(SUM(estimated_cost), 0) AS estimated_cost, COALESCE(SUM(upstream_cost), 0) AS upstream_cost, " +
 		"COALESCE(SUM(first_token_ms), 0) AS total_first_token_ms, SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_sample_count, " +
 		"COALESCE(SUM(first_response_ms), 0) AS total_first_response_ms, SUM(CASE WHEN first_response_ms > 0 THEN 1 ELSE 0 END) AS first_response_sample_count, " +
@@ -192,7 +197,7 @@ func (s *ManagementService) SessionLogs(ctx context.Context, query SessionLogQue
 		LastSeenUnix         int64
 	}
 	var rows []aggregateRow
-	if err := applySessionLogFilters(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), query, cutoff).
+	if err := applySessionLogFilters(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), query, cutoff, hasCutoff).
 		Select(selectSQL).Group("token_id, " + sessionGroupExpression).
 		Order("first_seen_unix DESC, last_seen_unix DESC").Offset((query.Page - 1) * query.PageSize).Limit(query.PageSize).
 		Scan(&rows).Error; err != nil {
@@ -209,13 +214,23 @@ func (s *ManagementService) SessionLogs(ctx context.Context, query SessionLogQue
 		if err := s.populateSessionSummary(ctx, &summary, cutoff); err != nil {
 			return nil, err
 		}
+		sensitive, err := hasSensitiveSessionResources(s.store.db.WithContext(ctx), summary.TokenID, summary.SessionID, summary.FallbackRequestID, summary.Identified)
+		if err != nil {
+			return nil, err
+		}
+		summary.SensitiveResourceLeak = sensitive
 		items = append(items, summary)
+	}
+	if err := s.populateSessionRelations(ctx, items); err != nil {
+		return nil, err
 	}
 	return &SessionLogPage{Items: items, Summary: summary, Total: total, Page: query.Page, PageSize: query.PageSize}, nil
 }
 
-func applySessionLogFilters(db *gorm.DB, query SessionLogQuery, cutoff time.Time) *gorm.DB {
-	db = db.Where("created_at >= ?", cutoff)
+func applySessionLogFilters(db *gorm.DB, query SessionLogQuery, cutoff time.Time, hasCutoff bool) *gorm.DB {
+	if hasCutoff {
+		db = db.Where("created_at >= ?", cutoff)
+	}
 	if value := strings.TrimSpace(query.Session); value != "" {
 		pattern := "%" + value + "%"
 		db = db.Where(
@@ -281,8 +296,11 @@ func (s *ManagementService) SessionLogDetail(ctx context.Context, query SessionD
 	if (query.SessionID == "" && query.RequestID == "") || (query.SessionID != "" && query.TokenID == 0) {
 		return nil, errors.New("sessionId with tokenId or requestId is required")
 	}
-	cutoff := time.Now().UTC().Add(-DetailedLogRetentionDays * 24 * time.Hour)
-	base := applySessionDetailStatus(applySessionIdentity(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).Where("created_at >= ?", cutoff), query), query.Status)
+	cutoff, hasCutoff := s.store.detailedLogCutoff(time.Now())
+	base := applySessionDetailStatus(applySessionIdentity(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), query), query.Status)
+	if hasCutoff {
+		base = base.Where("created_at >= ?", cutoff)
+	}
 	var requestTotal int64
 	if err := base.Count(&requestTotal).Error; err != nil {
 		return nil, err
@@ -314,16 +332,20 @@ func (s *ManagementService) SessionLogDetail(ctx context.Context, query SessionD
 		LastSeenUnix         int64
 	}
 	var aggregate detailAggregate
-	if err := applySessionIdentity(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).Where("created_at >= ?", cutoff), query).
+	detailBase := applySessionIdentity(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), query)
+	if hasCutoff {
+		detailBase = detailBase.Where("created_at >= ?", cutoff)
+	}
+	if err := detailBase.
 		Select("COUNT(*) AS request_count, SUM(CASE WHEN is_compaction AND (outcome = 'success' OR (outcome = '' AND status_code >= 200 AND status_code < 300)) THEN 1 ELSE 0 END) AS compaction_count, " +
 			"SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS success_count, " +
 			"SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END) AS canceled_count, " +
 			"SUM(CASE WHEN outcome = 'processing' THEN 1 ELSE 0 END) AS processing_count, " +
-			"COALESCE(SUM(attempt_count), 0) AS attempt_count, COALESCE(SUM(input_tokens), 0) AS input_tokens, " +
-			"COALESCE(SUM(normal_input_tokens), 0) AS normal_input_tokens, " +
-			"COALESCE(SUM(output_tokens), 0) AS output_tokens, COALESCE(SUM(cached_tokens), 0) AS cached_tokens, " +
-			"COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens, " +
-			"COALESCE(SUM(sent_tokens), 0) AS sent_tokens, " +
+			"COALESCE(SUM(attempt_count), 0) AS attempt_count, COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END), 0) AS input_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN normal_input_tokens ELSE 0 END), 0) AS normal_input_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END), 0) AS output_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cached_tokens ELSE 0 END), 0) AS cached_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN cache_write_tokens ELSE 0 END), 0) AS cache_write_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN sent_tokens ELSE 0 END), 0) AS sent_tokens, " +
 			"COALESCE(SUM(estimated_cost), 0) AS estimated_cost, COALESCE(SUM(upstream_cost), 0) AS upstream_cost, " +
 			"COALESCE(SUM(first_token_ms), 0) AS total_first_token_ms, SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_samples, " +
 			"COALESCE(SUM(first_response_ms), 0) AS total_first_response_ms, SUM(CASE WHEN first_response_ms > 0 THEN 1 ELSE 0 END) AS first_response_samples, " +
@@ -367,14 +389,33 @@ func (s *ManagementService) SessionLogDetail(ctx context.Context, query SessionD
 	if err := s.populateSessionSummary(ctx, &summary, cutoff); err != nil {
 		return nil, err
 	}
+	relationSummary := []SessionLogSummary{summary}
+	if err := s.populateSessionRelations(ctx, relationSummary); err != nil {
+		return nil, err
+	}
+	summary = relationSummary[0]
 	summary.CompactionCount = aggregate.CompactionCount
+	resources, err := loadSessionResources(s.store.db.WithContext(ctx), query.TokenID, query.SessionID, query.RequestID, query.SessionID != "")
+	if err != nil {
+		return nil, err
+	}
+	summary.Resources = resources
+	sensitive, err := hasSensitiveSessionResources(s.store.db.WithContext(ctx), query.TokenID, query.SessionID, query.RequestID, query.SessionID != "")
+	if err != nil {
+		return nil, err
+	}
+	summary.SensitiveResourceLeak = sensitive
 	channels, err := s.sessionChannelUsage(ctx, query, cutoff)
 	if err != nil {
 		return nil, err
 	}
 
 	var logs []RelayRequestLog
-	if err := applySessionDetailStatus(applySessionIdentity(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).Where("created_at >= ?", cutoff), query), query.Status).
+	requestBase := applySessionDetailStatus(applySessionIdentity(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), query), query.Status)
+	if hasCutoff {
+		requestBase = requestBase.Where("created_at >= ?", cutoff)
+	}
+	if err := requestBase.
 		Omit("request_body", "response_body").
 		Order("created_at DESC, id DESC").Offset((query.Page - 1) * query.PageSize).Limit(query.PageSize).
 		Find(&logs).Error; err != nil {
@@ -388,12 +429,15 @@ func (s *ManagementService) SessionLogDetail(ctx context.Context, query SessionD
 		}
 		requests = append(requests, view)
 	}
-	return &SessionLogDetail{Summary: summary, Channels: channels, Requests: requests, RequestTotal: requestTotal, Page: query.Page, PageSize: query.PageSize}, nil
+	return &SessionLogDetail{Summary: summary, Channels: channels, Requests: requests, RequestTotal: requestTotal, Page: query.Page, PageSize: query.PageSize, Resources: resources}, nil
 }
 
 func (s *ManagementService) sessionChannelUsage(ctx context.Context, query SessionDetailQuery, cutoff time.Time) ([]SessionChannelUsage, error) {
-	requestIDs := applySessionIdentity(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).
-		Select("id").Where("created_at >= ?", cutoff), query)
+	requestDB := applySessionIdentity(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).Select("id"), query)
+	if !cutoff.IsZero() {
+		requestDB = requestDB.Where("created_at >= ?", cutoff)
+	}
+	requestIDs := requestDB
 	type usageRow struct {
 		ChannelID    uint64
 		ChannelName  string
@@ -456,8 +500,12 @@ func applySessionDetailStatus(db *gorm.DB, status string) *gorm.DB {
 }
 
 func (s *ManagementService) populateSessionSummary(ctx context.Context, summary *SessionLogSummary, cutoff time.Time) error {
-	latestDB := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).Where("created_at >= ?", cutoff)
-	firstDB := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).Where("created_at >= ?", cutoff)
+	latestDB := s.store.db.WithContext(ctx).Model(&RelayRequestLog{})
+	firstDB := s.store.db.WithContext(ctx).Model(&RelayRequestLog{})
+	if !cutoff.IsZero() {
+		latestDB = latestDB.Where("created_at >= ?", cutoff)
+		firstDB = firstDB.Where("created_at >= ?", cutoff)
+	}
 	if summary.Identified {
 		latestDB = latestDB.Where("token_id = ? AND codex_session_id = ?", summary.TokenID, summary.SessionID)
 		firstDB = firstDB.Where("token_id = ? AND codex_session_id = ?", summary.TokenID, summary.SessionID)
@@ -485,6 +533,7 @@ func (s *ManagementService) populateSessionSummary(ctx context.Context, summary 
 			summary.ContextWindowTokens = state.ContextWindowTokens
 			summary.ContextWindowSource = state.ContextWindowSource
 			summary.ContextWindowSamples = state.ContextWindowSamples
+			summary.ParentSessionID = state.ParentSessionID
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
@@ -540,6 +589,52 @@ func (s *ManagementService) populateSessionSummary(ctx context.Context, summary 
 	return nil
 }
 
+type sessionRelationKey struct {
+	TokenID   uint64
+	SessionID string
+}
+
+func (s *ManagementService) populateSessionRelations(ctx context.Context, summaries []SessionLogSummary) error {
+	conditions := make([]string, 0, len(summaries))
+	args := make([]any, 0, len(summaries)*2)
+	seen := make(map[sessionRelationKey]struct{}, len(summaries))
+	for _, summary := range summaries {
+		if !summary.Identified || summary.TokenID == 0 || summary.SessionID == "" {
+			continue
+		}
+		key := sessionRelationKey{TokenID: summary.TokenID, SessionID: summary.SessionID}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		conditions = append(conditions, "(token_id = ? AND parent_session_id = ?)")
+		args = append(args, summary.TokenID, summary.SessionID)
+	}
+	if len(conditions) == 0 {
+		return nil
+	}
+	type childCountRow struct {
+		TokenID         uint64
+		ParentSessionID string
+		ChildCount      int64
+	}
+	var rows []childCountRow
+	if err := s.store.db.WithContext(ctx).Model(&RelaySessionState{}).
+		Select("token_id, parent_session_id, COUNT(*) AS child_count").
+		Where("("+strings.Join(conditions, " OR ")+")", args...).
+		Group("token_id, parent_session_id").Scan(&rows).Error; err != nil {
+		return err
+	}
+	counts := make(map[sessionRelationKey]int64, len(rows))
+	for _, row := range rows {
+		counts[sessionRelationKey{TokenID: row.TokenID, SessionID: row.ParentSessionID}] = row.ChildCount
+	}
+	for index := range summaries {
+		summaries[index].ChildCount = counts[sessionRelationKey{TokenID: summaries[index].TokenID, SessionID: summaries[index].SessionID}]
+	}
+	return nil
+}
+
 func (s *ManagementService) RenameSession(ctx context.Context, input SessionTitleInput) error {
 	input.SessionID = strings.TrimSpace(input.SessionID)
 	input.RequestID = strings.TrimSpace(input.RequestID)
@@ -553,12 +648,15 @@ func (s *ManagementService) RenameSession(ctx context.Context, input SessionTitl
 	if (input.SessionID == "" && input.RequestID == "") || (input.SessionID != "" && input.TokenID == 0) {
 		return errors.New("sessionId with tokenId or requestId is required")
 	}
-	cutoff := time.Now().UTC().Add(-DetailedLogRetentionDays * 24 * time.Hour)
+	cutoff, hasCutoff := s.store.detailedLogCutoff(time.Now())
 	return s.store.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		if input.SessionID == "" {
 			result := db.Model(&RelayRequestLog{}).
-				Where("id = ? AND codex_session_id = '' AND created_at >= ?", input.RequestID, cutoff).
-				Update("session_name", input.Title)
+				Where("id = ? AND codex_session_id = ''", input.RequestID)
+			if hasCutoff {
+				result = result.Where("created_at >= ?", cutoff)
+			}
+			result = result.Update("session_name", input.Title)
 			if result.Error != nil {
 				return result.Error
 			}
@@ -569,8 +667,12 @@ func (s *ManagementService) RenameSession(ctx context.Context, input SessionTitl
 		}
 
 		var count int64
-		if err := db.Model(&RelayRequestLog{}).
-			Where("token_id = ? AND codex_session_id = ? AND created_at >= ?", input.TokenID, input.SessionID, cutoff).
+		countDB := db.Model(&RelayRequestLog{}).
+			Where("token_id = ? AND codex_session_id = ?", input.TokenID, input.SessionID)
+		if hasCutoff {
+			countDB = countDB.Where("created_at >= ?", cutoff)
+		}
+		if err := countDB.
 			Count(&count).Error; err != nil {
 			return err
 		}
@@ -647,8 +749,10 @@ func (s *ManagementService) currentSessionChannel(ctx context.Context, summary S
 
 	attemptDB := s.store.db.WithContext(ctx).Table("relay_attempt_logs AS a").
 		Select("a.*").Joins("JOIN relay_request_logs AS r ON r.id = a.request_id").
-		Where("r.created_at >= ?", cutoff).
 		Where("r.codex_session_source NOT IN ?", codexAuxiliarySessionSources)
+	if !cutoff.IsZero() {
+		attemptDB = attemptDB.Where("r.created_at >= ?", cutoff)
+	}
 	if summary.Identified {
 		attemptDB = attemptDB.Where("r.token_id = ? AND r.codex_session_id = ?", summary.TokenID, summary.SessionID)
 	} else {
@@ -700,8 +804,10 @@ func (s *ManagementService) sessionChannelHistory(ctx context.Context, summary S
 	attemptDB := s.store.db.WithContext(ctx).Table("relay_attempt_logs AS a").
 		Select("a.*, r.id AS request_log_id, r.created_at AS request_created_at").
 		Joins("JOIN relay_request_logs AS r ON r.id = a.request_id").
-		Where("r.created_at >= ?", cutoff).
 		Where("r.codex_session_source NOT IN ?", codexAuxiliarySessionSources)
+	if !cutoff.IsZero() {
+		attemptDB = attemptDB.Where("r.created_at >= ?", cutoff)
+	}
 	if summary.Identified {
 		attemptDB = attemptDB.Where("r.token_id = ? AND r.codex_session_id = ?", summary.TokenID, summary.SessionID)
 	} else {
@@ -797,13 +903,23 @@ func (s *ManagementService) relayRequestView(ctx context.Context, log RelayReque
 	if len(attempts) > 0 {
 		apiPath = attempts[0].APIPath
 	}
+	resources, err := loadRequestResources(s.store.db.WithContext(ctx), log.ID)
+	if err != nil {
+		return RelayRequestView{}, err
+	}
+	sensitive, err := hasSensitiveResources(s.store.db.WithContext(ctx), log.ID)
+	if err != nil {
+		return RelayRequestView{}, err
+	}
 	return RelayRequestView{
-		RelayRequestLog:   log,
-		RequestParameters: parameters,
-		APIPath:           apiPath,
-		ReasoningEffort:   requestReasoningEffort(parameters),
-		Attempts:          attempts,
-		Steps:             steps,
+		RelayRequestLog:       log,
+		RequestParameters:     parameters,
+		APIPath:               apiPath,
+		ReasoningEffort:       requestReasoningEffort(parameters),
+		Attempts:              attempts,
+		Steps:                 steps,
+		Resources:             resources,
+		SensitiveResourceLeak: sensitive,
 	}, nil
 }
 

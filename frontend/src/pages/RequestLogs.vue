@@ -4,6 +4,7 @@ import { Coin, Connection, DataLine, Refresh, RefreshLeft, Search, Tickets, Time
 import { ElMessage } from 'element-plus'
 import RequestPayloadDialog from '@/components/RequestPayloadDialog.vue'
 import SessionAttemptCard from '@/components/SessionAttemptCard.vue'
+import ResourceList from '@/components/ResourceList.vue'
 import type { Channel, ClientToken, GatewayModel, LogAggregateSummary, LogPage, RelayAttemptLog, RelayRequestLog } from '@/types/gateway'
 import { request } from '@/utils/api'
 import { formatCompactNumber, formatDuration } from '@/utils/formatters'
@@ -170,7 +171,7 @@ onMounted(async () => {
 <template>
   <div class="page-stack log-page">
     <header class="page-heading">
-      <div><h1>调用日志</h1><p>默认按东八区显示今天，可查询 5 天内的请求状态、重试尝试与费用</p></div>
+      <div><h1>调用日志</h1><p>默认按东八区显示今天；可查询当前保留窗口内的请求状态、重试尝试与费用</p></div>
       <div class="page-actions">
         <el-tooltip content="刷新调用日志" placement="bottom"><el-button class="page-refresh-button" :icon="Refresh" :loading="loading" aria-label="刷新调用日志" @click="loadLogs" /></el-tooltip>
       </div>
@@ -253,6 +254,7 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="来源" width="142"><template #default="scope"><div class="source-breakdown"><el-tag :type="costSourceType(scope.row)" effect="plain" size="small">{{ costSource(scope.row) }}</el-tag><small>{{ usageSource(scope.row.usageSource) }}</small></div></template></el-table-column>
         <el-table-column label="性能 / 尝试" min-width="240"><template #default="scope"><div class="performance-cell"><strong>首 Token {{ formatTiming(scope.row.firstTokenMs) }} <small class="relay-first-response">中转首响 {{ formatTiming(scope.row.firstResponseMs) }}</small></strong><small>延迟 {{ formatTiming(scope.row.latencyMs) }} · 请求耗时 {{ formatTiming(scope.row.durationMs) }} · {{ scope.row.attemptCount }} 次尝试</small></div></template></el-table-column>
+        <el-table-column label="资源" min-width="150"><template #default="scope"><ResourceList v-if="scope.row.resources?.length" :resources="scope.row.resources" compact /><span v-else class="muted-text">--</span></template></el-table-column>
         <el-table-column label="详情" width="62" fixed="right" align="right"><template #default="scope"><el-tooltip content="查看调用记录" placement="top"><el-button class="table-action-button" text :icon="View" :loading="payloadLoadingId === scope.row.id" aria-label="查看调用记录" @click="showPayloads(scope.row)" /></el-tooltip></template></el-table-column>
       </el-table>
       <footer class="table-pagination"><el-pagination v-model:current-page="pagination.page" v-model:page-size="pagination.pageSize" :disabled="loading" :total="total" :page-sizes="[25, 50, 100]" layout="total, sizes, prev, pager, next" @change="loadLogs" /></footer>

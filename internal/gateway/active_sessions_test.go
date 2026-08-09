@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func TestActiveSessionsOnlyReturnsRecentUserSessions(t *testing.T) {
+func TestActiveSessionsDefaultsToRecentUserAndSubagentSessions(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().UTC()
 	logs := []RelayRequestLog{
@@ -16,6 +16,7 @@ func TestActiveSessionsOnlyReturnsRecentUserSessions(t *testing.T) {
 		{ID: "active-user-recent", TokenID: 7, TokenName: "user-token", TokenKeyPrefix: "sk-user", Endpoint: "responses", RequestedModel: "gpt-active", CodexSessionID: "active-user", CodexSessionSource: "prompt_cache_key", SessionName: "Active user", StatusCode: http.StatusOK, Outcome: RelayOutcomeProcessing, CreatedAt: now.Add(-5 * time.Minute)},
 		{ID: "earlier-active-user", TokenID: 7, TokenName: "user-token", TokenKeyPrefix: "sk-user", Endpoint: "responses", RequestedModel: "gpt-active", CodexSessionID: "earlier-active-user", CodexSessionSource: "prompt_cache_key", SessionName: "Earlier active user", StatusCode: http.StatusBadGateway, Outcome: RelayOutcomeFailed, AttemptCount: 1, CreatedAt: now.Add(-20 * time.Minute)},
 		{ID: "inactive-user", TokenID: 7, TokenName: "user-token", TokenKeyPrefix: "sk-user", Endpoint: "responses", RequestedModel: "gpt-active", CodexSessionID: "inactive-user", CodexSessionSource: "prompt_cache_key", SessionName: "Inactive user", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, CreatedAt: now.Add(-31 * time.Minute)},
+		{ID: "active-subagent", TokenID: 7, TokenName: "user-token", TokenKeyPrefix: "sk-user", Endpoint: "responses", RequestedModel: "gpt-active", CodexSessionID: "active-subagent", CodexSessionSource: "prompt_cache_key", SessionName: "Active subagent", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, AttemptCount: 1, CreatedAt: now.Add(-10 * time.Minute)},
 		{ID: "active-ambient", TokenID: 7, TokenName: "user-token", TokenKeyPrefix: "sk-user", Endpoint: "responses", RequestedModel: "gpt-active", CodexSessionID: "active-ambient", CodexSessionSource: "prompt_cache_key", SessionName: "Active ambient", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, CreatedAt: now.Add(-time.Minute)},
 	}
 	if err := store.db.Create(&logs).Error; err != nil {
@@ -32,6 +33,7 @@ func TestActiveSessionsOnlyReturnsRecentUserSessions(t *testing.T) {
 		{TokenID: 7, SessionID: "active-user", Title: "Active user", ThreadSource: codexThreadSourceUser, LatestRequestID: "active-user-recent", LastActivityAt: timePointer(now.Add(-5 * time.Minute)), CompactionCount: 2, CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-5 * time.Minute)},
 		{TokenID: 7, SessionID: "earlier-active-user", Title: "Earlier active user", ThreadSource: codexThreadSourceUser, LatestRequestID: "earlier-active-user", LastActivityAt: timePointer(now.Add(-20 * time.Minute)), CreatedAt: now.Add(-20 * time.Minute), UpdatedAt: now.Add(-20 * time.Minute)},
 		{TokenID: 7, SessionID: "inactive-user", Title: "Inactive user", ThreadSource: codexThreadSourceUser, LatestRequestID: "inactive-user", LastActivityAt: timePointer(now.Add(-31 * time.Minute)), CreatedAt: now.Add(-31 * time.Minute), UpdatedAt: now.Add(-31 * time.Minute)},
+		{TokenID: 7, SessionID: "active-subagent", Title: "Active subagent", ThreadSource: codexThreadSourceSubagent, ParentSessionID: "active-user", LatestRequestID: "active-subagent", LastActivityAt: timePointer(now.Add(-10 * time.Minute)), CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now.Add(-10 * time.Minute)},
 		{TokenID: 7, SessionID: "active-ambient", Title: "Active ambient", ThreadSource: codexThreadSourceAmbient, LatestRequestID: "active-ambient", LastActivityAt: timePointer(now.Add(-time.Minute)), CreatedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute)},
 	}
 	if err := store.db.Create(&states).Error; err != nil {
@@ -46,14 +48,17 @@ func TestActiveSessionsOnlyReturnsRecentUserSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 2 || len(page.Items) != 2 {
-		t.Fatalf("active user sessions = %+v", page)
+	if page.Total != 3 || len(page.Items) != 3 {
+		t.Fatalf("default active sessions = %+v", page)
 	}
-	if page.Items[0].SessionID != "active-user" || page.Items[1].SessionID != "earlier-active-user" {
-		t.Fatalf("active user order = %+v", page.Items)
+	if page.Items[0].SessionID != "active-user" || page.Items[1].SessionID != "active-subagent" || page.Items[2].SessionID != "earlier-active-user" {
+		t.Fatalf("default active session order = %+v", page.Items)
 	}
 	if page.Items[0].ThreadSource != codexThreadSourceUser || page.Items[0].LatestModel != "gpt-active" {
 		t.Fatalf("active session identity = %+v", page.Items[0])
+	}
+	if page.Items[0].ChildCount != 1 || page.Items[1].ParentSessionID != "active-user" {
+		t.Fatalf("active session relations = %+v", page.Items)
 	}
 	if page.Items[0].RequestCount != 2 || page.Items[1].RequestCount != 1 {
 		t.Fatalf("active session request counts = %+v", page.Items)
@@ -74,8 +79,37 @@ func TestActiveSessionsOnlyReturnsRecentUserSessions(t *testing.T) {
 	if active.CurrentChannel == nil || active.CurrentChannel.ChannelName != "active-channel" || active.CurrentChannel.AssignmentSource != "latest_successful_attempt" {
 		t.Fatalf("active session channel = %+v", active.CurrentChannel)
 	}
-	if page.Items[1].SuccessCount != 0 || page.Items[1].SuccessRate != 0 || page.Items[1].AttemptCount != 1 {
-		t.Fatalf("failed active session outcomes = %+v", page.Items[1])
+	if page.Items[2].SuccessCount != 0 || page.Items[2].SuccessRate != 0 || page.Items[2].AttemptCount != 1 {
+		t.Fatalf("failed active session outcomes = %+v", page.Items[2])
+	}
+
+	userPage, err := NewManagementService(store).ActiveSessions(context.Background(), ActiveSessionQuery{
+		Sources:     []string{codexThreadSourceUser},
+		ActiveSince: now.Add(-30 * time.Minute),
+		Page:        1,
+		PageSize:    25,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userPage.Total != 2 || len(userPage.Items) != 2 {
+		t.Fatalf("explicit user source sessions = %+v", userPage)
+	}
+	if userPage.Items[0].SessionID != "active-user" || userPage.Items[1].SessionID != "earlier-active-user" {
+		t.Fatalf("explicit user source order = %+v", userPage.Items)
+	}
+
+	ambientPage, err := NewManagementService(store).ActiveSessions(context.Background(), ActiveSessionQuery{
+		Sources:     []string{codexThreadSourceAmbient},
+		ActiveSince: now.Add(-30 * time.Minute),
+		Page:        1,
+		PageSize:    25,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambientPage.Total != 1 || len(ambientPage.Items) != 1 || ambientPage.Items[0].SessionID != "active-ambient" {
+		t.Fatalf("explicit ambient source sessions = %+v", ambientPage)
 	}
 }
 
@@ -132,10 +166,10 @@ func TestActiveSessionQueryUsesActivityIndex(t *testing.T) {
 		SELECT session_state.session_id
 		FROM relay_session_states AS session_state
 		JOIN relay_request_logs AS latest_request ON latest_request.id = session_state.latest_request_id
-		WHERE session_state.thread_source = ? AND session_state.last_activity_at >= ?
+		WHERE session_state.thread_source IN (?, ?) AND session_state.last_activity_at >= ?
 		ORDER BY session_state.last_activity_at DESC, session_state.session_id ASC
 		LIMIT 25
-	`, codexThreadSourceUser, time.Now().UTC().Add(-30*time.Minute)).Scan(&plan).Error; err != nil {
+	`, codexThreadSourceUser, codexThreadSourceSubagent, time.Now().UTC().Add(-30*time.Minute)).Scan(&plan).Error; err != nil {
 		t.Fatal(err)
 	}
 	details := make([]string, 0, len(plan))

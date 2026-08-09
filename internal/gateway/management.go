@@ -261,11 +261,13 @@ type LogAggregateSummary struct {
 
 type RelayRequestView struct {
 	RelayRequestLog
-	RequestParameters map[string]any    `json:"requestParameters"`
-	APIPath           string            `json:"apiPath"`
-	ReasoningEffort   string            `json:"reasoningEffort"`
-	Attempts          []RelayAttemptLog `json:"attempts"`
-	Steps             []RelayStepLog    `json:"steps"`
+	RequestParameters     map[string]any    `json:"requestParameters"`
+	APIPath               string            `json:"apiPath"`
+	ReasoningEffort       string            `json:"reasoningEffort"`
+	Attempts              []RelayAttemptLog `json:"attempts"`
+	Steps                 []RelayStepLog    `json:"steps"`
+	Resources             []ResourceView    `json:"resources"`
+	SensitiveResourceLeak bool              `json:"sensitiveResourceLeak"`
 }
 
 type LogPage struct {
@@ -282,6 +284,10 @@ type ManagementService struct {
 
 func NewManagementService(store *Store) *ManagementService {
 	return &ManagementService{store: store}
+}
+
+func (s *ManagementService) detailedLogCutoff(now time.Time) (time.Time, bool) {
+	return s.store.detailedLogCutoff(now)
 }
 
 func normalizeBaseURL(value string) (string, error) {
@@ -390,7 +396,7 @@ func (s *ManagementService) channelMetrics(ctx context.Context, channelIDs []uin
 		return metricsByChannel, nil
 	}
 
-	cutoff := time.Now().Add(-DetailedLogRetentionDays * 24 * time.Hour)
+	cutoff, hasCutoff := s.detailedLogCutoff(time.Now())
 	type channelAggregate struct {
 		ChannelID             uint64
 		AverageFirstTokenMS   float64
@@ -403,7 +409,7 @@ func (s *ManagementService) channelMetrics(ctx context.Context, channelIDs []uin
 		CachedTokens          int64
 	}
 	var aggregates []channelAggregate
-	if err := s.store.db.WithContext(ctx).Model(&RelayAttemptLog{}).
+	db := s.store.db.WithContext(ctx).Model(&RelayAttemptLog{}).
 		Select("channel_id, COALESCE(AVG(CASE WHEN first_token_ms > 0 THEN first_token_ms END), 0) AS average_first_token_ms, "+
 			"SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_sample_count, "+
 			"COALESCE(AVG(CASE WHEN latency_ms > 0 THEN latency_ms END), 0) AS average_latency_ms, "+
@@ -412,7 +418,11 @@ func (s *ManagementService) channelMetrics(ctx context.Context, channelIDs []uin
 			"SUM(CASE WHEN duration_ms > 0 THEN 1 ELSE 0 END) AS duration_sample_count, "+
 			"COALESCE(SUM(CASE WHEN usage_source = 'upstream' THEN input_tokens ELSE 0 END), 0) AS input_tokens, "+
 			"COALESCE(SUM(CASE WHEN usage_source = 'upstream' THEN cached_tokens ELSE 0 END), 0) AS cached_tokens").
-		Where("channel_id IN ? AND created_at >= ? AND success = ?", channelIDs, cutoff, true).
+		Where("channel_id IN ? AND success = ?", channelIDs, true)
+	if hasCutoff {
+		db = db.Where("created_at >= ?", cutoff)
+	}
+	if err := db.
 		Group("channel_id").Scan(&aggregates).Error; err != nil {
 		return nil, err
 	}
@@ -438,7 +448,7 @@ func (s *ManagementService) channelMetrics(ctx context.Context, channelIDs []uin
 		RecordedAt time.Time `gorm:"column:created_at"`
 	}
 	var rows []latencyRow
-	if err := s.store.db.WithContext(ctx).Raw(`
+	latencyDB := s.store.db.WithContext(ctx).Raw(`
 		SELECT channel_id, latency_ms, created_at
 		FROM (
 			SELECT channel_id, latency_ms, created_at, id,
@@ -448,7 +458,16 @@ func (s *ManagementService) channelMetrics(ctx context.Context, channelIDs []uin
 		) AS recent_latency
 		WHERE row_number <= ?
 		ORDER BY channel_id ASC, created_at ASC, id ASC
-	`, channelIDs, cutoff, true, channelLatencyPointLimit).Scan(&rows).Error; err != nil {
+	`, channelIDs, cutoff, true, channelLatencyPointLimit)
+	if !hasCutoff {
+		latencyDB = s.store.db.WithContext(ctx).Raw(`
+		SELECT channel_id, latency_ms, created_at FROM (
+			SELECT channel_id, latency_ms, created_at, id, ROW_NUMBER() OVER (PARTITION BY channel_id ORDER BY created_at DESC, id DESC) AS row_number
+			FROM relay_attempt_logs WHERE channel_id IN ? AND success = ? AND latency_ms > 0
+		) AS recent_latency WHERE row_number <= ? ORDER BY channel_id ASC, created_at ASC, id ASC
+		`, channelIDs, true, channelLatencyPointLimit)
+	}
+	if err := latencyDB.Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
@@ -1301,8 +1320,8 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int) (*Dashboard
 	var total totals
 	err := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).Where("created_at >= ? AND created_at < ?", startTime, endTime).Select(
 		"COUNT(*) AS requests, COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),0) AS successes, COALESCE(SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END),0) AS canceled_count, " +
-			"COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(normal_input_tokens),0) AS normal_input_tokens, " +
-			"COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(cached_tokens),0) AS cached_tokens, COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN normal_input_tokens ELSE 0 END),0) AS normal_input_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END),0) AS output_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cached_tokens ELSE 0 END),0) AS cached_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cache_write_tokens ELSE 0 END),0) AS cache_write_tokens, " +
 			"COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(upstream_cost),0) AS upstream_cost, " +
 			"COALESCE(SUM(first_token_ms),0) AS first_token_ms, COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END),0) AS first_token_sample_count, " +
 			"COALESCE(SUM(latency_ms),0) AS latency_ms, COALESCE(SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END),0) AS latency_sample_count, COALESCE(SUM(duration_ms),0) AS duration_ms",
@@ -1385,7 +1404,7 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int) (*Dashboard
 	}
 	if err := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).
 		Select(sqliteEastEightCreatedDate+" AS date, COUNT(*) AS requests, COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),0) AS successes, COALESCE(SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END),0) AS canceled_count, "+
-			"COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens, "+
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END),0) AS output_tokens, "+
 			"COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(upstream_cost),0) AS upstream_cost, "+
 			"COALESCE(1.0 * SUM(first_token_ms) / NULLIF(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END),0),0) AS average_first_token_ms, "+
 			"COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END),0) AS first_token_sample_count, "+
@@ -1433,8 +1452,8 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int) (*Dashboard
 		Select("COALESCE(NULLIF(final_attempt.channel_name, ''), c.name, '未归属渠道') AS name, COUNT(*) AS requests, "+
 			"COALESCE(SUM(CASE WHEN request.outcome = 'success' THEN 1 ELSE 0 END),0) AS successes, COALESCE(SUM(CASE WHEN request.outcome = 'canceled' THEN 1 ELSE 0 END),0) AS canceled_count, "+
 			"COALESCE(1.0 * SUM(CASE WHEN request.outcome = 'success' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN request.outcome <> 'canceled' THEN 1 ELSE 0 END),0),0) AS success_rate, "+
-			"COALESCE(SUM(request.input_tokens),0) AS input_tokens, COALESCE(SUM(request.cached_tokens),0) AS cached_tokens, "+
-			"COALESCE(SUM(request.output_tokens),0) AS output_tokens, COALESCE(SUM(request.estimated_cost),0) AS estimated_cost, COALESCE(SUM(request.upstream_cost),0) AS upstream_cost").
+			"COALESCE(SUM(CASE WHEN request.outcome = 'success' THEN request.input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN request.outcome = 'success' THEN request.cached_tokens ELSE 0 END),0) AS cached_tokens, "+
+			"COALESCE(SUM(CASE WHEN request.outcome = 'success' THEN request.output_tokens ELSE 0 END),0) AS output_tokens, COALESCE(SUM(request.estimated_cost),0) AS estimated_cost, COALESCE(SUM(request.upstream_cost),0) AS upstream_cost").
 		Joins("LEFT JOIN relay_attempt_logs AS final_attempt ON final_attempt.id = (SELECT a.id FROM relay_attempt_logs AS a WHERE a.request_id = request.id ORDER BY a.id DESC LIMIT 1)").
 		Joins("LEFT JOIN channels AS c ON c.id = final_attempt.channel_id").
 		Where("request.created_at >= ? AND request.created_at < ?", startTime, endTime).
@@ -1450,8 +1469,8 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int) (*Dashboard
 		Select("requested_model AS name, COUNT(*) AS requests, "+
 			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),0) AS successes, COALESCE(SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END),0) AS canceled_count, "+
 			"COALESCE(1.0 * SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN outcome <> 'canceled' THEN 1 ELSE 0 END),0),0) AS success_rate, "+
-			"COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(cached_tokens),0) AS cached_tokens, "+
-			"COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(upstream_cost),0) AS upstream_cost").
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cached_tokens ELSE 0 END),0) AS cached_tokens, "+
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END),0) AS output_tokens, COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(upstream_cost),0) AS upstream_cost").
 		Where("created_at >= ? AND created_at < ?", startTime, endTime).Group("requested_model").Order("upstream_cost desc").Scan(&summary.Models).Error; err != nil {
 		return nil, err
 	}
@@ -1470,9 +1489,9 @@ func (s *ManagementService) Logs(ctx context.Context, query LogQuery) (*LogPage,
 	if query.PageSize < 1 || query.PageSize > 200 {
 		query.PageSize = 50
 	}
-	detailCutoff := time.Now().UTC().Add(-DetailedLogRetentionDays * 24 * time.Hour)
+	detailCutoff, hasCutoff := s.detailedLogCutoff(time.Now())
 	filteredLogs := func() *gorm.DB {
-		return applyLogFilters(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), query, detailCutoff)
+		return applyLogFilters(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), query, detailCutoff, hasCutoff)
 	}
 	summary, err := aggregateLogSummary(filteredLogs())
 	if err != nil {
@@ -1497,8 +1516,10 @@ func (s *ManagementService) Logs(ctx context.Context, query LogQuery) (*LogPage,
 	return &LogPage{Items: items, Summary: summary, Total: total, Page: query.Page, PageSize: query.PageSize}, nil
 }
 
-func applyLogFilters(db *gorm.DB, query LogQuery, detailCutoff time.Time) *gorm.DB {
-	db = db.Where("created_at >= ?", detailCutoff)
+func applyLogFilters(db *gorm.DB, query LogQuery, detailCutoff time.Time, hasCutoff bool) *gorm.DB {
+	if hasCutoff {
+		db = db.Where("created_at >= ?", detailCutoff)
+	}
 	if strings.TrimSpace(query.Model) != "" {
 		db = db.Where("requested_model LIKE ?", "%"+strings.TrimSpace(query.Model)+"%")
 	}
@@ -1549,10 +1570,10 @@ func aggregateLogSummary(db *gorm.DB) (LogAggregateSummary, error) {
 		"COUNT(*) AS request_count, " +
 			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END), 0) AS success_count, " +
 			"COALESCE(SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END), 0) AS canceled_count, " +
-			"COALESCE(SUM(attempt_count), 0) AS attempt_count, COALESCE(SUM(input_tokens), 0) AS input_tokens, " +
-			"COALESCE(SUM(normal_input_tokens), 0) AS normal_input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens, " +
-			"COALESCE(SUM(cached_tokens), 0) AS cached_tokens, COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens, " +
-			"COALESCE(SUM(sent_tokens), 0) AS sent_tokens, COALESCE(SUM(estimated_cost), 0) AS estimated_cost, " +
+			"COALESCE(SUM(attempt_count), 0) AS attempt_count, COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END), 0) AS input_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN normal_input_tokens ELSE 0 END), 0) AS normal_input_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END), 0) AS output_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN cached_tokens ELSE 0 END), 0) AS cached_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cache_write_tokens ELSE 0 END), 0) AS cache_write_tokens, " +
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN sent_tokens ELSE 0 END), 0) AS sent_tokens, COALESCE(SUM(estimated_cost), 0) AS estimated_cost, " +
 			"COALESCE(SUM(upstream_cost), 0) AS upstream_cost, COALESCE(SUM(first_token_ms), 0) AS total_first_token_ms, " +
 			"COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END), 0) AS first_token_sample_count, " +
 			"COALESCE(SUM(latency_ms), 0) AS total_latency_ms, COALESCE(SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END), 0) AS latency_sample_count, " +
@@ -1594,9 +1615,13 @@ func (s *ManagementService) LogDetail(ctx context.Context, requestID string) (*R
 	if requestID == "" {
 		return nil, errors.New("request id is required")
 	}
-	cutoff := time.Now().UTC().Add(-DetailedLogRetentionDays * 24 * time.Hour)
+	cutoff, hasCutoff := s.detailedLogCutoff(time.Now())
 	var log RelayRequestLog
-	if err := s.store.db.WithContext(ctx).Where("id = ? AND created_at >= ?", requestID, cutoff).First(&log).Error; err != nil {
+	query := s.store.db.WithContext(ctx).Where("id = ?", requestID)
+	if hasCutoff {
+		query = query.Where("created_at >= ?", cutoff)
+	}
+	if err := query.First(&log).Error; err != nil {
 		return nil, err
 	}
 	view, err := s.relayRequestView(ctx, log, true, true)

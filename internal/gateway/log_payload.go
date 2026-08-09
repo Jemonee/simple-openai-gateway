@@ -39,9 +39,10 @@ func compactSessionPayload(db *gorm.DB, tokenID uint64, sessionID string, reques
 	if tokenID == 0 || sessionID == "" {
 		return body
 	}
+	parentSessionID := codexParentSessionIDFromBody(body, sessionID, threadSource)
 	manifest, ok := buildPayloadManifest(body)
 	if !ok {
-		upsertSessionTitleWithoutManifest(db, tokenID, sessionID, requestID, title, threadSource, now)
+		upsertSessionTitleWithoutManifest(db, tokenID, sessionID, requestID, title, threadSource, parentSessionID, now)
 		return body
 	}
 	requestManifestJSON, _ := json.Marshal(manifest)
@@ -56,6 +57,7 @@ func compactSessionPayload(db *gorm.DB, tokenID uint64, sessionID string, reques
 			SessionID:           sessionID,
 			Title:               title,
 			ThreadSource:        threadSource,
+			ParentSessionID:     parentSessionID,
 			LatestRequestID:     requestID,
 			LastActivityAt:      &now,
 			RequestManifestJSON: string(requestManifestJSON),
@@ -81,11 +83,14 @@ func compactSessionPayload(db *gorm.DB, tokenID uint64, sessionID string, reques
 		"payload_manifest_json": string(encodedManifest),
 		"updated_at":            now,
 	}
-	if !state.TitleCustomized && strings.TrimSpace(state.Title) == "" && title != "" {
+	if !state.TitleCustomized && title != "" && (strings.TrimSpace(state.Title) == "" || isReplaceableCodexSessionTitle(state.Title)) {
 		updates["title"] = title
 	}
 	if preferred := preferredCodexThreadSource(state.ThreadSource, threadSource); preferred != state.ThreadSource {
 		updates["thread_source"] = preferred
+	}
+	if state.ParentSessionID == "" && parentSessionID != "" {
+		updates["parent_session_id"] = parentSessionID
 	}
 	_ = db.Model(&RelaySessionState{}).
 		Where("token_id = ? AND session_id = ?", tokenID, sessionID).
@@ -93,12 +98,12 @@ func compactSessionPayload(db *gorm.DB, tokenID uint64, sessionID string, reques
 	return compacted
 }
 
-func upsertSessionTitleWithoutManifest(db *gorm.DB, tokenID uint64, sessionID string, requestID string, title string, threadSource string, now time.Time) {
+func upsertSessionTitleWithoutManifest(db *gorm.DB, tokenID uint64, sessionID string, requestID string, title string, threadSource string, parentSessionID string, now time.Time) {
 	var state RelaySessionState
 	err := db.Where("token_id = ? AND session_id = ?", tokenID, sessionID).First(&state).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		_ = db.Create(&RelaySessionState{
-			TokenID: tokenID, SessionID: sessionID, Title: title, ThreadSource: threadSource, LatestRequestID: requestID,
+			TokenID: tokenID, SessionID: sessionID, Title: title, ThreadSource: threadSource, ParentSessionID: parentSessionID, LatestRequestID: requestID,
 			LastActivityAt: &now, CreatedAt: now, UpdatedAt: now,
 		}).Error
 		return
@@ -107,11 +112,14 @@ func upsertSessionTitleWithoutManifest(db *gorm.DB, tokenID uint64, sessionID st
 		return
 	}
 	updates := map[string]any{"latest_request_id": requestID, "last_activity_at": now, "updated_at": now}
-	if !state.TitleCustomized && strings.TrimSpace(state.Title) == "" && title != "" {
+	if !state.TitleCustomized && title != "" && (strings.TrimSpace(state.Title) == "" || isReplaceableCodexSessionTitle(state.Title)) {
 		updates["title"] = title
 	}
 	if preferred := preferredCodexThreadSource(state.ThreadSource, threadSource); preferred != state.ThreadSource {
 		updates["thread_source"] = preferred
+	}
+	if state.ParentSessionID == "" && parentSessionID != "" {
+		updates["parent_session_id"] = parentSessionID
 	}
 	_ = db.Model(&RelaySessionState{}).
 		Where("token_id = ? AND session_id = ?", tokenID, sessionID).

@@ -46,6 +46,7 @@ func (a *GatewayManagementApi) Register(router *gin.RouterGroup) {
 	admin.GET("/logs", a.logs)
 	admin.GET("/logs/storage", a.logStorage)
 	admin.POST("/logs/clear-payloads", a.clearLogPayloads)
+	admin.POST("/logs/delete", a.deleteLogs)
 	admin.GET("/logs/:requestId", a.logDetail)
 	admin.POST("/token-counts", a.tokenCounts)
 	admin.GET("/circuit-records", a.circuitRecords)
@@ -54,6 +55,9 @@ func (a *GatewayManagementApi) Register(router *gin.RouterGroup) {
 	admin.GET("/active-sessions", a.activeSessions)
 	admin.GET("/sessions/detail", a.sessionDetail)
 	admin.PUT("/sessions/title", a.renameSession)
+	admin.GET("/resources", a.resources)
+	admin.GET("/resources/:id", a.resourceDetail)
+	admin.PUT("/resources/:id/sensitive", a.setResourceSensitive)
 	admin.GET("/codex-config", a.codexConfiguration)
 	admin.PUT("/codex-config", a.saveCodexConfiguration)
 
@@ -469,7 +473,24 @@ func (a *GatewayManagementApi) logStorage(c *gin.Context) {
 }
 
 func (a *GatewayManagementApi) clearLogPayloads(c *gin.Context) {
-	result, err := a.management.ClearHistoricalLogPayloads(c.Request.Context())
+	var input gateway.LogCleanupInput
+	if !bindManagementJSON(c, &input) {
+		return
+	}
+	result, err := a.management.ClearHistoricalLogPayloadsBefore(c.Request.Context(), input.Days)
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, common.S(result))
+}
+
+func (a *GatewayManagementApi) deleteLogs(c *gin.Context) {
+	var input gateway.LogCleanupInput
+	if !bindManagementJSON(c, &input) {
+		return
+	}
+	result, err := a.management.DeleteHistoricalLogsBefore(c.Request.Context(), input.Days)
 	if err != nil {
 		managementError(c, err)
 		return
@@ -514,6 +535,7 @@ func (a *GatewayManagementApi) sessions(c *gin.Context) {
 func (a *GatewayManagementApi) activeSessions(c *gin.Context) {
 	query := gateway.ActiveSessionQuery{
 		Session:     c.Query("session"),
+		Sources:     c.QueryArray("source"),
 		ActiveSince: time.Now().UTC().Add(-30 * time.Minute),
 	}
 	query.Page, _ = strconv.Atoi(c.Query("page"))
@@ -549,6 +571,53 @@ func (a *GatewayManagementApi) renameSession(c *gin.Context) {
 		return
 	}
 	if err := a.management.RenameSession(c.Request.Context(), input); err != nil {
+		managementError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, common.S[any](nil))
+}
+
+func (a *GatewayManagementApi) resources(c *gin.Context) {
+	query := gateway.ResourceQuery{Search: c.Query("search"), Kind: c.Query("kind"), Page: 1, PageSize: 50}
+	query.Page, _ = strconv.Atoi(c.Query("page"))
+	query.PageSize, _ = strconv.Atoi(c.Query("pageSize"))
+	if value := c.Query("sensitive"); value != "" {
+		parsed := value == "true"
+		query.Sensitive = &parsed
+	}
+	item, err := a.management.Resources(c.Request.Context(), query)
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, common.S(item))
+}
+
+func (a *GatewayManagementApi) resourceDetail(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	item, err := a.management.ResourceDetail(c.Request.Context(), id)
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, common.S(item))
+}
+
+func (a *GatewayManagementApi) setResourceSensitive(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var input struct {
+		Sensitive bool `json:"sensitive"`
+	}
+	if !bindManagementJSON(c, &input) {
+		return
+	}
+	if err := a.management.SetResourceSensitive(c.Request.Context(), id, input.Sensitive); err != nil {
 		managementError(c, err)
 		return
 	}

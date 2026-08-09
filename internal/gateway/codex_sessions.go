@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"strings"
 	"time"
@@ -17,13 +18,20 @@ const (
 	codexGuardianSessionSource = "codex_guardian"
 	codexGuardianSessionPrefix = "guardian:"
 	codexThreadSourceUser      = "user"
+	codexThreadSourceSubagent  = "subagent"
 	codexThreadSourceAmbient   = "ambient_suggestions"
 	codexThreadSourceUnknown   = "unavailable"
 	codexTitlePromptMarker     = "User prompt:"
 	codexAttachedPromptMarker  = "## My request for Codex:"
+	codexAttachedRequestMarker = "## My request:"
+	codexFilesMentionedMarker  = "# Files mentioned by the user:"
 	codexTitleMatchWindow      = 5 * time.Minute
 	codexTitleStartTolerance   = 30 * time.Second
 )
+
+type codexDelegation struct {
+	SourceThreadID string `xml:"source_thread_id"`
+}
 
 var codexAuxiliarySessionSources = []string{codexTitleSessionSource, codexGuardianSessionSource}
 
@@ -136,6 +144,57 @@ func codexThreadSourceFromBody(body []byte) string {
 	return codexThreadSourceFromPayload(payload)
 }
 
+func codexParentSessionIDFromBody(body []byte, currentSessionID string, threadSource string) string {
+	if normalizeCodexThreadSource(threadSource) != codexThreadSourceSubagent {
+		return ""
+	}
+	payload, ok := decodeJSONObject(body)
+	if !ok {
+		return ""
+	}
+	input, _ := payload["input"].([]any)
+	for _, item := range input {
+		message, _ := item.(map[string]any)
+		if message == nil {
+			continue
+		}
+		content, _ := message["content"].([]any)
+		for _, part := range content {
+			contentPart, _ := part.(map[string]any)
+			if parentID := codexParentSessionIDFromText(stringValue(contentPart["text"]), currentSessionID); parentID != "" {
+				return parentID
+			}
+		}
+	}
+	return ""
+}
+
+func codexParentSessionIDFromText(text string, currentSessionID string) string {
+	const startTag = "<codex_delegation>"
+	const endTag = "</codex_delegation>"
+	for searchFrom := 0; searchFrom < len(text); {
+		start := strings.Index(text[searchFrom:], startTag)
+		if start < 0 {
+			return ""
+		}
+		start += searchFrom
+		end := strings.Index(text[start+len(startTag):], endTag)
+		if end < 0 {
+			return ""
+		}
+		end += start + len(startTag) + len(endTag)
+		var delegation codexDelegation
+		if xml.Unmarshal([]byte(text[start:end]), &delegation) == nil {
+			parentID := strings.TrimSpace(delegation.SourceThreadID)
+			if parentID != "" && len([]rune(parentID)) <= 512 && parentID != strings.TrimSpace(currentSessionID) {
+				return parentID
+			}
+		}
+		searchFrom = end
+	}
+	return ""
+}
+
 func normalizeCodexThreadSource(source string) string {
 	return truncateRunes(strings.ToLower(strings.TrimSpace(source)), 48)
 }
@@ -233,13 +292,137 @@ func titleSchema(format map[string]any) bool {
 }
 
 func normalizeCodexPrompt(value string) string {
-	if markerIndex := strings.LastIndex(value, codexAttachedPromptMarker); markerIndex >= 0 {
-		value = value[markerIndex+len(codexAttachedPromptMarker):]
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
 	}
+
+	// User input can contain the transport envelope and the visible request in
+	// the same text part. Consume those wrappers repeatedly because Codex may
+	// prepend more than one skill/link before the actual request.
+	for {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return ""
+		}
+		if strings.HasPrefix(strings.ToLower(value), "<skill>") {
+			if end := strings.Index(strings.ToLower(value), "</skill>"); end >= 0 {
+				value = value[end+len("</skill>"):]
+				continue
+			}
+			return ""
+		}
+		if marker, ok := consumeCodexRequestMarker(value); ok {
+			value = value[marker:]
+			continue
+		}
+		if consumed, ok := consumeCodexSkillPrefix(value); ok {
+			value = value[consumed:]
+			continue
+		}
+		break
+	}
+
 	if imageIndex := strings.Index(value, "<image "); imageIndex >= 0 {
 		value = value[:imageIndex]
 	}
 	return strings.Join(strings.Fields(value), " ")
+}
+
+func consumeCodexRequestMarker(value string) (int, bool) {
+	trimmed := strings.TrimLeft(value, " \t\r\n")
+	for _, marker := range []string{codexAttachedPromptMarker, codexAttachedRequestMarker} {
+		if strings.HasPrefix(trimmed, marker) {
+			return len(value) - len(trimmed) + len(marker), true
+		}
+	}
+	if strings.HasPrefix(trimmed, codexFilesMentionedMarker) {
+		for _, marker := range []string{codexAttachedPromptMarker, codexAttachedRequestMarker} {
+			if index := strings.Index(trimmed, marker); index >= 0 {
+				return len(value) - len(trimmed) + index + len(marker), true
+			}
+		}
+	}
+	return 0, false
+}
+
+func consumeCodexSkillPrefix(value string) (int, bool) {
+	trimmed := strings.TrimLeft(value, " \t\r\n")
+	leading := len(value) - len(trimmed)
+	if strings.HasPrefix(trimmed, "[$") {
+		if closeLabel := strings.Index(trimmed, "]("); closeLabel > 2 {
+			if end := strings.Index(trimmed[closeLabel+2:], ")"); end >= 0 && isCodexSkillInvocation(trimmed[1:closeLabel]) {
+				return leading + closeLabel + 2 + end + 1, true
+			}
+		}
+		if end := strings.Index(trimmed, "]"); end > 2 && isCodexSkillInvocation(trimmed[1:end]) {
+			return leading + end + 1, true
+		}
+	}
+	if len(trimmed) > 1 && trimmed[0] == '$' {
+		end := strings.IndexAny(trimmed, " \t\r\n")
+		if end < 0 {
+			end = len(trimmed)
+		}
+		candidate := strings.Trim(trimmed[:end], "[](){}:;,.")
+		if isCodexSkillInvocation(candidate) {
+			return leading + end, true
+		}
+	}
+	return 0, false
+}
+
+// Codex serializes a skill invocation either as `$skill-name` or as a
+// Markdown link such as `[$skill-name](/path/SKILL.md)`. Both are transport
+// metadata and must not become the session title prefix.
+func isCodexSkillInvocationToken(value string) bool {
+	if isCodexSkillInvocation(value) {
+		return true
+	}
+	if !strings.HasPrefix(value, "[$") || !strings.HasSuffix(value, ")") {
+		return false
+	}
+	closeLabel := strings.Index(value, "](")
+	if closeLabel <= 2 {
+		return false
+	}
+	return isCodexSkillInvocation(value[1:closeLabel])
+}
+
+func isCodexInjectedSkillText(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "<skill>") {
+		return false
+	}
+	end := strings.Index(lower, "</skill>")
+	return end < 0 || strings.TrimSpace(trimmed[end+len("</skill>"):]) == ""
+}
+
+func isCodexSkillInvocation(value string) bool {
+	if len(value) < 2 || value[0] != '$' {
+		return false
+	}
+	hasLetter := false
+	for _, character := range value[1:] {
+		switch {
+		case character >= 'a' && character <= 'z', character >= 'A' && character <= 'Z':
+			hasLetter = true
+		case character >= '0' && character <= '9', character == '-', character == '_':
+		default:
+			return false
+		}
+	}
+	return hasLetter
+}
+
+func isReplaceableCodexSessionTitle(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(normalized, "# files") ||
+		strings.HasPrefix(normalized, "files ment") ||
+		strings.HasPrefix(normalized, "<skill>") ||
+		strings.HasPrefix(normalized, "[$") ||
+		strings.HasPrefix(normalized, "<codex_del")
 }
 
 func codexLogPayloadMetadata(requestBody []byte, responseBody []byte) (string, bool, string) {
@@ -543,11 +726,14 @@ func (s *Store) backfillCodexAuxiliarySessions() error {
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
-	cutoff := time.Now().UTC().Add(-DetailedLogRetentionDays * 24 * time.Hour)
+	cutoff, hasCutoff := s.detailedLogCutoff(time.Now())
 	return s.db.Transaction(func(db *gorm.DB) error {
 		var guardians []RelayRequestLog
-		if err := db.Select("id, codex_session_id").
-			Where("created_at >= ? AND codex_session_id LIKE ?", cutoff, codexGuardianSessionPrefix+"%").
+		guardianDB := db.Select("id, codex_session_id").Where("codex_session_id LIKE ?", codexGuardianSessionPrefix+"%")
+		if hasCutoff {
+			guardianDB = guardianDB.Where("created_at >= ?", cutoff)
+		}
+		if err := guardianDB.
 			Find(&guardians).Error; err != nil {
 			return err
 		}
@@ -563,8 +749,12 @@ func (s *Store) backfillCodexAuxiliarySessions() error {
 		}
 
 		var titleRequests []RelayRequestLog
-		if err := db.Select("id, token_id, codex_session_id, codex_session_source, session_name, request_body, response_body, latency_ms, duration_ms, created_at").
-			Where("created_at >= ? AND codex_session_source = ? AND outcome = ?", cutoff, "prompt_cache_key", RelayOutcomeSuccess).
+		titleDB := db.Select("id, token_id, codex_session_id, codex_session_source, session_name, request_body, response_body, latency_ms, duration_ms, created_at").
+			Where("codex_session_source = ? AND outcome = ?", "prompt_cache_key", RelayOutcomeSuccess)
+		if hasCutoff {
+			titleDB = titleDB.Where("created_at >= ?", cutoff)
+		}
+		if err := titleDB.
 			Where("request_parameters_json LIKE ? OR request_parameters_json LIKE ?", `%"text_format":"json_schema"%`, `%"response_format":{"type":"json_schema"%`).
 			Order("created_at ASC, id ASC").Find(&titleRequests).Error; err != nil {
 			return err
@@ -668,6 +858,51 @@ func (s *Store) backfillCodexThreadSources() error {
 			}
 		}
 		return db.Create(&GatewayMigration{Name: migrationName, AppliedAt: now}).Error
+	})
+}
+
+func (s *Store) backfillCodexSessionParents() error {
+	const migrationName = "codex_session_parent_v1"
+	return s.db.Transaction(func(db *gorm.DB) error {
+		var migration GatewayMigration
+		err := db.First(&migration, "name = ?", migrationName).Error
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		var states []RelaySessionState
+		if err := db.Select("token_id, session_id, thread_source").
+			Where("thread_source = ? AND parent_session_id = ''", codexThreadSourceSubagent).
+			Find(&states).Error; err != nil {
+			return err
+		}
+		for _, state := range states {
+			var log RelayRequestLog
+			err := db.Select("request_body").
+				Where("token_id = ? AND codex_session_id = ? AND request_body <> ''", state.TokenID, state.SessionID).
+				Order("created_at ASC, id ASC").First(&log).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			parentSessionID := codexParentSessionIDFromBody(
+				[]byte(decompressStoredPayload(log.RequestBody)), state.SessionID, state.ThreadSource,
+			)
+			if parentSessionID == "" {
+				continue
+			}
+			if err := db.Model(&RelaySessionState{}).
+				Where("token_id = ? AND session_id = ? AND parent_session_id = ''", state.TokenID, state.SessionID).
+				Update("parent_session_id", parentSessionID).Error; err != nil {
+				return err
+			}
+		}
+		return db.Create(&GatewayMigration{Name: migrationName, AppliedAt: time.Now().UTC()}).Error
 	})
 }
 

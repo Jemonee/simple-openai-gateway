@@ -6,6 +6,7 @@ import RequestPayloadDialog from '@/components/RequestPayloadDialog.vue'
 import RouteDecisionPanel from '@/components/RouteDecisionPanel.vue'
 import SessionAttemptCard from '@/components/SessionAttemptCard.vue'
 import RelayStepTimeline from '@/components/RelayStepTimeline.vue'
+import ResourceList from '@/components/ResourceList.vue'
 import type { CodexSessionDetail, CodexSessionSummary, RelayAttemptLog, RelayRequestLog } from '@/types/gateway'
 import { request } from '@/utils/api'
 import { formatCompactNumber, formatDuration } from '@/utils/formatters'
@@ -463,7 +464,7 @@ watch(
   <el-drawer v-model="open" class="session-detail-drawer" size="min(1180px, 100vw)" destroy-on-close @closed="handleDrawerClosed">
     <template #header>
       <div class="drawer-title">
-        <div class="drawer-title-main"><strong>{{ drawerTitle }}</strong><el-tooltip content="修改会话名称" placement="bottom"><el-button text :icon="EditPen" aria-label="修改会话名称" @click="renameCurrentSession" /></el-tooltip></div>
+        <div class="drawer-title-main"><strong>{{ drawerTitle }}</strong><el-tag v-if="detail?.summary.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag><el-tooltip content="修改会话名称" placement="bottom"><el-button text :icon="EditPen" aria-label="修改会话名称" @click="renameCurrentSession" /></el-tooltip></div>
         <el-tooltip content="刷新会话数据" placement="bottom"><el-button class="drawer-refresh-button" text :icon="Refresh" :loading="loading || timelineLoading || loadingMore" aria-label="刷新会话数据" @click="refreshDetail" /></el-tooltip>
       </div>
     </template>
@@ -541,6 +542,10 @@ watch(
             </dl>
           </section>
         </div>
+        <section v-if="detail.resources?.length" class="session-resources" aria-label="会话资源汇总">
+          <header><h3>会话资源</h3><span>{{ detail.resources.length }} 个去重资源</span></header>
+          <ResourceList :resources="detail.resources" compact />
+        </section>
       </section>
 
       <section class="current-channel-section">
@@ -645,6 +650,8 @@ watch(
                   <time :datetime="entry.request.createdAt">{{ formatDate(entry.request.createdAt) }}</time>
                   <span>{{ entry.request.endpoint === 'chat' ? 'Chat Completions' : 'Responses' }}</span>
                   <el-tag v-if="entry.request.isCompaction" class="compaction-request-tag" type="warning" effect="plain" size="small">压缩请求</el-tag>
+                  <el-tag v-if="entry.request.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag>
+                  <ResourceList v-if="entry.request.resources?.length" :resources="entry.request.resources" compact />
                   <code>{{ entry.request.apiPath }}</code>
                   <code>{{ entry.request.requestedModel }}</code>
                   <span>思考等级 {{ entry.request.reasoningEffort || '默认' }}</span>
@@ -768,6 +775,10 @@ watch(
 .session-secondary-metrics dl > div { display: grid; min-width: 0; justify-items: center; gap: 3px; }
 .session-secondary-metrics dt { color: var(--hongfen-text-muted); font-size: 9px; }
 .session-secondary-metrics dd { margin: 0; overflow: hidden; color: var(--hongfen-text); font-family: var(--hongfen-font-mono); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.session-resources { margin-top: 12px; padding: 10px 12px 12px; border-top: 1px solid var(--hongfen-border); }
+.session-resources > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.session-resources h3 { margin: 0; color: var(--hongfen-text); font-size: 13px; }
+.session-resources > header span { color: var(--hongfen-text-muted); font-size: 11px; }
 .current-channel-grid span { color: var(--hongfen-text-muted); font-size: 11px; }
 .current-channel-section { max-height: min(42dvh, 440px); padding: 16px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--hongfen-border); border-radius: var(--hongfen-radius-panel); background: var(--hongfen-surface); scrollbar-gutter: stable; }
 .current-channel-section > header { display: flex; align-items: center; justify-content: space-between; gap: 18px; }

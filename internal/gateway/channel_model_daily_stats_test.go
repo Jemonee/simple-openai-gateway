@@ -87,10 +87,10 @@ func TestBackfillChannelModelDailyStatsStoresCompactAggregates(t *testing.T) {
 	if stat.RequestCount != 2 || stat.AttemptCount != 3 || stat.SuccessCount != 1 || stat.FailedCount != 1 || stat.CanceledCount != 1 {
 		t.Fatalf("channel-model daily outcomes = %+v", stat)
 	}
-	if stat.InputTokens != 13 || stat.NormalInputTokens != 10 || stat.OutputTokens != 4 || stat.CachedTokens != 2 || stat.CacheWriteTokens != 1 || stat.SentTokens != 17 {
+	if stat.InputTokens != 10 || stat.NormalInputTokens != 7 || stat.OutputTokens != 4 || stat.CachedTokens != 2 || stat.CacheWriteTokens != 1 || stat.SentTokens != 12 {
 		t.Fatalf("channel-model daily usage = %+v", stat)
 	}
-	if stat.EstimatedCost != 35 || stat.UpstreamCost != 47 || stat.UpstreamCostCount != 1 || stat.FallbackCostCount != 1 || stat.FailedZeroCostCount != 1 {
+	if stat.EstimatedCost != 30 || stat.UpstreamCost != 42 || stat.UpstreamCostCount != 1 || stat.FallbackCostCount != 0 || stat.FailedZeroCostCount != 2 {
 		t.Fatalf("channel-model daily costs = %+v", stat)
 	}
 	if stat.FirstTokenMS != 100 || stat.FirstTokenSamples != 1 || stat.LatencyMS != 60 || stat.LatencySamples != 2 || stat.DurationMS != 380 || stat.DurationSamples != 2 {

@@ -67,7 +67,7 @@ func (s *Store) backfillChannelModelDailyCosts() error {
 		var stats []ChannelModelDailyStat
 		if err := db.Model(&RelayAttemptLog{}).
 			Select(sqliteEastEightCreatedDate + " AS date, channel_id, channel_model_id, " +
-				"COALESCE(SUM(CASE WHEN upstream_cost > 0 THEN upstream_cost ELSE 0 END), 0) AS upstream_cost").
+				"COALESCE(SUM(CASE WHEN outcome <> 'canceled' AND upstream_cost > 0 THEN upstream_cost ELSE 0 END), 0) AS upstream_cost").
 			Where("channel_id > 0 AND channel_model_id > 0").
 			Group(sqliteEastEightCreatedDate + ", channel_id, channel_model_id").
 			Scan(&stats).Error; err != nil {
@@ -118,18 +118,18 @@ func channelModelDailyAggregateSelect() string {
 		"SUM(CASE WHEN outcome = 'success' OR success = 1 THEN 1 ELSE 0 END) AS success_count, " +
 		"SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END) AS canceled_count, " +
 		"SUM(CASE WHEN outcome NOT IN ('success', 'canceled') AND success = 0 THEN 1 ELSE 0 END) AS failed_count, " +
-		"COALESCE(SUM(CASE WHEN input_tokens > 0 THEN input_tokens ELSE 0 END), 0) AS input_tokens, " +
-		"COALESCE(SUM(CASE WHEN normal_input_tokens > 0 THEN normal_input_tokens ELSE 0 END), 0) AS normal_input_tokens, " +
-		"COALESCE(SUM(CASE WHEN output_tokens > 0 THEN output_tokens ELSE 0 END), 0) AS output_tokens, " +
-		"COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN cached_tokens ELSE 0 END), 0) AS cached_tokens, " +
-		"COALESCE(SUM(CASE WHEN cache_write_tokens > 0 THEN cache_write_tokens ELSE 0 END), 0) AS cache_write_tokens, " +
-		"COALESCE(SUM(CASE WHEN sent_tokens > 0 THEN sent_tokens ELSE 0 END), 0) AS sent_tokens, " +
-		"COALESCE(SUM(CASE WHEN estimated_cost > 0 THEN estimated_cost ELSE 0 END), 0) AS estimated_cost, " +
-		"COALESCE(SUM(CASE WHEN upstream_cost > 0 THEN upstream_cost ELSE 0 END), 0) AS upstream_cost, " +
-		"SUM(CASE WHEN cost_source = 'upstream' THEN 1 ELSE 0 END) AS upstream_cost_count, " +
-		"SUM(CASE WHEN cost_source = 'estimated_fallback' THEN 1 ELSE 0 END) AS fallback_cost_count, " +
-		"SUM(CASE WHEN cost_source = 'mixed' THEN 1 ELSE 0 END) AS mixed_cost_count, " +
-		"SUM(CASE WHEN cost_source = 'failed_zero' THEN 1 ELSE 0 END) AS failed_zero_cost_count, " +
+		"COALESCE(SUM(CASE WHEN (outcome = 'success' OR success = 1) AND input_tokens > 0 THEN input_tokens ELSE 0 END), 0) AS input_tokens, " +
+		"COALESCE(SUM(CASE WHEN (outcome = 'success' OR success = 1) AND normal_input_tokens > 0 THEN normal_input_tokens ELSE 0 END), 0) AS normal_input_tokens, " +
+		"COALESCE(SUM(CASE WHEN (outcome = 'success' OR success = 1) AND output_tokens > 0 THEN output_tokens ELSE 0 END), 0) AS output_tokens, " +
+		"COALESCE(SUM(CASE WHEN (outcome = 'success' OR success = 1) AND cached_tokens > 0 THEN cached_tokens ELSE 0 END), 0) AS cached_tokens, " +
+		"COALESCE(SUM(CASE WHEN (outcome = 'success' OR success = 1) AND cache_write_tokens > 0 THEN cache_write_tokens ELSE 0 END), 0) AS cache_write_tokens, " +
+		"COALESCE(SUM(CASE WHEN (outcome = 'success' OR success = 1) AND sent_tokens > 0 THEN sent_tokens ELSE 0 END), 0) AS sent_tokens, " +
+		"COALESCE(SUM(CASE WHEN outcome <> 'canceled' AND estimated_cost > 0 THEN estimated_cost ELSE 0 END), 0) AS estimated_cost, " +
+		"COALESCE(SUM(CASE WHEN outcome <> 'canceled' AND upstream_cost > 0 THEN upstream_cost ELSE 0 END), 0) AS upstream_cost, " +
+		"SUM(CASE WHEN outcome <> 'canceled' AND cost_source = 'upstream' THEN 1 ELSE 0 END) AS upstream_cost_count, " +
+		"SUM(CASE WHEN outcome <> 'canceled' AND cost_source = 'estimated_fallback' THEN 1 ELSE 0 END) AS fallback_cost_count, " +
+		"SUM(CASE WHEN outcome <> 'canceled' AND cost_source = 'mixed' THEN 1 ELSE 0 END) AS mixed_cost_count, " +
+		"SUM(CASE WHEN outcome = 'canceled' OR cost_source = 'failed_zero' THEN 1 ELSE 0 END) AS failed_zero_cost_count, " +
 		"COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0) AS first_token_ms, " +
 		"SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_samples, " +
 		"COALESCE(SUM(CASE WHEN latency_ms > 0 THEN latency_ms ELSE 0 END), 0) AS latency_ms, " +
@@ -196,22 +196,36 @@ func addAttemptToChannelModelDailyStat(stat *ChannelModelDailyStat, attempt Rela
 	} else {
 		stat.FailedCount++
 	}
-	stat.InputTokens += max(attempt.InputTokens, int64(0))
-	stat.NormalInputTokens += max(attempt.NormalInputTokens, int64(0))
-	stat.OutputTokens += max(attempt.OutputTokens, int64(0))
-	stat.CachedTokens += max(attempt.CachedTokens, int64(0))
-	stat.CacheWriteTokens += max(attempt.CacheWriteTokens, int64(0))
-	stat.SentTokens += max(attempt.SentTokens, int64(0))
-	stat.EstimatedCost += max(attempt.EstimatedCost, int64(0))
-	stat.UpstreamCost += max(attempt.UpstreamCost, int64(0))
+	if attempt.Outcome == RelayOutcomeSuccess || attempt.Success {
+		stat.InputTokens += max(attempt.InputTokens, int64(0))
+		stat.NormalInputTokens += max(attempt.NormalInputTokens, int64(0))
+		stat.OutputTokens += max(attempt.OutputTokens, int64(0))
+		stat.CachedTokens += max(attempt.CachedTokens, int64(0))
+		stat.CacheWriteTokens += max(attempt.CacheWriteTokens, int64(0))
+		stat.SentTokens += max(attempt.SentTokens, int64(0))
+	}
+	billable := attempt.Outcome != RelayOutcomeCanceled
+	if billable {
+		stat.EstimatedCost += max(attempt.EstimatedCost, int64(0))
+		stat.UpstreamCost += max(attempt.UpstreamCost, int64(0))
+	}
 	switch attempt.CostSource {
 	case CostSourceUpstream:
-		stat.UpstreamCostCount++
+		if billable {
+			stat.UpstreamCostCount++
+		}
 	case CostSourceFallback:
-		stat.FallbackCostCount++
+		if billable {
+			stat.FallbackCostCount++
+		}
 	case CostSourceMixed:
-		stat.MixedCostCount++
+		if billable {
+			stat.MixedCostCount++
+		}
 	case CostSourceFailedZero:
+		stat.FailedZeroCostCount++
+	}
+	if !billable && attempt.CostSource != CostSourceFailedZero {
 		stat.FailedZeroCostCount++
 	}
 	if attempt.FirstTokenMS > 0 {

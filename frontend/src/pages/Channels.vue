@@ -795,7 +795,7 @@ onUnmounted(() => {
         <el-table-column label="累计消费" width="132" align="right">
           <template #default="scope"><strong class="cumulative-cost">{{ formatConsumption(scope.row.cumulativeUpstreamCostMicros) }}</strong></template>
         </el-table-column>
-        <el-table-column label="今日使用占比" width="190" align="right">
+        <el-table-column label="今日使用占比" width="232" align="right">
           <template #default="scope">
             <div class="metric-copy success-metric">
               <strong class="usage-share-value">{{ formatPercent(channelUsageShare(scope.row)) }}</strong>
@@ -1061,6 +1061,19 @@ onUnmounted(() => {
 :deep(.el-table__body tr.channel-row--enabled:hover > td.el-table__cell.el-table-fixed-column--left),
 :deep(.el-table__body tr.channel-row--enabled > td.el-table__cell.el-table-fixed-column--right),
 :deep(.el-table__body tr.channel-row--enabled:hover > td.el-table__cell.el-table-fixed-column--right) { background: color-mix(in srgb, var(--hongfen-surface) 94%, transparent); }
+:deep(.el-table__body tr.channel-row--enabled.channel-row--has-usage > td.el-table__cell.el-table-fixed-column--left),
+:deep(.el-table__body tr.channel-row--enabled.channel-row--has-usage:hover > td.el-table__cell.el-table-fixed-column--left) {
+  background-color: var(--hongfen-surface);
+  background-image: linear-gradient(90deg,
+    color-mix(in srgb, var(--channel-heat-tone) 24%, var(--hongfen-surface)) 0%,
+    color-mix(in srgb, var(--channel-heat-tone) 17%, var(--hongfen-surface)) var(--channel-heat-mid),
+    color-mix(in srgb, var(--channel-heat-tone) 8%, var(--hongfen-surface)) var(--channel-heat-stop),
+    var(--hongfen-surface) var(--channel-heat-edge),
+    var(--hongfen-surface) 100%);
+  background-repeat: no-repeat;
+  background-position: left top;
+  background-size: 100cqw 100%;
+}
 :deep(.el-table__body tr.channel-row--disabled > td.el-table__cell.el-table-fixed-column--left),
 :deep(.el-table__body tr.channel-row--disabled:hover > td.el-table__cell.el-table-fixed-column--left),
 :deep(.el-table__body tr.channel-row--disabled > td.el-table__cell.el-table-fixed-column--right),
@@ -1125,7 +1138,7 @@ onUnmounted(() => {
 .metric-copy { display: grid; min-width: 0; gap: 2px; font-variant-numeric: tabular-nums; }
 .metric-copy strong { color: var(--hongfen-text); font-size: 13px; font-weight: 650; }
 .metric-copy small { color: var(--hongfen-text-muted); font-size: 11px; line-height: 1.35; white-space: nowrap; }
-.success-metric { justify-items: end; }
+.success-metric { box-sizing: border-box; width: 100%; justify-items: end; padding-right: 2px; }
 .usage-share-value { color: var(--hongfen-primary-hover) !important; font: 700 16px/1.15 var(--hongfen-font-mono) !important; }
 :deep(.el-table__body tr.channel-row--disabled .usage-share-value) { color: var(--hongfen-text-muted) !important; }
 .cache-metric { width: 132px; }

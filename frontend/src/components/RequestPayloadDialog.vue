@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import ChatTranscript from '@/components/ChatTranscript.vue'
 import JsonCodeViewer from '@/components/JsonCodeViewer.vue'
 import RelayStepTimeline from '@/components/RelayStepTimeline.vue'
+import ResourceList from '@/components/ResourceList.vue'
 import type { PayloadLogDetail, RelayAttemptLog, RelayRequestLog } from '@/types/gateway'
 import { conversation, deltaDescription, requestConversation } from '@/utils/conversation'
 
@@ -93,6 +94,7 @@ watch(
           <span><strong>模型</strong><code>{{ request.requestedModel }}</code></span>
           <span><strong>思考等级</strong><code>{{ request.reasoningEffort || '默认' }}</code></span>
           <span><strong>结果</strong>{{ outcomeLabel(request.outcome) }}</span>
+          <el-tag v-if="request.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag>
           <span><strong>HTTP</strong>{{ request.statusCode }}</span>
           <span><strong>尝试</strong>{{ request.attemptCount }}</span>
           <span><strong>记录细节</strong><el-tag :type="payloadLogDetailType(request.payloadLogDetail)" effect="plain" size="small">{{ payloadLogDetailLabel(request.payloadLogDetail) }}</el-tag></span>
@@ -100,6 +102,7 @@ watch(
         <el-segmented v-if="requestPayloadLogDetail !== 'none'" v-model="detailMode" :options="detailModeOptions" size="small" aria-label="详情展示方式" />
       </div>
       <el-alert v-if="retentionNotice(request.payloadLogDetail)" :title="retentionNotice(request.payloadLogDetail)" :type="request.payloadLogDetail === 'summary' ? 'warning' : 'info'" :closable="false" show-icon />
+      <section v-if="request.resources?.length" class="resource-section"><h3>识别到的资源</h3><ResourceList :resources="request.resources" /></section>
 
       <el-tabs v-model="activeTab" class="payload-tabs">
         <el-tab-pane label="阶段耗时" name="timings" lazy>
@@ -169,6 +172,8 @@ watch(
 .payload-section + .payload-section { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--hongfen-border); }
 .payload-section h3 { margin: 0 0 10px; color: var(--hongfen-text); font-size: 13px; }
 .payload-empty { padding: 40px 12px; color: var(--hongfen-text-muted); text-align: center; }
+.resource-section { margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--hongfen-border); border-radius: 4px; background: var(--hongfen-surface-muted); }
+.resource-section h3 { margin: 0 0 8px; color: var(--hongfen-text); font-size: 12px; }
 @media (max-width: 640px) {
   :global(.request-payload-modal.el-dialog) { max-height: calc(100dvh - 24px); margin: 12px auto; }
   .payload-toolbar { align-items: stretch; flex-direction: column; }

@@ -24,13 +24,25 @@ type historicalRequestOutcomeRow struct {
 	ResponseBodyTruncated bool
 	EstimatedCost         int64
 	UpstreamCost          int64
+	InputTokens           int64
+	NormalInputTokens     int64
+	OutputTokens          int64
+	CachedTokens          int64
+	CacheWriteTokens      int64
+	SentTokens            int64
 	CreatedAt             time.Time
 }
 
 type dailyOutcomeAdjustment struct {
-	successes     int64
-	estimatedCost int64
-	upstreamCost  int64
+	successes         int64
+	estimatedCost     int64
+	upstreamCost      int64
+	inputTokens       int64
+	normalInputTokens int64
+	outputTokens      int64
+	cachedTokens      int64
+	cacheWriteTokens  int64
+	sentTokens        int64
 }
 
 type dailyOutcomeKey struct {
@@ -52,7 +64,7 @@ func (s *Store) backfillApplicationOutcomes() error {
 		adjustments := make(map[dailyOutcomeKey]dailyOutcomeAdjustment)
 		var rows []historicalRequestOutcomeRow
 		if err := db.Model(&RelayRequestLog{}).
-			Select("id, token_id, endpoint, requested_model, codex_session_id, stream, response_body, response_body_truncated, estimated_cost, upstream_cost, created_at").
+			Select("id, token_id, endpoint, requested_model, codex_session_id, stream, response_body, response_body_truncated, estimated_cost, upstream_cost, input_tokens, normal_input_tokens, output_tokens, cached_tokens, cache_write_tokens, sent_tokens, created_at").
 			Where("outcome = ? AND status_code BETWEEN 200 AND 299", RelayOutcomeSuccess).
 			FindInBatches(&rows, 100, func(_ *gorm.DB, _ int) error {
 				for _, row := range rows {
@@ -86,6 +98,12 @@ func (s *Store) backfillApplicationOutcomes() error {
 					adjustment.successes++
 					adjustment.estimatedCost += row.EstimatedCost
 					adjustment.upstreamCost += row.UpstreamCost
+					adjustment.inputTokens += row.InputTokens
+					adjustment.normalInputTokens += row.NormalInputTokens
+					adjustment.outputTokens += row.OutputTokens
+					adjustment.cachedTokens += row.CachedTokens
+					adjustment.cacheWriteTokens += row.CacheWriteTokens
+					adjustment.sentTokens += row.SentTokens
 					adjustments[key] = adjustment
 				}
 				return nil
@@ -95,9 +113,15 @@ func (s *Store) backfillApplicationOutcomes() error {
 
 		for key, adjustment := range adjustments {
 			if err := db.Model(&TokenDailyStat{}).Where("date = ? AND token_id = ?", key.date, key.tokenID).Updates(map[string]any{
-				"success_count":  gorm.Expr("CASE WHEN success_count >= ? THEN success_count - ? ELSE 0 END", adjustment.successes, adjustment.successes),
-				"estimated_cost": gorm.Expr("CASE WHEN estimated_cost >= ? THEN estimated_cost - ? ELSE 0 END", adjustment.estimatedCost, adjustment.estimatedCost),
-				"upstream_cost":  gorm.Expr("CASE WHEN upstream_cost >= ? THEN upstream_cost - ? ELSE 0 END", adjustment.upstreamCost, adjustment.upstreamCost),
+				"success_count":       gorm.Expr("CASE WHEN success_count >= ? THEN success_count - ? ELSE 0 END", adjustment.successes, adjustment.successes),
+				"estimated_cost":      gorm.Expr("CASE WHEN estimated_cost >= ? THEN estimated_cost - ? ELSE 0 END", adjustment.estimatedCost, adjustment.estimatedCost),
+				"upstream_cost":       gorm.Expr("CASE WHEN upstream_cost >= ? THEN upstream_cost - ? ELSE 0 END", adjustment.upstreamCost, adjustment.upstreamCost),
+				"input_tokens":        gorm.Expr("CASE WHEN input_tokens >= ? THEN input_tokens - ? ELSE 0 END", adjustment.inputTokens, adjustment.inputTokens),
+				"normal_input_tokens": gorm.Expr("CASE WHEN normal_input_tokens >= ? THEN normal_input_tokens - ? ELSE 0 END", adjustment.normalInputTokens, adjustment.normalInputTokens),
+				"output_tokens":       gorm.Expr("CASE WHEN output_tokens >= ? THEN output_tokens - ? ELSE 0 END", adjustment.outputTokens, adjustment.outputTokens),
+				"cached_tokens":       gorm.Expr("CASE WHEN cached_tokens >= ? THEN cached_tokens - ? ELSE 0 END", adjustment.cachedTokens, adjustment.cachedTokens),
+				"cache_write_tokens":  gorm.Expr("CASE WHEN cache_write_tokens >= ? THEN cache_write_tokens - ? ELSE 0 END", adjustment.cacheWriteTokens, adjustment.cacheWriteTokens),
+				"sent_tokens":         gorm.Expr("CASE WHEN sent_tokens >= ? THEN sent_tokens - ? ELSE 0 END", adjustment.sentTokens, adjustment.sentTokens),
 			}).Error; err != nil {
 				return err
 			}
@@ -200,7 +224,7 @@ func classifyHistoricalResponse(endpoint string, stream bool, storedBody string,
 	hasUsableOutput := false
 	responseID := ""
 	for {
-		event, readErr := readSSEEvent(reader)
+		event, readErr := readSSEEvent(reader, endpoint)
 		if len(event) > 0 {
 			receivedEvent = true
 			if responseID == "" {

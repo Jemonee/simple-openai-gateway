@@ -25,10 +25,18 @@ import (
 const (
 	statusClientClosedRequest      = 499
 	maxDetailedPayloadBytes        = 4 << 20
+	maxBufferedResponseBytes       = 128 << 20
+	maxSSEEventBytes               = 128 << 20
+	streamWriteTimeout             = 30 * time.Second
 	upstreamApplicationErrorStatus = http.StatusBadGateway
 	circuitFailureThreshold        = 3
 	temporaryCircuitDuration       = time.Minute
 	extendedCircuitDuration        = 5 * time.Minute
+)
+
+var (
+	errBufferedResponseTooLarge = errors.New("upstream buffered response exceeds size limit")
+	errSSEEventTooLarge         = errors.New("upstream SSE event exceeds size limit")
 )
 
 type PublicError struct {
@@ -199,6 +207,9 @@ func (s *RelayService) RelayWithTrace(ctx context.Context, writer http.ResponseW
 		execution.attempts++
 		result, attemptErr := s.performAttempt(ctx, writer, headers, rawQuery, execution, candidate, selection, index == maxAttempts-1, plan.Affinity)
 		s.addCanceledAttemptUsage(execution, result)
+		if result != nil && result.outcome == RelayOutcomeCanceled {
+			s.recordSessionAffinityAfterReusableAttempt(context.WithoutCancel(ctx), execution, candidate.Mapping.ID)
+		}
 		if attemptErr == nil {
 			return nil
 		}
@@ -256,7 +267,8 @@ func (s *RelayService) addCanceledAttemptUsage(execution *relayExecution, result
 	if result == nil || result.outcome != RelayOutcomeCanceled {
 		return
 	}
-	s.addUsage(execution, result.usage, result.estimatedCost, result.upstreamCost, result.costSource, true)
+	// Cancellation keeps usage telemetry but is never billable.
+	s.addUsage(execution, result.usage, 0, 0, CostSourceFailedZero, false)
 }
 
 func routePublicError(err error) *PublicError {
@@ -361,7 +373,7 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	}
 
 	responseReadStarted := time.Now()
-	responseBody, readErr := io.ReadAll(response.Body)
+	responseBody, readErr := readUpstreamResponseBody(response.Body)
 	responseFinishedAt := time.Now()
 	_ = response.Body.Close()
 	execution.trace.Record(RelayStageResponseBodyRead, RelayStepCategoryUpstream, attempt, responseReadStarted, readErr,
@@ -405,7 +417,11 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 		if lastAttempt && !affinity {
 			s.addUsage(execution, usage, 0, 0, CostSourceFailedZero, false)
 			execution.responseBody = responseBody
-			s.writeBufferedResponse(execution, writer, response, responseBody)
+			writeErr := s.writeBufferedResponse(execution, writer, response, responseBody)
+			if writeErr != nil {
+				s.recordRequest(logCtx, execution, statusClientClosedRequest, "request_canceled")
+				return nil, nil
+			}
 			s.recordRequest(logCtx, execution, response.StatusCode, upstreamErrorCode(responseBody))
 			return nil, nil
 		}
@@ -427,7 +443,11 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 		if !appErr.shouldRetry() {
 			s.addUsage(execution, usage, 0, 0, CostSourceFailedZero, false)
 			execution.responseBody = responseBody
-			s.writeBufferedResponse(execution, writer, response, responseBody)
+			writeErr := s.writeBufferedResponse(execution, writer, response, responseBody)
+			if writeErr != nil {
+				s.recordRequest(logCtx, execution, statusClientClosedRequest, "request_canceled")
+				return nil, nil
+			}
 			s.recordRequest(logCtx, execution, upstreamApplicationErrorStatus, applicationFailureCode(appErr))
 			return nil, nil
 		}
@@ -448,23 +468,29 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	} else if !shouldRetryStatus(response.StatusCode) {
 		s.recordChannelResponsive(logCtx, candidate.Channel.ID)
 	}
-	s.recordAttempt(logCtx, execution, candidate, selection, *result, response.StatusCode, success, readErr)
 	if readErr != nil {
+		s.recordAttempt(logCtx, execution, candidate, selection, *result, response.StatusCode, success, readErr)
 		return result, readErr
 	}
-	s.addUsage(execution, usage, estimatedCost, upstreamCost, costSource, success)
 	code := upstreamErrorCode(responseBody)
 	execution.responseBody = responseBody
-	s.writeBufferedResponse(execution, writer, response, responseBody)
-	if execution.endpoint == "responses" && success {
+	writeErr := s.writeBufferedResponse(execution, writer, response, responseBody)
+	if writeErr != nil {
+		result.outcome = RelayOutcomeCanceled
+	}
+	s.addUsage(execution, usage, estimatedCost, upstreamCost, costSource, success && writeErr == nil)
+	s.recordAttempt(logCtx, execution, candidate, selection, *result, response.StatusCode, success && writeErr == nil, writeErr)
+	if execution.endpoint == "responses" && success && writeErr == nil {
 		affinityStarted := time.Now()
 		s.router.RecordAffinity(logCtx, ResponseID(responseBody), candidate.Mapping.ID)
 		execution.trace.Record(RelayStageAffinityUpdate, RelayStepCategoryStorage, execution.attempts, affinityStarted, nil, "response_affinity")
 	}
 	if success {
-		affinityStarted := time.Now()
-		s.recordSessionAffinityAfterSuccess(logCtx, execution, candidate.Mapping.ID)
-		execution.trace.Record(RelayStageAffinityUpdate, RelayStepCategoryStorage, execution.attempts, affinityStarted, nil, "session_affinity")
+		s.recordSessionAffinityAfterReusableAttempt(logCtx, execution, candidate.Mapping.ID)
+	}
+	if writeErr != nil {
+		s.recordRequest(logCtx, execution, statusClientClosedRequest, "request_canceled")
+		return nil, nil
 	}
 	s.recordRequest(logCtx, execution, response.StatusCode, code)
 	return nil, nil
@@ -485,12 +511,14 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 			fmt.Sprintf("events_received=%t terminal=%t", receivedEvent, terminalSuccess))
 	}
 	reader := bufio.NewReader(response.Body)
-	flusher, _ := writer.(http.Flusher)
+	responseController := http.NewResponseController(writer)
+	defer func() { _ = responseController.SetWriteDeadline(time.Time{}) }()
 	usage := Usage{}
 	upstreamCost := upstreamCostSnapshot{}
 	outputEstimate := int64(0)
 	responseID := ""
 	terminalSuccess := false
+	terminalTracker := newSSETerminalTracker(execution.endpoint, expectedChatChoiceCount(execution.payload))
 	hasUsableOutput := false
 	result := attemptResult{response: response, requestBody: requestBody, sentTokens: sentTokens, latencyMS: latency}
 	capture := payloadCapture{}
@@ -499,6 +527,7 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 		if committed {
 			return nil
 		}
+		extendStreamWriteDeadline(responseController)
 		copyUpstreamResponseHeaders(writer.Header(), response.Header, true)
 		writer.WriteHeader(response.StatusCode)
 		committed = true
@@ -507,17 +536,14 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 				return err
 			}
 		}
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return nil
+		return flushStreamResponse(responseController)
 	}
 
 	streamErr := error(nil)
 	downstreamError := false
 	receivedEvent := false
 	for {
-		event, readErr := readSSEEvent(reader)
+		event, readErr := readSSEEvent(reader, execution.endpoint)
 		if len(event) > 0 {
 			receivedEvent = true
 			recordFirstResponse(event, &result, execution, started)
@@ -528,7 +554,7 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 				hasUsableOutput = true
 			}
 			appErr, hasApplicationError := sseApplicationError(event)
-			if sseEventIsTerminalSuccess(event, execution.endpoint) {
+			if terminalTracker.Observe(event) {
 				terminalSuccess = true
 			}
 
@@ -563,13 +589,16 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 				}
 			} else {
 				recordFirstToken(event, &result, execution, started)
+				extendStreamWriteDeadline(responseController)
 				if _, writeErr := writer.Write(event); writeErr != nil {
 					streamErr = writeErr
 					downstreamError = true
 					break
 				}
-				if flusher != nil {
-					flusher.Flush()
+				if flushErr := flushStreamResponse(responseController); flushErr != nil {
+					streamErr = flushErr
+					downstreamError = true
+					break
 				}
 				if hasApplicationError {
 					streamErr = appErr
@@ -612,13 +641,7 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 			if result.usage.Source == "" {
 				result.usage = Usage{InputTokens: execution.inputTokens, OutputTokens: outputEstimate, Source: "estimated_tiktoken"}
 			}
-			result.estimatedCost = CalculateCostMicros(candidate.Mapping, result.usage)
-			result.upstreamCost = result.estimatedCost
-			result.costSource = CostSourceFallback
-			if upstreamCost.valid {
-				result.upstreamCost = upstreamCost.micros
-				result.costSource = CostSourceUpstream
-			}
+			result.costSource = CostSourceFailedZero
 		} else {
 			result.costSource = CostSourceFailedZero
 		}
@@ -674,7 +697,7 @@ func (s *RelayService) finishStream(ctx context.Context, execution *relayExecuti
 	estimatedCost := int64(0)
 	upstreamCost := int64(0)
 	costSource := CostSourceFailedZero
-	if success || clientCanceled {
+	if success {
 		estimatedCost = CalculateCostMicros(candidate.Mapping, usage)
 		upstreamCost = estimatedCost
 		costSource = CostSourceFallback
@@ -698,7 +721,7 @@ func (s *RelayService) finishStream(ctx context.Context, execution *relayExecuti
 		s.recordChannelFailure(logCtx, candidate.Channel.ID, candidate.Mapping.ID, streamErr.Error())
 	}
 	s.recordAttempt(logCtx, execution, candidate, selection, result, result.response.StatusCode, success, streamErr)
-	s.addUsage(execution, usage, estimatedCost, upstreamCost, costSource, success || clientCanceled)
+	s.addUsage(execution, usage, estimatedCost, upstreamCost, costSource, success)
 	requestStatus := result.response.StatusCode
 	errorCode := ""
 	if clientCanceled {
@@ -718,12 +741,16 @@ func (s *RelayService) finishStream(ctx context.Context, execution *relayExecuti
 		s.router.RecordAffinity(logCtx, responseID, candidate.Mapping.ID)
 		execution.trace.Record(RelayStageAffinityUpdate, RelayStepCategoryStorage, execution.attempts, affinityStarted, nil, "response_affinity")
 	}
-	if success {
-		affinityStarted := time.Now()
-		s.recordSessionAffinityAfterSuccess(logCtx, execution, candidate.Mapping.ID)
-		execution.trace.Record(RelayStageAffinityUpdate, RelayStepCategoryStorage, execution.attempts, affinityStarted, nil, "session_affinity")
+	if success || clientCanceled && !applicationFailed {
+		s.recordSessionAffinityAfterReusableAttempt(logCtx, execution, candidate.Mapping.ID)
 	}
 	s.recordRequest(logCtx, execution, requestStatus, errorCode)
+}
+
+func (s *RelayService) recordSessionAffinityAfterReusableAttempt(ctx context.Context, execution *relayExecution, channelModelID uint64) {
+	affinityStarted := time.Now()
+	s.recordSessionAffinityAfterSuccess(ctx, execution, channelModelID)
+	execution.trace.Record(RelayStageAffinityUpdate, RelayStepCategoryStorage, execution.attempts, affinityStarted, nil, "session_affinity")
 }
 
 func (s *RelayService) recordSessionAffinityAfterSuccess(ctx context.Context, execution *relayExecution, successfulChannelModelID uint64) {
@@ -978,9 +1005,12 @@ func upstreamApplicationError(data []byte) (*upstreamApplicationFailure, bool) {
 		response = nested
 	}
 	responseStatus, _ := response["status"].(string)
-	if typeName == "response.failed" || strings.EqualFold(responseStatus, "failed") {
+	if typeName == "response.failed" || typeName == "response.error" || strings.EqualFold(responseStatus, "failed") {
 		if failure := applicationFailureDetails(response["error"]); failure != nil {
 			return failure, true
+		}
+		if typeName == "response.error" {
+			return newApplicationFailure("upstream response error", "response_error"), true
 		}
 		return newApplicationFailure("upstream response failed", "response_failed"), true
 	}
@@ -992,7 +1022,7 @@ func upstreamApplicationError(data []byte) (*upstreamApplicationFailure, bool) {
 		}
 		return incompleteApplicationFailure(reason), true
 	}
-	if typeName == "response.cancelled" || strings.EqualFold(responseStatus, "cancelled") || strings.EqualFold(responseStatus, "canceled") {
+	if typeName == "response.cancelled" || typeName == "response.canceled" || strings.EqualFold(responseStatus, "cancelled") || strings.EqualFold(responseStatus, "canceled") {
 		return newApplicationFailure("upstream response cancelled", "response_cancelled"), true
 	}
 	if typeName == "error" {
@@ -1126,6 +1156,27 @@ func sseApplicationError(event []byte) (*upstreamApplicationFailure, bool) {
 }
 
 func sseEventIsTerminalSuccess(event []byte, endpoint string) bool {
+	return newSSETerminalTracker(endpoint, 1).Observe(event)
+}
+
+type sseTerminalTracker struct {
+	endpoint            string
+	expectedChatChoices int64
+	finishedChatChoices map[int64]struct{}
+}
+
+func newSSETerminalTracker(endpoint string, expectedChatChoices int64) *sseTerminalTracker {
+	if expectedChatChoices <= 0 {
+		expectedChatChoices = 1
+	}
+	return &sseTerminalTracker{
+		endpoint:            endpoint,
+		expectedChatChoices: expectedChatChoices,
+		finishedChatChoices: make(map[int64]struct{}),
+	}
+}
+
+func (t *sseTerminalTracker) Observe(event []byte) bool {
 	for _, line := range bytes.Split(event, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if !bytes.HasPrefix(line, []byte("data:")) {
@@ -1133,28 +1184,64 @@ func sseEventIsTerminalSuccess(event []byte, endpoint string) bool {
 		}
 		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 		if bytes.Equal(data, []byte("[DONE]")) {
-			return endpoint != "responses"
+			return true
 		}
 		var payload map[string]any
 		if json.Unmarshal(data, &payload) != nil {
 			continue
 		}
-		if endpoint == "responses" {
-			if payload["type"] == "response.completed" {
+		if t.endpoint == "responses" {
+			if payload["type"] == "response.completed" || payload["type"] == "response.done" {
 				return true
 			}
 			continue
 		}
 		if choices, ok := payload["choices"].([]any); ok {
-			for _, item := range choices {
+			for position, item := range choices {
 				choice, _ := item.(map[string]any)
-				if choice["finish_reason"] != nil {
-					return true
+				finishReason, _ := choice["finish_reason"].(string)
+				if strings.TrimSpace(finishReason) == "" {
+					continue
 				}
+				index := int64(position)
+				if parsedIndex, ok := integerJSONValue(choice["index"]); ok && parsedIndex >= 0 {
+					index = parsedIndex
+				}
+				t.finishedChatChoices[index] = struct{}{}
+			}
+			if int64(len(t.finishedChatChoices)) >= t.expectedChatChoices {
+				return true
 			}
 		}
 	}
 	return false
+}
+
+func expectedChatChoiceCount(payload *RelayPayload) int64 {
+	if payload == nil {
+		return 1
+	}
+	if count, ok := integerJSONValue(payload.values["n"]); ok && count > 0 {
+		return count
+	}
+	return 1
+}
+
+func integerJSONValue(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case json.Number:
+		parsed, err := typed.Int64()
+		return parsed, err == nil
+	case float64:
+		parsed := int64(typed)
+		return parsed, float64(parsed) == typed
+	case int:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	default:
+		return 0, false
+	}
 }
 
 type payloadCapture struct {
@@ -1249,7 +1336,7 @@ func latestUserMessageText(messages []any) string {
 		if role != "user" {
 			continue
 		}
-		if text := contentText(message["content"]); text != "" {
+		if text := contentText(message["content"]); text != "" && !isCodexInjectedSkillText(text) {
 			return text
 		}
 	}
@@ -1258,6 +1345,9 @@ func latestUserMessageText(messages []any) string {
 
 func latestResponsesInputText(input any) string {
 	if text, ok := input.(string); ok {
+		if isCodexInjectedSkillText(text) {
+			return ""
+		}
 		return text
 	}
 	items, _ := input.([]any)
@@ -1265,7 +1355,7 @@ func latestResponsesInputText(input any) string {
 		item := items[index]
 		switch typed := item.(type) {
 		case string:
-			if strings.TrimSpace(typed) != "" {
+			if strings.TrimSpace(typed) != "" && !isCodexInjectedSkillText(typed) {
 				return typed
 			}
 		case map[string]any:
@@ -1273,11 +1363,11 @@ func latestResponsesInputText(input any) string {
 			if hasRole && role != "user" {
 				continue
 			}
-			if text := contentText(typed["content"]); text != "" {
+			if text := contentText(typed["content"]); text != "" && !isCodexInjectedSkillText(text) {
 				return text
 			}
 			if !hasRole {
-				if text := contentText(typed); text != "" {
+				if text := contentText(typed); text != "" && !isCodexInjectedSkillText(text) {
 					return text
 				}
 			}
@@ -1320,19 +1410,70 @@ func normalizeSessionName(value string) string {
 	return strings.Join(strings.Fields(value), " ")
 }
 
-func readSSEEvent(reader *bufio.Reader) ([]byte, error) {
+func readSSEEvent(reader *bufio.Reader, endpoint string) ([]byte, error) {
+	return readSSEEventWithLimit(reader, endpoint, maxSSEEventBytes)
+}
+
+func readSSEEventWithLimit(reader *bufio.Reader, endpoint string, limit int) ([]byte, error) {
 	var event bytes.Buffer
 	for {
-		line, err := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			event.Write(line)
-			if bytes.Equal(line, []byte("\n")) || bytes.Equal(line, []byte("\r\n")) {
+		fragment, err := reader.ReadSlice('\n')
+		if event.Len()+len(fragment) > limit {
+			return nil, errSSEEventTooLarge
+		}
+		if len(fragment) > 0 {
+			event.Write(fragment)
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if len(fragment) > 0 {
+			if bytes.Equal(fragment, []byte("\n")) || bytes.Equal(fragment, []byte("\r\n")) {
 				return event.Bytes(), nil
+			}
+			buffered := event.Bytes()
+			if sseEventIsTerminalSuccess(buffered, endpoint) {
+				return terminateSSEEvent(buffered), nil
+			}
+			if _, failed := sseApplicationError(buffered); failed {
+				return terminateSSEEvent(buffered), nil
 			}
 		}
 		if err != nil {
 			return event.Bytes(), err
 		}
+	}
+}
+
+func terminateSSEEvent(event []byte) []byte {
+	if bytes.HasSuffix(event, []byte("\n\n")) || bytes.HasSuffix(event, []byte("\r\n\r\n")) {
+		return event
+	}
+	terminated := bytes.Clone(event)
+	if bytes.HasSuffix(terminated, []byte("\r\n")) {
+		return append(terminated, '\r', '\n')
+	}
+	if bytes.HasSuffix(terminated, []byte("\n")) {
+		return append(terminated, '\n')
+	}
+	return append(terminated, '\n', '\n')
+}
+
+func extendStreamWriteDeadline(controller *http.ResponseController) {
+	_ = controller.SetWriteDeadline(time.Now().Add(streamWriteTimeout))
+}
+
+func flushStreamResponse(controller *http.ResponseController) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("downstream stream flush panic: %v", recovered)
+		}
+	}()
+	extendStreamWriteDeadline(controller)
+	if err := controller.Flush(); errors.Is(err, http.ErrNotSupported) {
+		return nil
+	} else {
+		return err
 	}
 }
 
@@ -1497,16 +1638,43 @@ func copyUpstreamResponseHeaders(destination http.Header, source http.Header, st
 	}
 }
 
-func (s *RelayService) writeBufferedResponse(execution *relayExecution, writer http.ResponseWriter, response *http.Response, body []byte) {
+func (s *RelayService) writeBufferedResponse(execution *relayExecution, writer http.ResponseWriter, response *http.Response, body []byte) (writeErr error) {
 	started := time.Now()
+	controller := http.NewResponseController(writer)
+	defer func() {
+		_ = controller.SetWriteDeadline(time.Time{})
+		if recovered := recover(); recovered != nil {
+			writeErr = fmt.Errorf("downstream buffered response panic: %v", recovered)
+		}
+		execution.trace.Record(RelayStageResponseWrite, RelayStepCategoryDownstream, execution.attempts, started, writeErr,
+			fmt.Sprintf("status=%d bytes=%d", response.StatusCode, len(body)))
+	}()
+	extendStreamWriteDeadline(controller)
 	copyUpstreamResponseHeaders(writer.Header(), response.Header, false)
 	writer.WriteHeader(response.StatusCode)
-	_, writeErr := writer.Write(body)
-	if flusher, ok := writer.(http.Flusher); ok {
-		flusher.Flush()
+	written, writeErr := writer.Write(body)
+	if writeErr == nil && written != len(body) {
+		writeErr = io.ErrShortWrite
 	}
-	execution.trace.Record(RelayStageResponseWrite, RelayStepCategoryDownstream, execution.attempts, started, writeErr,
-		fmt.Sprintf("status=%d bytes=%d", response.StatusCode, len(body)))
+	if writeErr == nil {
+		writeErr = flushStreamResponse(controller)
+	}
+	return writeErr
+}
+
+func readUpstreamResponseBody(reader io.Reader) ([]byte, error) {
+	return readUpstreamResponseBodyWithLimit(reader, maxBufferedResponseBytes)
+}
+
+func readUpstreamResponseBodyWithLimit(reader io.Reader, limit int) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, int64(limit)+1))
+	if err != nil {
+		return body, err
+	}
+	if len(body) > limit {
+		return body[:limit], errBufferedResponseTooLarge
+	}
+	return body, nil
 }
 
 func (s *RelayService) withIdleTimeout(body io.ReadCloser) io.ReadCloser {
@@ -1591,7 +1759,7 @@ func (s *RelayService) recordAttempt(_ context.Context, execution *relayExecutio
 			outcome = RelayOutcomeFailed
 		}
 	}
-	if outcome == RelayOutcomeFailed {
+	if outcome == RelayOutcomeFailed || outcome == RelayOutcomeCanceled {
 		result.estimatedCost = 0
 		result.upstreamCost = 0
 		result.costSource = CostSourceFailedZero
@@ -1694,7 +1862,7 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 	}
 	estimatedCost := execution.estimatedCost
 	upstreamCost := execution.upstreamCost
-	if outcome == RelayOutcomeFailed {
+	if outcome == RelayOutcomeFailed || outcome == RelayOutcomeCanceled {
 		estimatedCost = 0
 		upstreamCost = 0
 		costSource = CostSourceFailedZero
@@ -1785,12 +1953,12 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 		RequestCount:      1,
 		SuccessCount:      successCount,
 		CanceledCount:     canceledCount,
-		InputTokens:       log.InputTokens,
-		NormalInputTokens: log.NormalInputTokens,
-		OutputTokens:      log.OutputTokens,
-		CachedTokens:      log.CachedTokens,
-		CacheWriteTokens:  log.CacheWriteTokens,
-		SentTokens:        log.SentTokens,
+		InputTokens:       0,
+		NormalInputTokens: 0,
+		OutputTokens:      0,
+		CachedTokens:      0,
+		CacheWriteTokens:  0,
+		SentTokens:        0,
 		EstimatedCost:     log.EstimatedCost,
 		UpstreamCost:      log.UpstreamCost,
 		FirstTokenMS:      log.FirstTokenMS,
@@ -1801,6 +1969,14 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 		AttemptCount:      int64(log.AttemptCount),
 		CreatedAt:         now,
 		UpdatedAt:         now,
+	}
+	if outcome == RelayOutcomeSuccess {
+		stat.InputTokens = log.InputTokens
+		stat.NormalInputTokens = log.NormalInputTokens
+		stat.OutputTokens = log.OutputTokens
+		stat.CachedTokens = log.CachedTokens
+		stat.CacheWriteTokens = log.CacheWriteTokens
+		stat.SentTokens = log.SentTokens
 	}
 	var responseForManifest []byte
 	if outcome == RelayOutcomeSuccess {
@@ -1861,6 +2037,9 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 			Columns:   []clause.Column{{Name: "id"}},
 			UpdateAll: true,
 		}).Create(&log).Error; err != nil {
+			return err
+		}
+		if err := persistRequestResources(db, log.ID, execution.token.ID, loggedSessionID, execution.rawBody, now); err != nil {
 			return err
 		}
 		if len(execution.attemptLogs) > 0 {
