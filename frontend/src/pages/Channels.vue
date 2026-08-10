@@ -14,7 +14,7 @@ import type {
   UpstreamModel,
 } from '@/types/gateway'
 import { request } from '@/utils/api'
-import { formatCompactNumber, formatDuration } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
 
 interface MappingDraft {
   clientKey: string
@@ -318,9 +318,7 @@ function selectUpstreamModel(mapping: MappingDraft, upstreamModelId: string) {
 function formatOfficialPrice(model: UpstreamModel): string {
   const price = model.officialPrice
   if (!price) return '未收录'
-  const cachedInput = fromMicros(price.cachedInputPriceMicros)
-  const cacheWrite = fromMicros(price.cacheWritePriceMicros)
-  return `输入 $${fromMicros(price.inputPriceMicros)?.toFixed(4)} · 输出 $${fromMicros(price.outputPriceMicros)?.toFixed(4)} · 缓存读 ${cachedInput === null ? '未提供' : `$${cachedInput.toFixed(4)}`} · 缓存写 ${cacheWrite === null ? '未提供' : `$${cacheWrite.toFixed(4)}`}`
+  return `输入 ${formatUSD(price.inputPriceMicros)} · 输出 ${formatUSD(price.outputPriceMicros)} · 缓存读 ${price.cachedInputPriceMicros === null ? '未提供' : formatUSD(price.cachedInputPriceMicros)} · 缓存写 ${price.cacheWritePriceMicros === null ? '未提供' : formatUSD(price.cacheWritePriceMicros)}`
 }
 
 function officialPriceForMapping(mapping: MappingDraft) {
@@ -560,7 +558,7 @@ function formatPriceMultiplier(value: number): string {
 
 function formatConsumption(micros: number): string {
   const value = Number.isFinite(micros) ? Math.max(0, micros) : 0
-  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 6 }).format(value / 1_000_000)
+  return new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 6, maximumFractionDigits: 6 }).format(value / 1_000_000)
 }
 
 function formatTiming(value: number, samples: number): string {
@@ -1006,19 +1004,19 @@ onUnmounted(() => {
             </div>
             <div class="mapping-price-grid">
               <el-form-item label="输入价格">
-                <el-input-number v-model="mapping.inputPrice" :min="0" :precision="4" :step="0.1" controls-position="right" />
+                <el-input-number v-model="mapping.inputPrice" :min="0" :precision="6" :step="0.1" controls-position="right" />
                 <small class="field-note">未使用缓存读写的普通输入 Token</small>
               </el-form-item>
               <el-form-item label="输出价格">
-                <el-input-number v-model="mapping.outputPrice" :min="0" :precision="4" :step="0.1" controls-position="right" />
+                <el-input-number v-model="mapping.outputPrice" :min="0" :precision="6" :step="0.1" controls-position="right" />
                 <small class="field-note">供应商模型生成的输出 Token</small>
               </el-form-item>
               <el-form-item label="缓存读取价格">
-                <el-input-number v-model="mapping.cachedInputPrice" :min="0" :precision="4" :step="0.1" controls-position="right" placeholder="留空则同输入" />
+                <el-input-number v-model="mapping.cachedInputPrice" :min="0" :precision="6" :step="0.1" controls-position="right" placeholder="留空则同输入" />
                 <small class="field-note">从供应商上下文缓存读取的输入 Token；留空沿用输入价</small>
               </el-form-item>
               <el-form-item label="缓存写入价格">
-                <el-input-number v-model="mapping.cacheWritePrice" :min="0" :precision="4" :step="0.1" controls-position="right" placeholder="留空则同输入" />
+                <el-input-number v-model="mapping.cacheWritePrice" :min="0" :precision="6" :step="0.1" controls-position="right" placeholder="留空则同输入" />
                 <small class="field-note">写入供应商上下文缓存的输入 Token；留空沿用输入价</small>
               </el-form-item>
             </div>

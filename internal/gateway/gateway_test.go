@@ -345,6 +345,16 @@ func TestCalculateCostMicrosSeparatesCacheReadAndWrite(t *testing.T) {
 	}
 }
 
+func TestCalculateCostMicrosRoundsToNearestMicroUSD(t *testing.T) {
+	mapping := ChannelModel{InputPriceMicros: 1, OutputPriceMicros: 1}
+	if got, want := CalculateCostMicros(mapping, Usage{InputTokens: 500_000}), int64(1); got != want {
+		t.Fatalf("CalculateCostMicros() at half micro = %d, want %d", got, want)
+	}
+	if got, want := CalculateCostMicros(mapping, Usage{InputTokens: 499_999}), int64(0); got != want {
+		t.Fatalf("CalculateCostMicros() below half micro = %d, want %d", got, want)
+	}
+}
+
 func TestParseUsageReadsCacheReadAndWriteTokens(t *testing.T) {
 	openAIUsage, ok := ParseUsage([]byte(`{"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":2,"cache_creation_tokens":3}}}`))
 	if !ok || openAIUsage.InputTokens != 10 || openAIUsage.OutputTokens != 5 || openAIUsage.CachedTokens != 2 || openAIUsage.CacheWriteTokens != 3 {

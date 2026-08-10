@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type { DashboardBreakdown } from '@/types/gateway'
-import { formatCompactNumber } from '@/utils/formatters'
+import { formatCompactNumber, formatUSD } from '@/utils/formatters'
 
 export type ChannelShareMetric = 'requests' | 'cost'
 
@@ -81,10 +81,6 @@ function sectorPath(startAngle: number, endAngle: number): string {
 
 function formatShare(value: number): string {
   return new Intl.NumberFormat('zh-CN', { style: 'percent', maximumFractionDigits: 1 }).format(value)
-}
-
-function formatUSD(micros: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(micros / 1_000_000)
 }
 
 function formatValue(value: number): string {

@@ -7,7 +7,7 @@ import SessionLogDrawer from '@/components/SessionLogDrawer.vue'
 import SessionRelationBadge from '@/components/SessionRelationBadge.vue'
 import type { ActiveSessionPage, CodexSessionDetail, CodexSessionSummary } from '@/types/gateway'
 import { request } from '@/utils/api'
-import { formatCompactNumber, formatDuration } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
 
 const ACTIVE_WINDOW_MINUTES = 30
 const ACTIVE_SESSION_SOURCE_OPTIONS = [
@@ -51,10 +51,6 @@ function formatRelativeActivity(value: string): string {
 
 function formatPercent(value: number): string {
   return new Intl.NumberFormat('zh-CN', { style: 'percent', maximumFractionDigits: 1 }).format(value)
-}
-
-function formatUSD(micros: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 4, maximumFractionDigits: 6 }).format(micros / 1_000_000)
 }
 
 function formatTiming(value: number, samples: number): string {

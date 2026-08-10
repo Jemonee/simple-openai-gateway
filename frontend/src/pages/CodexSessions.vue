@@ -7,7 +7,7 @@ import SessionLogDrawer from '@/components/SessionLogDrawer.vue'
 import SessionRelationBadge from '@/components/SessionRelationBadge.vue'
 import type { Channel, ClientToken, CodexSessionDetail, CodexSessionPage, CodexSessionSummary, GatewayModel, LogAggregateSummary } from '@/types/gateway'
 import { request } from '@/utils/api'
-import { formatCompactNumber, formatDuration } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
 import { logDateDefaultTimes, logDateRangeShortcuts, toEastEightISOString, todayLogRange } from '@/utils/logDateRanges'
 
 const loading = ref(true)
@@ -29,10 +29,6 @@ function formatDate(value: string): string {
 
 function formatPercent(value: number): string {
   return new Intl.NumberFormat('zh-CN', { style: 'percent', maximumFractionDigits: 1 }).format(value)
-}
-
-function formatUSD(micros: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 4, maximumFractionDigits: 6 }).format(micros / 1_000_000)
 }
 
 function formatTiming(value: number, samples: number): string {

@@ -1280,9 +1280,10 @@ func officialUsageCost(model string, inputTokens, normalInputTokens, outputToken
 	if price.CacheWritePriceMicros != nil {
 		cacheWritePrice = *price.CacheWritePriceMicros
 	}
-	return ((normalInputTokens+unclassifiedInputTokens)*price.InputPriceMicros +
-		cachedTokens*cachedPrice + cacheWriteTokens*cacheWritePrice +
-		max(outputTokens, 0)*price.OutputPriceMicros) / 1_000_000
+	return tokenPrice(normalInputTokens+unclassifiedInputTokens, price.InputPriceMicros) +
+		tokenPrice(cachedTokens, cachedPrice) +
+		tokenPrice(cacheWriteTokens, cacheWritePrice) +
+		tokenPrice(outputTokens, price.OutputPriceMicros)
 }
 
 func (s *ManagementService) Dashboard(ctx context.Context, days int) (*DashboardSummary, error) {

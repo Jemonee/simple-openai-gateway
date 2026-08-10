@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { WarningFilled } from '@element-plus/icons-vue'
 import type { RelayAttemptLog } from '@/types/gateway'
-import { formatCompactNumber, formatDuration } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
 
 interface SessionAttemptCardProps {
   /** Upstream attempt displayed within a session request timeline. */
@@ -18,10 +18,6 @@ const { attempt, attemptNumber, apiPath, reasoningEffort } = defineProps<Session
 
 function formatTiming(value: number): string {
   return value > 0 ? formatDuration(value) : '--'
-}
-
-function formatUSD(micros: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 4, maximumFractionDigits: 6 }).format(micros / 1_000_000)
 }
 
 function channelLabel(): string {

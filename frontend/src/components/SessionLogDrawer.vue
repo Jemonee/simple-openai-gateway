@@ -9,7 +9,7 @@ import RelayStepTimeline from '@/components/RelayStepTimeline.vue'
 import ResourceList from '@/components/ResourceList.vue'
 import type { CodexSessionDetail, CodexSessionSummary, RelayAttemptLog, RelayRequestLog } from '@/types/gateway'
 import { request } from '@/utils/api'
-import { formatCompactNumber, formatDuration } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
 
 interface SessionLogDrawerProps {
   /** Session aggregate selected from the session log table. */
@@ -134,10 +134,6 @@ onBeforeUnmount(() => channelUsageResizeObserver?.disconnect())
 
 function formatDate(value: string): string {
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'medium', timeZone: 'Asia/Shanghai' }).format(new Date(value))
-}
-
-function formatUSD(micros: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 4, maximumFractionDigits: 6 }).format(micros / 1_000_000)
 }
 
 function formatPercent(value: number): string {

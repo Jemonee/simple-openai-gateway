@@ -6,6 +6,13 @@ const compactNumberFormatter = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2,
 })
 
+const usdFormatter = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 6,
+  maximumFractionDigits: 6,
+})
+
 /** Formats a millisecond duration using the largest supported practical unit. */
 export function formatDuration(milliseconds: number): string {
   if (!Number.isFinite(milliseconds)) return '--'
@@ -26,4 +33,9 @@ export function formatCompactNumber(value: number): string {
   if (absoluteValue >= 1_000_000) return `${compactNumberFormatter.format(value / 1_000_000)}M`
   if (absoluteValue >= 1_000) return `${compactNumberFormatter.format(value / 1_000)}K`
   return compactNumberFormatter.format(value)
+}
+
+/** Formats a micro-USD amount with six decimal places using half-up rounding. */
+export function formatUSD(micros: number): string {
+  return usdFormatter.format((Number.isFinite(micros) ? micros : 0) / 1_000_000)
 }

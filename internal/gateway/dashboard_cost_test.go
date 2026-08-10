@@ -11,4 +11,7 @@ func TestOfficialUsageCostUsesInputCacheAndOutputCatalogPrices(t *testing.T) {
 	if got := officialUsageCost("unlisted-model", 1_000_000, 1_000_000, 1_000_000, 0, 0); got != 0 {
 		t.Fatalf("unlisted officialUsageCost() = %d, want 0", got)
 	}
+	if got, want := officialUsageCost("gpt-5.6-luna", 3, 3, 0, 0, 0), int64(1); got != want {
+		t.Fatalf("officialUsageCost() rounds to nearest micro = %d, want %d", got, want)
+	}
 }

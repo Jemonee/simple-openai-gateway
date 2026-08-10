@@ -17,7 +17,7 @@ import type {
   GatewayModel,
 } from '@/types/gateway'
 import { request } from '@/utils/api'
-import { formatCompactNumber, formatDuration } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
 import { isLocalBrowserAccess } from '@/utils/localAccess'
 
 const router = useRouter()
@@ -138,10 +138,6 @@ name = "custom"
 wire_api = "responses"
 requires_openai_auth = true
 base_url = "${serviceBaseUrl.value.trim() || '/v1'}"`)
-
-function formatUSD(micros: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(micros / 1_000_000)
-}
 
 function formatPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`

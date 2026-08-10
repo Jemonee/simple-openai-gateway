@@ -4,7 +4,7 @@ import { ArrowDown, ArrowUp, Delete, Edit, Plus, Refresh, Search } from '@elemen
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { Channel, ChannelModel, GatewayModel, RoutingStrategy } from '@/types/gateway'
 import { request } from '@/utils/api'
-import { formatCompactNumber, formatDuration } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
 
 interface CandidateRow {
   channel: Channel
@@ -91,7 +91,7 @@ function candidateSummary(modelId: number): string {
 
 function formatPrice(micros: number | null): string {
   if (micros === null) return '同输入价'
-  return `$${(micros / 1_000_000).toFixed(4)}`
+  return formatUSD(micros)
 }
 
 function formatMultiplier(basisPoints: number): string {

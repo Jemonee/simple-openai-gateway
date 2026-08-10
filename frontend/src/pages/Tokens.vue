@@ -4,7 +4,7 @@ import { CircleClose, CopyDocument, Edit, Plus, Refresh, RefreshRight } from '@e
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { ClientToken, GatewayModel, IssuedClientToken } from '@/types/gateway'
 import { request } from '@/utils/api'
-import { formatCompactNumber, formatDuration } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
 
 const loading = ref(true)
 const saving = ref(false)
@@ -136,10 +136,6 @@ async function revokeToken(token: ClientToken) {
 
 function formatDate(value: string | null): string {
   return value ? new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Shanghai' }).format(new Date(value)) : '从未使用'
-}
-
-function formatUSD(micros: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(micros / 1_000_000)
 }
 
 function formatTiming(value: number, samples: number): string {

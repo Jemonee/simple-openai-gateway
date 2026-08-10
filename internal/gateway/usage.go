@@ -256,5 +256,10 @@ func tokenPrice(tokens int64, priceMicrosPerMillion int64) int64 {
 	if tokens <= 0 || priceMicrosPerMillion <= 0 {
 		return 0
 	}
-	return (tokens*priceMicrosPerMillion + 999999) / 1000000
+	product := tokens * priceMicrosPerMillion
+	quotient := product / 1_000_000
+	if product%1_000_000 >= 500_000 {
+		quotient++
+	}
+	return quotient
 }
