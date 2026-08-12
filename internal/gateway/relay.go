@@ -59,6 +59,39 @@ type RelayService struct {
 	circuitLocks  sync.Map
 }
 
+// dynamicResponseHeaderTransport keeps the upstream connection pool while
+// applying the current response-header timeout to each new request.
+type dynamicResponseHeaderTransport struct {
+	base        *http.Transport
+	timeoutFunc func() time.Duration
+
+	mu        sync.Mutex
+	transport *http.Transport
+	timeout   time.Duration
+}
+
+func (t *dynamicResponseHeaderTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	timeout := 120 * time.Second
+	if t.timeoutFunc != nil {
+		if configured := t.timeoutFunc(); configured > 0 {
+			timeout = configured
+		}
+	}
+
+	t.mu.Lock()
+	if t.transport == nil || t.timeout != timeout {
+		if t.transport != nil {
+			t.transport.CloseIdleConnections()
+		}
+		t.transport = t.base.Clone()
+		t.transport.ResponseHeaderTimeout = timeout
+		t.timeout = timeout
+	}
+	transport := t.transport
+	t.mu.Unlock()
+	return transport.RoundTrip(request)
+}
+
 type relayExecution struct {
 	requestID                string
 	token                    *ClientToken
@@ -112,12 +145,7 @@ type attemptResult struct {
 }
 
 func NewRelayService(store *Store, router *Router, estimator *TokenEstimator, configManager *config.ApplicationConfigManager) *RelayService {
-	headerTimeout := 120 * time.Second
-	if cfg := configManager.GetConfig(); cfg != nil && cfg.GatewayConfig.ResponseHeaderTimeoutSeconds > 0 {
-		headerTimeout = time.Duration(cfg.GatewayConfig.ResponseHeaderTimeoutSeconds) * time.Second
-	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = headerTimeout
 	transport.MaxIdleConns = 100
 	transport.MaxIdleConnsPerHost = 20
 	return &RelayService{
@@ -126,7 +154,18 @@ func NewRelayService(store *Store, router *Router, estimator *TokenEstimator, co
 		estimator:     estimator,
 		configManager: configManager,
 		client: &http.Client{
-			Transport: transport,
+			Transport: &dynamicResponseHeaderTransport{
+				base: transport,
+				timeoutFunc: func() time.Duration {
+					if configManager == nil {
+						return 0
+					}
+					if cfg := configManager.GetConfig(); cfg != nil && cfg.GatewayConfig.ResponseHeaderTimeoutSeconds > 0 {
+						return time.Duration(cfg.GatewayConfig.ResponseHeaderTimeoutSeconds) * time.Second
+					}
+					return 0
+				},
+			},
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
