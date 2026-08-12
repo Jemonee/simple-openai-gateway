@@ -20,10 +20,13 @@ func TestWebConfigDefaults(t *testing.T) {
 	}
 }
 
-func TestGatewayConfigDefaultsPayloadLogDetail(t *testing.T) {
+func TestGatewayConfigDefaults(t *testing.T) {
 	var gatewayConfig GatewayConfig
 	if err := defaults.Set(&gatewayConfig); err != nil {
 		t.Fatalf("defaults.Set() error = %v", err)
+	}
+	if gatewayConfig.MaxAttempts != 1 || gatewayConfig.RequestBodyLimitMB != 256 || gatewayConfig.ResponseHeaderTimeoutSeconds != 15 || gatewayConfig.StreamIdleTimeoutSeconds != 300 {
+		t.Fatalf("request defaults = %d/%d/%d/%d, want 1/256/15/300", gatewayConfig.MaxAttempts, gatewayConfig.RequestBodyLimitMB, gatewayConfig.ResponseHeaderTimeoutSeconds, gatewayConfig.StreamIdleTimeoutSeconds)
 	}
 	if gatewayConfig.PayloadLogDetail != PayloadLogDetailDefault {
 		t.Fatalf("payload log detail = %q, want %q", gatewayConfig.PayloadLogDetail, PayloadLogDetailDefault)

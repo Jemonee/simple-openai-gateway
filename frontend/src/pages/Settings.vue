@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { Check, Delete, Link, Refresh } from '@element-plus/icons-vue'
+import { Check, Delete, Link, Refresh, RefreshLeft } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import projectMeta from '@/config/project.generated.js'
 import RoutingWeightEditor from '@/components/RoutingWeightEditor.vue'
@@ -39,25 +39,30 @@ const minimumRoutingQualityWeightPercent = 5
 type RoutingWeightKey = 'routingPriceWeightPercent' | 'routingEfficiencyWeightPercent' | 'routingQualityWeightPercent' | 'routingBalanceWeightPercent'
 const routingWeightKeys: RoutingWeightKey[] = ['routingPriceWeightPercent', 'routingEfficiencyWeightPercent', 'routingQualityWeightPercent', 'routingBalanceWeightPercent']
 const defaultCommonModelNames = ['gpt-image-2', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4-mini', 'codex-auto-review']
-const form = reactive<ApplicationSettings>({
-  webConfig: { host: '', port: '' },
-  nodeConfig: { sharedToken: '' },
-  gatewayConfig: {
-    maxAttempts: 3,
-    requestBodyLimitMB: 32,
-    responseHeaderTimeoutSeconds: 120,
-    streamIdleTimeoutSeconds: 300,
-    routingPriceWeightPercent: defaultRoutingPriceWeightPercent,
-    routingEfficiencyWeightPercent: defaultRoutingEfficiencyWeightPercent,
-    routingQualityWeightPercent: defaultRoutingQualityWeightPercent,
-    routingBalanceWeightPercent: defaultRoutingBalanceWeightPercent,
-    sessionTTLHours: 12,
-    secureCookie: false,
-    detailedLogRetentionDays: 0,
-    payloadLogDetail: 'default',
-    commonModelNames: [...defaultCommonModelNames],
-  },
-})
+
+function defaultApplicationSettings(sharedToken = ''): ApplicationSettings {
+  return {
+    webConfig: { host: '0.0.0.0', port: '8888' },
+    nodeConfig: { sharedToken },
+    gatewayConfig: {
+      maxAttempts: 1,
+      requestBodyLimitMB: 256,
+      responseHeaderTimeoutSeconds: 15,
+      streamIdleTimeoutSeconds: 300,
+      routingPriceWeightPercent: defaultRoutingPriceWeightPercent,
+      routingEfficiencyWeightPercent: defaultRoutingEfficiencyWeightPercent,
+      routingQualityWeightPercent: defaultRoutingQualityWeightPercent,
+      routingBalanceWeightPercent: defaultRoutingBalanceWeightPercent,
+      sessionTTLHours: 12,
+      secureCookie: false,
+      detailedLogRetentionDays: 0,
+      payloadLogDetail: 'default',
+      commonModelNames: [...defaultCommonModelNames],
+    },
+  }
+}
+
+const form = reactive<ApplicationSettings>(defaultApplicationSettings())
 const routingWeights = computed<RoutingWeightValues>(() => ({
   price: form.gatewayConfig.routingPriceWeightPercent,
   efficiency: form.gatewayConfig.routingEfficiencyWeightPercent,
@@ -216,6 +221,23 @@ async function saveSettings() {
   }
 }
 
+async function restoreDefaults() {
+  try {
+    await ElMessageBox.confirm(
+      '将当前表单恢复为项目默认值。共享令牌不会改变，点击“保存设置”后其他默认值才会生效。',
+      '恢复默认设置',
+      { type: 'warning', confirmButtonText: '恢复默认', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  const defaults = defaultApplicationSettings(form.nodeConfig.sharedToken)
+  form.webConfig = defaults.webConfig
+  form.nodeConfig = defaults.nodeConfig
+  form.gatewayConfig = defaults.gatewayConfig
+  ElMessage.success('已恢复默认值，请确认后保存')
+}
+
 onMounted(() => {
   void loadSettings()
   void loadLogStorage()
@@ -304,7 +326,10 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <div class="settings-actions"><el-button type="primary" :icon="Check" :loading="saving" native-type="submit">保存设置</el-button></div>
+      <div class="settings-actions">
+        <el-button :icon="RefreshLeft" :disabled="saving" @click="restoreDefaults">恢复默认</el-button>
+        <el-button type="primary" :icon="Check" :loading="saving" native-type="submit">保存设置</el-button>
+      </div>
     </el-form>
 
     <section class="surface-panel settings-section project-section">
@@ -329,7 +354,7 @@ onUnmounted(() => {
 .settings-form { display: grid; gap: 16px; }
 .settings-fields { padding: 20px 22px 8px; }
 .settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 18px; }
-.settings-actions { display: flex; justify-content: flex-end; position: sticky; bottom: 12px; padding: 10px; border: 1px solid var(--hongfen-border); background: var(--hongfen-surface); }
+.settings-actions { display: flex; justify-content: flex-end; gap: 8px; position: sticky; bottom: 12px; padding: 10px; border: 1px solid var(--hongfen-border); background: var(--hongfen-surface); }
 .routing-formula { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; padding: 4px 22px 20px; }
 .routing-formula > div { min-width: 0; padding: 10px 14px; border-left: 2px solid var(--hongfen-border-strong); }
 .routing-formula dt { color: var(--hongfen-text); font-size: 11px; font-weight: 650; }

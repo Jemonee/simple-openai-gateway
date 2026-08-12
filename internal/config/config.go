@@ -149,9 +149,9 @@ type NodeConfig struct {
 }
 
 type GatewayConfig struct {
-	MaxAttempts                    int      `toml:"max_attempts" json:"maxAttempts" default:"3"`
-	RequestBodyLimitMB             int      `toml:"request_body_limit_mb" json:"requestBodyLimitMB" default:"32"`
-	ResponseHeaderTimeoutSeconds   int      `toml:"response_header_timeout_seconds" json:"responseHeaderTimeoutSeconds" default:"120"`
+	MaxAttempts                    int      `toml:"max_attempts" json:"maxAttempts" default:"1"`
+	RequestBodyLimitMB             int      `toml:"request_body_limit_mb" json:"requestBodyLimitMB" default:"256"`
+	ResponseHeaderTimeoutSeconds   int      `toml:"response_header_timeout_seconds" json:"responseHeaderTimeoutSeconds" default:"15"`
 	StreamIdleTimeoutSeconds       int      `toml:"stream_idle_timeout_seconds" json:"streamIdleTimeoutSeconds" default:"300"`
 	RoutingPriceWeightPercent      int      `toml:"routing_price_weight_percent" json:"routingPriceWeightPercent" default:"40"`
 	RoutingEfficiencyWeightPercent int      `toml:"routing_efficiency_weight_percent" json:"routingEfficiencyWeightPercent" default:"35"`
