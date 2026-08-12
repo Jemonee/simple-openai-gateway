@@ -66,6 +66,9 @@ const defaultOpenMenuKeys = computed(() => {
 const menuCollapsed = computed(() => sidebarCollapsed.value && !isMobileViewport.value)
 const breadcrumbs = computed(() => route.meta.breadcrumbs ?? ['网关控制台'])
 const workspaceContained = computed(() => route.meta.workspaceMode === 'contained')
+const quickNavigationItems = navigationGroups
+  .flatMap((group) => group.items)
+  .filter((item) => item.key === 'active-sessions' || item.key === 'sessions')
 
 function syncMobileViewport(event: MediaQueryList | MediaQueryListEvent) {
   isMobileViewport.value = event.matches
@@ -225,6 +228,17 @@ watch(authenticated, (isAuthenticated) => {
             <span v-else>{{ item }}</span>
           </template>
         </div>
+        <nav class="workspace-quick-nav" aria-label="常用菜单">
+          <RouterLink
+            v-for="item in quickNavigationItems"
+            :key="item.key"
+            class="workspace-quick-link"
+            :to="item.path ?? '/'"
+          >
+            <component :is="item.icon" aria-hidden="true" />
+            <span>{{ item.label }}</span>
+          </RouterLink>
+        </nav>
       </div>
       <section
         ref="workspaceScroll"

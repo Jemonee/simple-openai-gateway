@@ -1,5 +1,6 @@
-/* 红粉主题：紧凑、清晰的固定浅色管理界面。 */
+/* 红粉主题：紧凑、清晰的管理界面，颜色随系统明暗模式自动切换。 */
 :root {
+  color-scheme: light dark;
   --hongfen-page: #fff7fa;
   --hongfen-surface: #fffcfd;
   --hongfen-surface-muted: #fff0f6;
@@ -21,6 +22,10 @@
   --hongfen-teal: #2f7d61;
   --hongfen-amber: #b7791f;
   --hongfen-purple-gray: #736780;
+  --hongfen-on-primary: #ffffff;
+  --hongfen-danger-border: #efc5cd;
+  --hongfen-table-hover: #fff6f9;
+  --hongfen-scrim: rgba(43, 39, 48, 0.24);
   --hongfen-radius-control: 4px;
   --hongfen-radius-panel: 6px;
   --hongfen-header-height: 62px;
@@ -54,6 +59,77 @@
   --el-border-radius-small: var(--hongfen-radius-control);
   --el-box-shadow-light: 0 2px 10px rgba(96, 52, 69, 0.08);
   --el-font-family: var(--hongfen-font-sans);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root,
+  :root.dark {
+    --hongfen-page: #171318;
+    --hongfen-surface: #211a20;
+    --hongfen-surface-muted: #2b2028;
+    --hongfen-surface-strong: #422334;
+    --hongfen-primary: #ef6f9d;
+    --hongfen-primary-hover: #ff9bbb;
+    --hongfen-primary-soft: #4a2637;
+    --hongfen-text: #f7edf2;
+    --hongfen-text-muted: #c7b6bf;
+    --hongfen-text-subtle: #a5919d;
+    --hongfen-border: #4a3741;
+    --hongfen-border-strong: #69515d;
+    --hongfen-success: #6bc49c;
+    --hongfen-success-soft: #1d392f;
+    --hongfen-warning: #e9b95d;
+    --hongfen-warning-soft: #3f321d;
+    --hongfen-danger: #f08a9b;
+    --hongfen-danger-soft: #43232b;
+    --hongfen-teal: #6bc49c;
+    --hongfen-amber: #e0a64c;
+    --hongfen-purple-gray: #b9a8c4;
+    --hongfen-on-primary: #2b1721;
+    --hongfen-danger-border: #743b49;
+    --hongfen-table-hover: #30232c;
+    --hongfen-scrim: rgba(0, 0, 0, 0.52);
+
+    --el-color-primary: var(--hongfen-primary);
+    --el-color-primary-light-3: #f58ab0;
+    --el-color-primary-light-5: #f7a7c3;
+    --el-color-primary-light-7: #e8739f;
+    --el-color-primary-light-8: #c75d86;
+    --el-color-primary-light-9: var(--hongfen-primary-soft);
+    --el-color-primary-dark-2: var(--hongfen-primary-hover);
+    --el-color-success: var(--hongfen-success);
+    --el-color-success-light-9: var(--hongfen-success-soft);
+    --el-color-warning: var(--hongfen-warning);
+    --el-color-warning-light-9: var(--hongfen-warning-soft);
+    --el-color-danger: var(--hongfen-danger);
+    --el-color-danger-light-9: var(--hongfen-danger-soft);
+    --el-color-error: var(--hongfen-danger);
+    --el-color-error-light-9: var(--hongfen-danger-soft);
+    --el-bg-color: var(--hongfen-surface);
+    --el-bg-color-page: var(--hongfen-page);
+    --el-bg-color-overlay: var(--hongfen-surface-muted);
+    --el-text-color-primary: var(--hongfen-text);
+    --el-text-color-regular: var(--hongfen-text-muted);
+    --el-text-color-secondary: var(--hongfen-text-subtle);
+    --el-text-color-placeholder: #917d88;
+    --el-text-color-disabled: #75636d;
+    --el-border-color: var(--hongfen-border);
+    --el-border-color-light: #5a444f;
+    --el-border-color-lighter: #503c47;
+    --el-border-color-extra-light: #45333d;
+    --el-border-color-dark: #624a56;
+    --el-border-color-darker: var(--hongfen-border-strong);
+    --el-fill-color: var(--hongfen-surface-muted);
+    --el-fill-color-light: #34252e;
+    --el-fill-color-lighter: #30232c;
+    --el-fill-color-extra-light: #2a1f26;
+    --el-fill-color-dark: #3d2b35;
+    --el-fill-color-darker: #49333e;
+    --el-fill-color-blank: var(--hongfen-surface);
+    --el-mask-color: rgba(0, 0, 0, 0.72);
+    --el-mask-color-extra-light: rgba(0, 0, 0, 0.38);
+    --el-box-shadow-light: 0 2px 10px rgba(0, 0, 0, 0.28);
+  }
 }
 
 .skip-link {
@@ -144,7 +220,7 @@
   height: 32px;
   place-items: center;
   border-radius: var(--hongfen-radius-control);
-  color: #ffffff;
+  color: var(--hongfen-on-primary);
   background: var(--hongfen-primary);
   font-family: var(--hongfen-font-mono);
   font-size: 16px;
@@ -208,10 +284,18 @@
 .sidebar-footer-version { color: var(--hongfen-text-subtle); font-family: var(--hongfen-font-mono); font-size: 10px; }
 
 .app-main { display: grid; height: 100dvh; min-height: 0; grid-template-rows: 46px minmax(0, 1fr); overflow: hidden; padding-top: var(--hongfen-header-height); padding-left: var(--hongfen-sidebar-width); transition: padding-left 180ms ease; }
-.workspace-toolbar { min-height: 46px; display: flex; align-items: center; padding: 0 24px; border-bottom: 1px solid var(--hongfen-border); background: var(--hongfen-surface); }
-.breadcrumbs { gap: 8px; color: var(--hongfen-text-muted); font-size: 11px; }
+.workspace-toolbar { min-width: 0; min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 0 24px; border-bottom: 1px solid var(--hongfen-border); background: var(--hongfen-surface); }
+.breadcrumbs { min-width: 0; gap: 8px; color: var(--hongfen-text-muted); font-size: 11px; white-space: nowrap; }
 .breadcrumbs b { color: var(--hongfen-border-strong); font-weight: 400; }
-.breadcrumbs strong { color: var(--hongfen-text); font-weight: 650; }
+.breadcrumbs strong { overflow: hidden; color: var(--hongfen-text); font-weight: 650; text-overflow: ellipsis; }
+.workspace-quick-nav { align-self: stretch; display: flex; flex: none; align-items: stretch; gap: 2px; }
+.workspace-quick-link { position: relative; display: inline-flex; min-width: 0; align-items: center; gap: 6px; padding: 0 12px; color: var(--hongfen-text-muted); font-size: 12px; font-weight: 550; white-space: nowrap; }
+.workspace-quick-link::after { position: absolute; right: 10px; bottom: 0; left: 10px; height: 2px; background: transparent; content: ''; }
+.workspace-quick-link:hover { color: var(--hongfen-primary-hover); background: var(--hongfen-primary-soft); }
+.workspace-quick-link:focus-visible { outline: 2px solid var(--hongfen-primary); outline-offset: -2px; }
+.workspace-quick-link.router-link-exact-active { color: var(--hongfen-primary-hover); background: var(--hongfen-primary-soft); font-weight: 650; }
+.workspace-quick-link.router-link-exact-active::after { background: var(--hongfen-primary); }
+.workspace-quick-link svg { width: 15px; height: 15px; flex: none; }
 .workspace-scroll { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .workspace-scroll.is-contained { overflow: hidden; }
 .workspace-content { width: min(100%, 1480px); height: 100%; min-height: 0; margin: 0 auto; padding: 22px 24px 32px; outline: none; }
@@ -226,6 +310,11 @@
 .sidebar-menu-popper { border: 1px solid var(--hongfen-border) !important; border-radius: var(--hongfen-radius-control) !important; }
 .sidebar-menu-popper .el-menu { background: var(--hongfen-surface) !important; }
 
+@media (prefers-color-scheme: dark) {
+  .el-button--primary { --el-button-text-color: var(--hongfen-on-primary); --el-button-hover-text-color: var(--hongfen-on-primary); --el-button-active-text-color: var(--hongfen-on-primary); }
+  .el-segmented { --el-segmented-item-selected-color: var(--hongfen-on-primary); }
+}
+
 @media (max-width: 960px) {
   .header-menu-button { display: inline-grid !important; }
   .app-sidebar, .is-sidebar-collapsed .app-sidebar { width: 264px; transform: translateX(-100%); }
@@ -235,13 +324,16 @@
   .is-sidebar-collapsed .sidebar-toolbar { justify-content: initial; }
   .is-sidebar-collapsed .sidebar-nav { padding: 13px 9px; }
   .is-sidebar-collapsed .sidebar-footer { justify-content: space-between; }
-  .mobile-scrim { position: fixed; inset: var(--hongfen-header-height) 0 0; z-index: 15; display: block; border: 0; background: rgba(43, 39, 48, 0.24); }
+  .mobile-scrim { position: fixed; inset: var(--hongfen-header-height) 0 0; z-index: 15; display: block; border: 0; background: var(--hongfen-scrim); }
 }
 
 @media (max-width: 640px) {
   .app-header { padding: 0 12px; }
   .header-status, .header-brand-copy span, .account-button > span:not(.account-avatar) { display: none; }
-  .workspace-toolbar { padding: 0 14px; }
+  .workspace-toolbar { gap: 8px; padding: 0 8px 0 14px; }
+  .breadcrumbs span, .breadcrumbs b { display: none; }
+  .workspace-quick-link { gap: 4px; padding: 0 8px; }
+  .workspace-quick-link::after { right: 8px; left: 8px; }
   .workspace-content { padding: 14px 14px 28px; }
   .login-page { padding: 14px; }
   .login-panel { padding: 24px 20px; }

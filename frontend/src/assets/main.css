@@ -33,7 +33,7 @@ code { font-family: var(--hongfen-font-mono); font-size: 0.94em; font-variant-nu
 .state-panel strong { color: var(--hongfen-text); font-weight: 650; }
 .state-panel span { color: var(--hongfen-text-muted); font-size: 12px; }
 .state-panel .el-button { grid-column: 3; grid-row: 1 / span 2; }
-.state-error { border-color: #efc5cd; background: var(--hongfen-danger-soft); }
+.state-error { border-color: var(--hongfen-danger-border); background: var(--hongfen-danger-soft); }
 .state-error strong { color: var(--hongfen-danger); }
 .state-empty { grid-template-columns: auto minmax(0, 1fr) auto; }
 
@@ -68,7 +68,7 @@ code { font-family: var(--hongfen-font-mono); font-size: 0.94em; font-variant-nu
 .el-button:focus-visible { outline: 2px solid var(--hongfen-primary); outline-offset: 2px; }
 .el-input__wrapper, .el-textarea__inner, .el-select__wrapper { border-radius: var(--hongfen-radius-control); box-shadow: 0 0 0 1px var(--hongfen-border) inset; }
 .el-input__wrapper.is-focus, .el-textarea__inner:focus, .el-select__wrapper.is-focused { box-shadow: 0 0 0 2px var(--hongfen-primary) inset; }
-.el-table { --el-table-header-bg-color: var(--hongfen-surface-muted); --el-table-row-hover-bg-color: #fff6f9; --el-table-border-color: var(--hongfen-border); color: var(--hongfen-text-muted); }
+.el-table { --el-table-header-bg-color: var(--hongfen-surface-muted); --el-table-row-hover-bg-color: var(--hongfen-table-hover); --el-table-border-color: var(--hongfen-border); color: var(--hongfen-text-muted); }
 .el-table th.el-table__cell { height: 42px; color: var(--hongfen-text-muted); font-size: 11px; font-weight: 600; }
 .el-table td.el-table__cell { padding: 8px 0; }
 .el-table .cell { overflow-wrap: anywhere; }
