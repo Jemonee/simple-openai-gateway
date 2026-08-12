@@ -24,7 +24,10 @@ const (
 	codexTitlePromptMarker     = "User prompt:"
 	codexAttachedPromptMarker  = "## My request for Codex:"
 	codexAttachedRequestMarker = "## My request:"
+	codexRequestMarker         = "My request:"
 	codexFilesMentionedMarker  = "# Files mentioned by the user:"
+	codexInAppBrowserStart     = "<in-app-browser-context"
+	codexInAppBrowserEnd       = "</in-app-browser-context>"
 	codexTitleMatchWindow      = 5 * time.Minute
 	codexTitleStartTolerance   = 30 * time.Second
 )
@@ -254,7 +257,7 @@ func codexTitleRequestPrompt(body []byte) (string, bool) {
 	if instruction == "" {
 		return "", false
 	}
-	for _, marker := range []string{codexTitlePromptMarker, "Original prompt:", "User request:", "Prompt:", "用户请求：", "用户问题："} {
+	for _, marker := range []string{codexTitlePromptMarker, "Original prompt:", "User request:", codexRequestMarker, "Prompt:", "用户请求：", "用户问题："} {
 		if markerIndex := strings.LastIndex(strings.ToLower(instruction), strings.ToLower(marker)); markerIndex >= 0 {
 			prompt := normalizeCodexPrompt(instruction[markerIndex+len(marker):])
 			if prompt != "" {
@@ -296,6 +299,7 @@ func normalizeCodexPrompt(value string) string {
 	if value == "" {
 		return ""
 	}
+	value = removeCodexInAppBrowserContext(value)
 
 	// User input can contain the transport envelope and the visible request in
 	// the same text part. Consume those wrappers repeatedly because Codex may
@@ -329,9 +333,25 @@ func normalizeCodexPrompt(value string) string {
 	return strings.Join(strings.Fields(value), " ")
 }
 
+func removeCodexInAppBrowserContext(value string) string {
+	for {
+		lower := strings.ToLower(value)
+		start := strings.Index(lower, codexInAppBrowserStart)
+		if start < 0 {
+			return value
+		}
+		endOffset := strings.Index(lower[start:], codexInAppBrowserEnd)
+		if endOffset < 0 {
+			return strings.TrimSpace(value[:start])
+		}
+		end := start + endOffset + len(codexInAppBrowserEnd)
+		value = value[:start] + " " + value[end:]
+	}
+}
+
 func consumeCodexRequestMarker(value string) (int, bool) {
 	trimmed := strings.TrimLeft(value, " \t\r\n")
-	for _, marker := range []string{codexAttachedPromptMarker, codexAttachedRequestMarker} {
+	for _, marker := range []string{codexAttachedPromptMarker, codexAttachedRequestMarker, codexRequestMarker} {
 		if strings.HasPrefix(trimmed, marker) {
 			return len(value) - len(trimmed) + len(marker), true
 		}
@@ -418,6 +438,9 @@ func isCodexSkillInvocation(value string) bool {
 
 func isReplaceableCodexSessionTitle(value string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(value))
+	if isCodexAmbientSessionTitle(normalized) {
+		return true
+	}
 	return strings.HasPrefix(normalized, "# files") ||
 		strings.HasPrefix(normalized, "files ment") ||
 		strings.HasPrefix(normalized, "<skill>") ||
@@ -467,7 +490,22 @@ func codexGeneratedTitle(responseBody []byte) string {
 	if json.Unmarshal([]byte(output), &result) != nil {
 		return ""
 	}
-	return truncateRunes(normalizeSessionName(result.Title), 80)
+	title := truncateRunes(normalizeSessionName(result.Title), 80)
+	if isCodexAmbientSessionTitle(title) {
+		return ""
+	}
+	return title
+}
+
+func isCodexAmbientSessionTitle(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.Trim(normalized, " .:：-_")
+	switch normalized {
+	case "in app", "in-app", "in app browser", "in-app browser":
+		return true
+	default:
+		return false
+	}
 }
 
 func responsesOutputText(body []byte) string {

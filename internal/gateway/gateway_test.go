@@ -2362,6 +2362,19 @@ func TestCodexTitleDetectionAcceptsSchemaVariantsAndFencedJSON(t *testing.T) {
 	if title := codexGeneratedTitle(response); title != "Routing dashboard improvements" {
 		t.Fatalf("generated title = %q", title)
 	}
+	ambientTitleResponse := []byte(`{"output_text":"{\"title\":\"In App\"}"}`)
+	if title := codexGeneratedTitle(ambientTitleResponse); title != "" {
+		t.Fatalf("ambient generated title = %q", title)
+	}
+
+	browserTitleBody := []byte(`{
+		"model":"title-model",
+		"text":{"format":{"type":"json_schema","name":"conversation_title_v2","schema":{"type":"object","properties":{"title":{"type":"string"}}}}},
+		"input":[{"role":"user","content":"<in-app-browser-context source=\"ambient-ui-state\">In app browser: current URL: https://example.test</in-app-browser-context>\n\nMy request:\n处理在线文档"}]
+	}`)
+	if prompt, isTitle := codexTitleRequestPrompt(browserTitleBody); !isTitle || prompt != "处理在线文档" {
+		t.Fatalf("in-app title prompt = %q, isTitle=%t", prompt, isTitle)
+	}
 }
 
 func TestRelayLogMetadata(t *testing.T) {
@@ -3777,6 +3790,7 @@ func TestRequestSessionNameUsesLatestUserText(t *testing.T) {
 		{name: "responses multiple skill links", body: `{"input":[{"role":"user","content":"[$one](/tmp/one/SKILL.md) [$two](/tmp/two/SKILL.md)\n真实请求内容"}]}`, want: "真实请求内容"},
 		{name: "responses skill block and attached marker", body: `{"input":[{"role":"user","content":"<skill>\n<name>one</name>\n</skill>\n# Files mentioned by the user:\n\n## note.txt: /tmp/note.txt\n\n## My request:\n处理这个文件"}]}`, want: "处理这个文件"},
 		{name: "responses punctuation skill invocation", body: `{"input":[{"role":"user","content":"$one: 处理这个问题"}]}`, want: "处理这个问题"},
+		{name: "responses in-app browser context", body: `{"input":[{"role":"user","content":"<in-app-browser-context source=\"ambient-ui-state\">\nThis is ambient browser state.\n\nIn app browser:\n- Current URL: https://example.test\n</in-app-browser-context>\n\nMy request:\n处理这个在线文档"}]}`, want: "处理这个在线文档"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -3799,6 +3813,7 @@ func TestSessionPayloadReplacesOnlySyntheticAutomaticTitle(t *testing.T) {
 	}{
 		{sessionID: "files-title", title: "# Files me", want: "真实用户请求"},
 		{sessionID: "skill-title", title: "<skill> <n", want: "真实用户请求"},
+		{sessionID: "ambient-title", title: "In App", want: "真实用户请求"},
 		{sessionID: "valid-title", title: "保留原始标题", want: "保留原始标题"},
 		{sessionID: "custom-title", title: "# Files me", custom: true, want: "# Files me"},
 	} {
