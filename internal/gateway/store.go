@@ -75,6 +75,9 @@ func (s *Store) migrate() error {
 		&ClientToken{},
 		&ClientTokenModel{},
 		&RelayRequestLog{},
+		&VerificationReport{},
+		&VerificationSession{},
+		&VerificationAttempt{},
 		&GatewayResource{},
 		&RequestResource{},
 		&RelaySessionState{},
@@ -560,6 +563,8 @@ func (s *Store) cleanupExpired() {
 		_ = s.db.Where("created_at < ?", detailCutoff).Delete(&RelayRequestLog{}).Error
 		_ = s.db.Where("updated_at < ?", detailCutoff).Delete(&RelaySessionState{}).Error
 		_ = s.db.Where("updated_at < ?", detailCutoff).Delete(&RelayChatSessionClaim{}).Error
+		verificationSessionIDs := s.db.Model(&VerificationSession{}).Select("id").Where("status <> ? AND finished_at < ?", "running", detailCutoff)
+		_ = s.db.Where("session_id IN (?)", verificationSessionIDs).Delete(&VerificationAttempt{}).Error
 	}
 	s.checkpointSQLiteWAL()
 }

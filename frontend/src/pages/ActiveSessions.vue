@@ -129,9 +129,10 @@ function contextWindowTooltip(session: CodexSessionSummary): string {
   return `${source}的 ${formatCompactNumber(session.contextWindowSampleCount)} 个自动压缩样本推断，主模型 ${model}`
 }
 
-function sessionClientSource(session: CodexSessionSummary): { label: string; kind: 'codex' | 'copilot' | 'other' } {
+function sessionClientSource(session: CodexSessionSummary): { label: string; kind: 'codex' | 'copilot' | 'web-chat' | 'other' } {
   const clientKind = session.clientKind?.trim().toLowerCase() ?? ''
   const sessionSource = session.sessionSource?.trim().toLowerCase() ?? ''
+  if (clientKind === 'web_chat' || sessionSource === 'web_chat') return { label: '网页聊天', kind: 'web-chat' }
   if (clientKind === 'copilot' || sessionSource.startsWith('copilot')) return { label: 'Copilot', kind: 'copilot' }
   if (clientKind === 'codex' || sessionSource === 'prompt_cache_key' || sessionSource.startsWith('client_metadata.') || sessionSource.startsWith('metadata.')) {
     return { label: 'Codex', kind: 'codex' }
@@ -395,6 +396,7 @@ onMounted(() => {
 .session-client i { width: 6px; height: 6px; border-radius: 50%; background: var(--hongfen-text-subtle); }
 .session-identity.is-codex .session-client i { background: var(--hongfen-success); }
 .session-identity.is-copilot .session-client i { background: var(--hongfen-primary); }
+.session-identity.is-web-chat .session-client i { background: var(--hongfen-warning); }
 .session-meta { display: flex; min-width: 0; align-items: center; gap: 8px; }
 .session-meta small { min-width: 0; flex: 1; }
 .session-origin { display: inline-flex; flex: none; align-items: center; gap: 5px; padding: 2px 6px; border: 1px solid var(--hongfen-border); color: var(--hongfen-text-muted); background: color-mix(in srgb, var(--hongfen-surface) 88%, transparent); font-size: 10px; line-height: 1.2; }

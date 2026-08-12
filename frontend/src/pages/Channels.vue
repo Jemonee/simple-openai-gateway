@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import type { CSSProperties } from 'vue'
-import { Connection, Delete, Edit, Plus, Refresh, RefreshLeft, RefreshRight, Search, Unlock } from '@element-plus/icons-vue'
+import { useRouter } from 'vue-router'
+import { Aim, Connection, Delete, Edit, Plus, Refresh, RefreshLeft, RefreshRight, Search, Unlock } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import ChannelLatencySparkline from '@/components/ChannelLatencySparkline.vue'
 import type {
@@ -51,6 +52,7 @@ const quickProgressMessages = [
   '渠道设置已完成，即将关闭…',
 ]
 const loading = ref(true)
+const router = useRouter()
 const saving = ref(false)
 const errorMessage = ref('')
 const channels = ref<Channel[]>([])
@@ -704,6 +706,10 @@ async function testChannel(channel: Channel) {
   }
 }
 
+function openChannelVerification(channel: Channel) {
+  void router.push({ name: 'channel-verification', query: { channelId: String(channel.id) } })
+}
+
 async function resetChannelCircuit(channel: Channel) {
   try {
     await ElMessageBox.confirm(
@@ -860,6 +866,7 @@ onUnmounted(() => {
           <template #default="scope">
             <div class="table-actions">
               <el-tooltip v-if="hasCircuitMark(scope.row)" content="手动恢复熔断渠道" placement="top"><el-button class="table-action-button reset-circuit-button" text type="warning" :icon="Unlock" :loading="resettingCircuitChannelId === scope.row.id" :disabled="deletingChannelId === scope.row.id || testingChannelId === scope.row.id" aria-label="手动恢复熔断渠道" @click="resetChannelCircuit(scope.row)" /></el-tooltip>
+              <el-tooltip content="验证渠道能力" placement="top"><el-button class="table-action-button" text :icon="Aim" :disabled="deletingChannelId === scope.row.id || scope.row.models.length === 0" aria-label="验证渠道能力" @click="openChannelVerification(scope.row)" /></el-tooltip>
               <el-tooltip content="测试渠道连接" placement="top"><el-button class="table-action-button" text :icon="Connection" :loading="testingChannelId === scope.row.id" :disabled="deletingChannelId === scope.row.id" aria-label="测试渠道连接" @click="testChannel(scope.row)" /></el-tooltip>
               <el-tooltip content="编辑渠道" placement="top"><el-button class="table-action-button" text :icon="Edit" aria-label="编辑渠道" @click="resetForm(scope.row)" /></el-tooltip>
               <el-tooltip content="删除渠道" placement="top"><el-button class="table-action-button" text type="danger" :icon="Delete" :loading="deletingChannelId === scope.row.id" :disabled="testingChannelId === scope.row.id" aria-label="删除渠道" @click="deleteChannel(scope.row)" /></el-tooltip>

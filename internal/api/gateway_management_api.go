@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Jemonee/simple-openai-gateway/internal/gateway"
@@ -16,9 +17,10 @@ import (
 
 type GatewayManagementApi struct {
 	pkgApi.BaseApi
-	management *gateway.ManagementService
-	security   *AdminSecurity
-	estimator  *gateway.TokenEstimator
+	management   *gateway.ManagementService
+	verification *gateway.VerificationService
+	security     *AdminSecurity
+	estimator    *gateway.TokenEstimator
 }
 
 type channelTestView struct {
@@ -34,8 +36,8 @@ type tokenCountView struct {
 	Counts []int64 `json:"counts"`
 }
 
-func NewGatewayManagementApi(management *gateway.ManagementService, security *AdminSecurity, estimator *gateway.TokenEstimator) *GatewayManagementApi {
-	return &GatewayManagementApi{management: management, security: security, estimator: estimator}
+func NewGatewayManagementApi(management *gateway.ManagementService, verification *gateway.VerificationService, security *AdminSecurity, estimator *gateway.TokenEstimator) *GatewayManagementApi {
+	return &GatewayManagementApi{management: management, verification: verification, security: security, estimator: estimator}
 }
 
 func (a *GatewayManagementApi) Register(router *gin.RouterGroup) {
@@ -70,6 +72,11 @@ func (a *GatewayManagementApi) Register(router *gin.RouterGroup) {
 	admin.PUT("/channels/:id/models", a.replaceChannelModels)
 	admin.POST("/channels/discover-models", a.discoverChannelModels)
 	admin.POST("/channels/:id/test", a.testChannel)
+	admin.GET("/verifications", a.verificationReports)
+	admin.GET("/verification-sessions", a.verificationSessions)
+	admin.GET("/verification-sessions/:id", a.verificationSession)
+	admin.GET("/verifications/:id", a.verificationReport)
+	admin.POST("/verifications", a.verifyChannel)
 
 	admin.GET("/models", a.listModels)
 	admin.POST("/models", a.createModel)
@@ -81,6 +88,73 @@ func (a *GatewayManagementApi) Register(router *gin.RouterGroup) {
 	admin.PUT("/tokens/:id", a.updateToken)
 	admin.POST("/tokens/:id/rotate", a.rotateToken)
 	admin.DELETE("/tokens/:id", a.deleteToken)
+}
+
+func (a *GatewayManagementApi) verifyChannel(c *gin.Context) {
+	var input gateway.VerificationRequest
+	if !bindManagementJSON(c, &input) {
+		return
+	}
+	report, err := a.verification.VerifyChannel(c.Request.Context(), input)
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, common.S(report))
+}
+
+func (a *GatewayManagementApi) verificationReports(c *gin.Context) {
+	query := gateway.VerificationReportQuery{}
+	query.ChannelID, _ = strconv.ParseUint(c.Query("channelId"), 10, 64)
+	query.ModelID, _ = strconv.ParseUint(c.Query("modelId"), 10, 64)
+	query.Page, _ = strconv.Atoi(c.Query("page"))
+	query.PageSize, _ = strconv.Atoi(c.Query("pageSize"))
+	page, err := a.verification.ListReports(c.Request.Context(), query)
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, common.S(page))
+}
+
+func (a *GatewayManagementApi) verificationSessions(c *gin.Context) {
+	query := gateway.VerificationSessionQuery{}
+	query.ChannelID, _ = strconv.ParseUint(c.Query("channelId"), 10, 64)
+	query.ModelID, _ = strconv.ParseUint(c.Query("modelId"), 10, 64)
+	query.Page, _ = strconv.Atoi(c.Query("page"))
+	query.PageSize, _ = strconv.Atoi(c.Query("pageSize"))
+	page, err := a.verification.ListSessions(c.Request.Context(), query)
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, common.S(page))
+}
+
+func (a *GatewayManagementApi) verificationSession(c *gin.Context) {
+	if strings.TrimSpace(c.Param("id")) == "" {
+		c.JSON(http.StatusBadRequest, common.F[any](http.StatusBadRequest, "验证会话 ID 无效"))
+		return
+	}
+	detail, err := a.verification.Session(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, common.S(detail))
+}
+
+func (a *GatewayManagementApi) verificationReport(c *gin.Context) {
+	if strings.TrimSpace(c.Param("id")) == "" {
+		c.JSON(http.StatusBadRequest, common.F[any](http.StatusBadRequest, "验证报告 ID 无效"))
+		return
+	}
+	report, err := a.verification.Report(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, common.S(report))
 }
 
 func (a *GatewayManagementApi) codexConfiguration(c *gin.Context) {

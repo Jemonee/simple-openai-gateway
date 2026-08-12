@@ -26,6 +26,7 @@ func InitializeApp() *app.ApplicationHolder {
 		gateway.NewManagementService,
 		gateway.NewClientAccessService,
 		gateway.NewTokenEstimator,
+		gateway.NewVerificationService,
 		gateway.NewRouter,
 		gateway.NewRelayService,
 
@@ -34,6 +35,7 @@ func InitializeApp() *app.ApplicationHolder {
 		api.NewAdminSecurity,
 		api.NewAdminApi,
 		api.NewGatewayManagementApi,
+		api.NewWebChatApi,
 		api.NewOpenAIRelayApi,
 		api.NewSettingsApi,
 		apiProviders.ProvideApis,

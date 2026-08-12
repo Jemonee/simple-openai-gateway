@@ -16,9 +16,10 @@ import (
 )
 
 var (
-	ErrModelNotFound       = errors.New("requested model does not exist or is disabled")
-	ErrNoAvailableChannel  = errors.New("no channel is currently available for this model")
-	ErrAffinityUnavailable = errors.New("the channel for previous_response_id is unavailable")
+	ErrModelNotFound            = errors.New("requested model does not exist or is disabled")
+	ErrNoAvailableChannel       = errors.New("no channel is currently available for this model")
+	ErrPinnedChannelUnavailable = errors.New("the pinned channel is unavailable for this model")
+	ErrAffinityUnavailable      = errors.New("the channel for previous_response_id is unavailable")
 )
 
 type RouteCandidate struct {
@@ -102,6 +103,10 @@ type RouteSelection struct {
 	Decision            *RouteDecision
 }
 
+type RouteOptions struct {
+	PinnedChannelID uint64
+}
+
 type weightedPriorityKey struct {
 	ModelID  uint64
 	Priority int
@@ -146,6 +151,10 @@ func secureIntn(limit int) int {
 }
 
 func (r *Router) Plan(ctx context.Context, token *ClientToken, modelName string, inputTokens int64, declaredOutput int64, previousResponseID string, sessionKey string) (*RoutePlan, error) {
+	return r.PlanWithOptions(ctx, token, modelName, inputTokens, declaredOutput, previousResponseID, sessionKey, RouteOptions{})
+}
+
+func (r *Router) PlanWithOptions(ctx context.Context, token *ClientToken, modelName string, inputTokens int64, declaredOutput int64, previousResponseID string, sessionKey string, options RouteOptions) (*RoutePlan, error) {
 	var model GatewayModel
 	if err := r.store.db.WithContext(ctx).Where("name = ? AND enabled = ?", modelName, true).First(&model).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -163,6 +172,30 @@ func (r *Router) Plan(ctx context.Context, token *ClientToken, modelName string,
 	outputTokens := declaredOutput
 	if outputTokens <= 0 {
 		outputTokens = r.recentOutputMedian(ctx, model.Name)
+	}
+	if options.PinnedChannelID != 0 {
+		candidates, err := r.availableCandidates(ctx, model.ID, model.RoutingStrategy, inputTokens, outputTokens)
+		if err != nil {
+			return nil, err
+		}
+		pinned := make([]RouteCandidate, 0, 1)
+		for _, candidate := range candidates {
+			if candidate.Channel.ID == options.PinnedChannelID {
+				pinned = append(pinned, candidate)
+			}
+		}
+		if len(pinned) == 0 {
+			return nil, ErrPinnedChannelUnavailable
+		}
+		return &RoutePlan{
+			Model:      model,
+			Candidates: pinned,
+			InitialSelection: RouteSelection{
+				Reason:   SelectionReasonManualPin,
+				Detail:   pinned[0].Channel.Name,
+				Decision: deterministicRouteDecision(model.RoutingStrategy, "manual_pin", pinned),
+			},
+		}, nil
 	}
 	var candidates []RouteCandidate
 	modelSwitched := previousSessionRoute != nil &&

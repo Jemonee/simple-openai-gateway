@@ -244,6 +244,191 @@ export interface CircuitRecordPage {
   pageSize: number
 }
 
+export type VerificationMode = 'quick' | 'standard' | 'full'
+export type VerificationVerdict = 'passed' | 'marginal' | 'failed'
+
+export interface VerificationCheckResult {
+  /** Stable detector identifier used for filtering and future baseline comparisons. */
+  name: string
+  /** Human-readable detector label. */
+  label: string
+  /** Detector category such as protocol, capability, billing, or identity. */
+  category: string
+  /** Detector lifecycle status. */
+  status: 'passed' | 'failed' | 'skipped'
+  /** Detector score from 0 to 100 before weighted aggregation. */
+  score: number
+  /** Weight used by the report-level score. */
+  weight: number
+  /** Short result explanation safe to display in the console. */
+  summary: string
+  /** Whether a failed result should cap the overall verdict at marginal. */
+  critical: boolean
+  /** Structured, redacted evidence captured by the detector. */
+  evidence?: Record<string, unknown>
+}
+
+export interface VerificationReport {
+  /** Persistent verification run identifier. */
+  id: string
+  /** Separate persisted verification session containing per-call evidence. */
+  sessionId: string
+  /** Channel tested by this run. */
+  channelId: number
+  /** Channel name snapshot at run time. */
+  channelName: string
+  /** Public model mapping tested by this run. */
+  modelId: number
+  /** Public model name snapshot. */
+  publicModel: string
+  /** Upstream model name sent by the detector. */
+  upstreamModel: string
+  /** Detector set used for the run. */
+  mode: VerificationMode
+  /** Weighted score after skipped checks are removed from the denominator. */
+  score: number
+  /** Report-level verdict derived from score and critical failures. */
+  verdict: VerificationVerdict
+  /** Short report summary. */
+  summary: string
+  /** Number of upstream detector calls in this run. */
+  requestCount: number
+  /** Aggregate input tokens observed or estimated for detector calls. */
+  inputTokens: number
+  /** Aggregate output tokens observed or estimated for detector calls. */
+  outputTokens: number
+  /** Aggregate locally estimated cost in micro-USD. */
+  estimatedCostMicros: number
+  /** Aggregate upstream-reported or fallback cost in micro-USD. */
+  upstreamCostMicros: number
+  /** Individual detector outcomes and redacted evidence. */
+  checks: VerificationCheckResult[]
+  /** Run start timestamp in RFC 3339 format. */
+  startedAt: string
+  /** Run completion timestamp in RFC 3339 format. */
+  finishedAt: string
+}
+
+export type VerificationSessionStatus = 'running' | 'completed' | 'failed'
+
+export interface VerificationSession {
+  /** Persistent verification session identifier. */
+  id: string
+  /** Channel tested by this session. */
+  channelId: number
+  /** Channel name snapshot. */
+  channelName: string
+  /** Public model mapping tested by this session. */
+  modelId: number
+  /** Public model name snapshot. */
+  publicModel: string
+  /** Model identifier sent upstream. */
+  upstreamModel: string
+  /** Detector set used for the run. */
+  mode: VerificationMode
+  /** Session lifecycle state. */
+  status: VerificationSessionStatus
+  /** Weighted detector score. */
+  score: number
+  /** Final session verdict. */
+  verdict: VerificationVerdict | ''
+  /** Short session summary or failure message. */
+  summary: string
+  /** Total upstream detector calls. */
+  requestCount: number
+  /** Successful upstream detector calls. */
+  successCount: number
+  /** Aggregate input tokens. */
+  inputTokens: number
+  /** Aggregate output tokens. */
+  outputTokens: number
+  /** Aggregate cached input tokens. */
+  cachedTokens: number
+  /** Aggregate cache-write tokens. */
+  cacheWriteTokens: number
+  /** Aggregate locally estimated cost in micro-USD. */
+  estimatedCostMicros: number
+  /** Aggregate upstream-reported or fallback cost in micro-USD. */
+  upstreamCostMicros: number
+  /** Failure message when status is failed. */
+  errorMessage: string
+  /** Session start timestamp. */
+  startedAt: string
+  /** Session completion timestamp, or empty while running. */
+  finishedAt: string
+}
+
+export interface VerificationAttempt {
+  /** Persistent call record identifier. */
+  id: string
+  /** One-based call order within the session. */
+  sequence: number
+  /** Detector that initiated this call. */
+  detectorName: string
+  /** HTTP method used for the probe. */
+  method: string
+  /** Upstream path used for the probe. */
+  path: string
+  /** Whether the call used SSE streaming. */
+  stream: boolean
+  /** Bounded JSON request body. */
+  requestBody: string
+  /** Whether the request body was truncated. */
+  requestBodyTruncated: boolean
+  /** Bounded response or SSE body. */
+  responseBody: string
+  /** Whether the response body was truncated. */
+  responseBodyTruncated: boolean
+  /** Response content type. */
+  contentType: string
+  /** HTTP response status, zero for transport failures. */
+  statusCode: number
+  /** Call outcome. */
+  outcome: 'success' | 'failed'
+  /** Transport or response error text. */
+  errorMessage: string
+  /** Input tokens observed or estimated. */
+  inputTokens: number
+  /** Output tokens observed or estimated. */
+  outputTokens: number
+  /** Cached input tokens. */
+  cachedTokens: number
+  /** Cache-write tokens. */
+  cacheWriteTokens: number
+  /** Locally estimated cost in micro-USD. */
+  estimatedCostMicros: number
+  /** Upstream-reported or fallback cost in micro-USD. */
+  upstreamCostMicros: number
+  /** How the cost was sourced. */
+  costSource: string
+  /** How usage was sourced. */
+  usageSource: string
+  /** Round-trip latency in milliseconds. */
+  latencyMs: number
+  /** Call start timestamp. */
+  startedAt: string
+  /** Call finish timestamp. */
+  finishedAt: string
+}
+
+export interface VerificationSessionDetail {
+  /** Persisted session summary. */
+  session: VerificationSession
+  /** Ordered detector calls. */
+  attempts: VerificationAttempt[]
+}
+
+export interface VerificationReportPage {
+  /** Reports matching the active channel and model filters. */
+  items: VerificationReport[]
+  /** Total matching reports. */
+  total: number
+  /** One-based page number. */
+  page: number
+  /** Maximum reports returned in this page. */
+  pageSize: number
+}
+
 export interface ChannelModelDiscoveryRequest {
   /** Existing channel identifier, or zero when testing an unsaved channel. */
   channelId: number
@@ -1187,4 +1372,45 @@ export interface ApplicationSettings {
     /** Upstream model IDs enabled automatically when a new channel is discovered. */
     commonModelNames: string[]
   }
+}
+
+export interface WebChatCompletionMessage {
+  /** OpenAI-compatible conversation role sent as chat history. */
+  role: 'system' | 'user' | 'assistant'
+  /** Plain-text message content retained by the browser conversation. */
+  content: string
+}
+
+export interface WebChatCompletionRequest {
+  /** Stable browser-generated identifier used to group gateway and active-session logs. */
+  sessionId: string
+  /** Public gateway model selected for this conversation. */
+  model: string
+  /** Explicit channel to use, or zero to let the gateway route automatically. */
+  channelId: number
+  /** Complete conversation history sent to Chat Completions. */
+  messages: WebChatCompletionMessage[]
+}
+
+export interface WebChatCompletionResponse {
+  /** Gateway request identifier linking this turn to the call log. */
+  requestId: string
+  /** Assistant reply extracted from the upstream Chat Completions response. */
+  content: string
+  /** Public model requested by the browser conversation. */
+  model: string
+  /** Upstream channel selected for the completed turn. */
+  channelId: number
+  /** Upstream channel name captured in the attempt log. */
+  channelName: string
+  /** Upstream model identifier used by the selected channel mapping. */
+  upstreamModel: string
+  /** Input tokens reported or estimated for the completed turn. */
+  inputTokens: number
+  /** Output tokens reported or estimated for the completed turn. */
+  outputTokens: number
+  /** Cached input tokens reported for the completed turn. */
+  cachedTokens: number
+  /** Estimated gateway cost in micro-USD. */
+  estimatedCostMicros: number
 }

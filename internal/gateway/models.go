@@ -11,6 +11,7 @@ const (
 	RoutingLowestCost                             = "lowest_cost"
 	RoutingLowestLatency                          = "lowest_latency"
 	SelectionReasonInitialRoute                   = "initial_route"
+	SelectionReasonManualPin                      = "manual_pin"
 	SelectionReasonResponseAffinity               = "response_affinity"
 	SelectionReasonSessionAffinity                = "session_affinity"
 	SelectionReasonModelSwitch                    = "model_switch"
@@ -186,6 +187,86 @@ type RelayRequestLog struct {
 	Stream                bool      `gorm:"not null;default:false" json:"stream"`
 	ErrorCode             string    `gorm:"size:80" json:"errorCode"`
 	CreatedAt             time.Time `gorm:"index" json:"createdAt"`
+}
+
+// VerificationReport stores detector evidence without retaining probe prompts,
+// responses, or the upstream API key.
+type VerificationReport struct {
+	ID                  string    `gorm:"size:36;primaryKey" json:"id"`
+	SessionID           string    `gorm:"size:36;index" json:"sessionId"`
+	ChannelID           uint64    `gorm:"index;not null" json:"channelId"`
+	ChannelName         string    `gorm:"size:120;not null" json:"channelName"`
+	ModelID             uint64    `gorm:"index;not null" json:"modelId"`
+	PublicModel         string    `gorm:"size:160;not null" json:"publicModel"`
+	UpstreamModel       string    `gorm:"size:200;not null" json:"upstreamModel"`
+	Mode                string    `gorm:"size:16;not null" json:"mode"`
+	Score               float64   `gorm:"not null" json:"score"`
+	Verdict             string    `gorm:"size:16;index;not null" json:"verdict"`
+	Summary             string    `gorm:"size:512;not null" json:"summary"`
+	RequestCount        int64     `gorm:"not null;default:0" json:"requestCount"`
+	InputTokens         int64     `gorm:"not null;default:0" json:"inputTokens"`
+	OutputTokens        int64     `gorm:"not null;default:0" json:"outputTokens"`
+	EstimatedCostMicros int64     `gorm:"not null;default:0" json:"estimatedCostMicros"`
+	UpstreamCostMicros  int64     `gorm:"not null;default:0" json:"upstreamCostMicros"`
+	ChecksJSON          string    `gorm:"type:text;not null" json:"-"`
+	StartedAt           time.Time `gorm:"index;not null" json:"startedAt"`
+	FinishedAt          time.Time `gorm:"index;not null" json:"finishedAt"`
+}
+
+// VerificationSession stores the auditable lifecycle and aggregate usage for one channel verification run.
+type VerificationSession struct {
+	ID                  string    `gorm:"size:36;primaryKey" json:"id"`
+	ChannelID           uint64    `gorm:"index;not null" json:"channelId"`
+	ChannelName         string    `gorm:"size:120;not null" json:"channelName"`
+	ModelID             uint64    `gorm:"index;not null" json:"modelId"`
+	PublicModel         string    `gorm:"size:160;not null" json:"publicModel"`
+	UpstreamModel       string    `gorm:"size:200;not null" json:"upstreamModel"`
+	Mode                string    `gorm:"size:16;not null" json:"mode"`
+	Status              string    `gorm:"size:16;index;not null" json:"status"`
+	Score               float64   `gorm:"not null;default:0" json:"score"`
+	Verdict             string    `gorm:"size:16;index" json:"verdict"`
+	Summary             string    `gorm:"size:512" json:"summary"`
+	RequestCount        int64     `gorm:"not null;default:0" json:"requestCount"`
+	SuccessCount        int64     `gorm:"not null;default:0" json:"successCount"`
+	InputTokens         int64     `gorm:"not null;default:0" json:"inputTokens"`
+	OutputTokens        int64     `gorm:"not null;default:0" json:"outputTokens"`
+	CachedTokens        int64     `gorm:"not null;default:0" json:"cachedTokens"`
+	CacheWriteTokens    int64     `gorm:"not null;default:0" json:"cacheWriteTokens"`
+	EstimatedCostMicros int64     `gorm:"not null;default:0" json:"estimatedCostMicros"`
+	UpstreamCostMicros  int64     `gorm:"not null;default:0" json:"upstreamCostMicros"`
+	ErrorMessage        string    `gorm:"size:512" json:"errorMessage"`
+	StartedAt           time.Time `gorm:"index;not null" json:"startedAt"`
+	FinishedAt          time.Time `gorm:"index" json:"finishedAt"`
+}
+
+// VerificationAttempt stores bounded request/response evidence for one detector call.
+type VerificationAttempt struct {
+	ID                    string    `gorm:"size:36;primaryKey" json:"id"`
+	SessionID             string    `gorm:"size:36;index;not null" json:"sessionId"`
+	Sequence              int       `gorm:"not null" json:"sequence"`
+	DetectorName          string    `gorm:"size:80;index;not null" json:"detectorName"`
+	Method                string    `gorm:"size:8;not null" json:"method"`
+	Path                  string    `gorm:"size:120;not null" json:"path"`
+	Stream                bool      `gorm:"not null;default:false" json:"stream"`
+	RequestBody           string    `gorm:"type:text" json:"requestBody"`
+	RequestBodyTruncated  bool      `gorm:"not null;default:false" json:"requestBodyTruncated"`
+	ResponseBody          string    `gorm:"type:text" json:"responseBody"`
+	ResponseBodyTruncated bool      `gorm:"not null;default:false" json:"responseBodyTruncated"`
+	ContentType           string    `gorm:"size:160" json:"contentType"`
+	StatusCode            int       `gorm:"index;not null" json:"statusCode"`
+	Outcome               string    `gorm:"size:16;index;not null" json:"outcome"`
+	ErrorMessage          string    `gorm:"size:512" json:"errorMessage"`
+	InputTokens           int64     `gorm:"not null;default:0" json:"inputTokens"`
+	OutputTokens          int64     `gorm:"not null;default:0" json:"outputTokens"`
+	CachedTokens          int64     `gorm:"not null;default:0" json:"cachedTokens"`
+	CacheWriteTokens      int64     `gorm:"not null;default:0" json:"cacheWriteTokens"`
+	EstimatedCostMicros   int64     `gorm:"not null;default:0" json:"estimatedCostMicros"`
+	UpstreamCostMicros    int64     `gorm:"not null;default:0" json:"upstreamCostMicros"`
+	CostSource            string    `gorm:"size:32" json:"costSource"`
+	UsageSource           string    `gorm:"size:32" json:"usageSource"`
+	LatencyMS             int64     `gorm:"not null;default:0" json:"latencyMs"`
+	StartedAt             time.Time `gorm:"index;not null" json:"startedAt"`
+	FinishedAt            time.Time `gorm:"index;not null" json:"finishedAt"`
 }
 
 func (log *RelayRequestLog) BeforeCreate(_ *gorm.DB) error {

@@ -216,7 +216,7 @@ func (s *RelayService) RelayWithTrace(ctx context.Context, writer http.ResponseW
 	trace.Record(RelayStageTokenEstimation, RelayStepCategoryGateway, 0, tokenEstimateStarted, nil, fmt.Sprintf("input_tokens=%d", execution.inputTokens))
 
 	routeStarted := time.Now()
-	plan, err := s.router.Plan(ctx, token, payload.Model, execution.inputTokens, payload.DeclaredMaxOutput, payload.PreviousResponseID, payload.SessionKey)
+	plan, err := s.router.PlanWithOptions(ctx, token, payload.Model, execution.inputTokens, payload.DeclaredMaxOutput, payload.PreviousResponseID, payload.SessionKey, RouteOptions{PinnedChannelID: payload.PinnedChannelID})
 	if err != nil {
 		trace.Record(RelayStageRoutePlanning, RelayStepCategoryGateway, 0, routeStarted, err, "model="+payload.Model)
 		publicErr := routePublicError(err)
@@ -320,6 +320,8 @@ func routePublicError(err error) *PublicError {
 		return &PublicError{Status: http.StatusServiceUnavailable, Message: "The channel associated with previous_response_id is unavailable.", Type: "api_error", Code: "response_affinity_unavailable"}
 	case errors.Is(err, ErrNoAvailableChannel):
 		return &PublicError{Status: http.StatusServiceUnavailable, Message: "No upstream channel is currently available for this model.", Type: "api_error", Code: "no_available_channel"}
+	case errors.Is(err, ErrPinnedChannelUnavailable):
+		return &PublicError{Status: http.StatusServiceUnavailable, Message: "The pinned channel is not available for the requested model.", Type: "api_error", Code: "pinned_channel_unavailable"}
 	default:
 		return &PublicError{Status: http.StatusInternalServerError, Message: "The gateway could not route this request.", Type: "api_error", Code: "gateway_error"}
 	}

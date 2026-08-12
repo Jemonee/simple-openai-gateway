@@ -11,6 +11,7 @@ type RelayPayload struct {
 	values                map[string]any
 	Model                 string
 	Stream                bool
+	PinnedChannelID       uint64
 	PreviousResponseID    string
 	SessionKey            string
 	SessionSource         string
@@ -23,6 +24,21 @@ type RelayPayload struct {
 	CompactionTrigger     string
 	RequestParametersJSON string
 	DeclaredMaxOutput     int64
+}
+
+func (p *RelayPayload) ConfigureSession(sessionID string, sessionSource string, clientKind string, threadSource string) {
+	if p == nil {
+		return
+	}
+	p.SessionKey = truncateRunes(strings.TrimSpace(sessionID), 512)
+	p.SessionSource = truncateRunes(strings.TrimSpace(sessionSource), 48)
+	if p.SessionSource == "" {
+		p.SessionSource = sessionUnavailable
+	}
+	p.LogSessionKey = p.SessionKey
+	p.LogSessionSource = p.SessionSource
+	p.ClientKind = truncateRunes(strings.TrimSpace(clientKind), 32)
+	p.ThreadSource = normalizeCodexThreadSource(threadSource)
 }
 
 func ParseRelayPayload(data []byte) (*RelayPayload, error) {

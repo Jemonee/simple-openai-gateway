@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	agentClientKindCodex = "codex"
-	sessionUnavailable   = "unavailable"
+	agentClientKindCodex   = "codex"
+	agentClientKindWebChat = "web_chat"
+	sessionUnavailable     = "unavailable"
 )
 
 type agentSessionRequest struct {
@@ -78,10 +79,13 @@ func (codexAgentSessionResolver) Match(agentSessionRequest) bool {
 
 func (codexAgentSessionResolver) Resolve(_ context.Context, _ *Store, request agentSessionRequest) (agentSessionResolution, error) {
 	identity := agentSessionIdentity{
-		ID:     request.Payload.SessionKey,
-		Source: request.Payload.SessionSource,
+		ID:         request.Payload.SessionKey,
+		Source:     request.Payload.SessionSource,
+		ClientKind: request.Payload.ClientKind,
 	}
-	if codexClientRequest(request.Headers) {
+	if identity.ClientKind != "" {
+		identity.ClientFingerprint = agentClientFingerprint(identity.ClientKind, request.Headers)
+	} else if codexClientRequest(request.Headers) {
 		identity.ClientKind = agentClientKindCodex
 		identity.ClientFingerprint = agentClientFingerprint(agentClientKindCodex, request.Headers)
 	}
