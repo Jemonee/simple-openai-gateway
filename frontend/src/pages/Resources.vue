@@ -14,7 +14,8 @@ const errorMessage = ref('')
 const resources = ref<ResourceCatalogItem[]>([])
 const total = ref(0)
 const pagination = reactive({ page: 1, pageSize: 50 })
-const filters = reactive({ search: '', kind: '', sensitive: '' })
+const filters = reactive({ search: '', kind: '', sensitive: '', lastSeenBeforeDays: '' })
+const customLastSeenDays = ref<number | undefined>()
 const detailOpen = ref(false)
 const detailLoading = ref(false)
 const detail = ref<ResourceDetail | null>(null)
@@ -26,6 +27,7 @@ const kindOptions = [
   { value: 'data', label: '内嵌资源', icon: Collection },
   { value: 'reference', label: '其他', icon: Tickets },
 ]
+const lastSeenBeforeOptions = [7, 15, 30, 90, 180, 365]
 
 const detailTitle = computed(() => {
   if (!detail.value) return '资源详情'
@@ -55,6 +57,8 @@ function buildQuery(): URLSearchParams {
   if (filters.search.trim()) query.set('search', filters.search.trim())
   if (filters.kind) query.set('kind', filters.kind)
   if (filters.sensitive) query.set('sensitive', filters.sensitive)
+  if (filters.lastSeenBeforeDays && filters.lastSeenBeforeDays !== 'custom') query.set('lastSeenBeforeDays', filters.lastSeenBeforeDays)
+  if (filters.lastSeenBeforeDays === 'custom' && customLastSeenDays.value) query.set('lastSeenBeforeDays', String(customLastSeenDays.value))
   return query
 }
 
@@ -73,12 +77,17 @@ async function loadResources() {
 }
 
 function searchResources() {
+  if (filters.lastSeenBeforeDays === 'custom' && (!Number.isInteger(customLastSeenDays.value) || (customLastSeenDays.value ?? 0) <= 0)) {
+    ElMessage.error('最后发现时间天数必须为正整数')
+    return
+  }
   pagination.page = 1
   void loadResources()
 }
 
 function resetResources() {
-  Object.assign(filters, { search: '', kind: '', sensitive: '' })
+  Object.assign(filters, { search: '', kind: '', sensitive: '', lastSeenBeforeDays: '' })
+  customLastSeenDays.value = undefined
   pagination.page = 1
   void loadResources()
 }
@@ -125,6 +134,7 @@ onMounted(loadResources)
       <el-input v-model="filters.search" clearable placeholder="名称、引用地址、SHA-256" @keyup.enter="searchResources" />
       <el-select v-model="filters.kind" clearable placeholder="全部类型"><el-option v-for="option in kindOptions" :key="option.value" :label="option.label" :value="option.value" /></el-select>
       <el-select v-model="filters.sensitive" clearable placeholder="全部敏感状态"><el-option label="仅敏感资源" value="true" /><el-option label="仅普通资源" value="false" /></el-select>
+      <div class="last-seen-filter"><el-select v-model="filters.lastSeenBeforeDays" placeholder="最后发现时间"><el-option label="全部时间" value="" /><el-option v-for="days in lastSeenBeforeOptions" :key="days" :label="`${days} 天之前`" :value="String(days)" /><el-option label="自定义天数" value="custom" /></el-select><el-input-number v-if="filters.lastSeenBeforeDays === 'custom'" v-model="customLastSeenDays" :min="1" :max="36500" controls-position="right" placeholder="天数" /></div>
       <div class="filter-actions"><el-button :icon="RefreshLeft" :disabled="loading" @click="resetResources">重置</el-button><el-button type="primary" :icon="Search" :loading="loading" @click="searchResources">查询</el-button></div>
     </section>
 
@@ -167,7 +177,10 @@ onMounted(loadResources)
 
 <style scoped>
 .resources-page { height: 100%; min-height: 0; grid-template-rows: auto auto minmax(320px, 1fr); overflow: hidden; padding-bottom: 16px; }
-.resources-filter-bar { grid-template-columns: minmax(260px, 1.4fr) repeat(2, minmax(160px, .7fr)) auto; }
+.resources-filter-bar { grid-template-columns: minmax(220px, 1.4fr) repeat(2, minmax(150px, .7fr)) minmax(180px, .9fr) auto; }
+.last-seen-filter { display: flex; min-width: 0; gap: 8px; }
+.last-seen-filter .el-select { min-width: 0; flex: 1 1 auto; }
+.last-seen-filter .el-input-number { width: 112px; flex: 0 0 112px; }
 .resource-table-panel { display: flex; min-height: 320px; flex-direction: column; }
 .resource-table-toolbar { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 48px; padding: 12px 16px; border-bottom: 1px solid var(--hongfen-border); }
 .resource-table-toolbar span { color: var(--hongfen-text-muted); font-size: 11px; }
@@ -200,5 +213,5 @@ onMounted(loadResources)
 .catalog-browser-preview img, .catalog-browser-preview video { max-width: 100%; max-height: 280px; margin: auto; object-fit: contain; }
 .catalog-browser-preview iframe { width: 100%; min-height: 270px; border: 0; background: var(--hongfen-surface); }
 .catalog-browser-preview audio { width: 100%; margin: auto; }
-@media (max-width: 800px) { .resources-page { height: auto; min-height: 100%; overflow: visible; } .resources-filter-bar { grid-template-columns: 1fr; } .resource-detail-summary { grid-template-columns: repeat(2, 1fr); } .resource-detail-summary > div:nth-child(2) { border-right: 0; } .resource-detail-summary > div:nth-child(-n + 2) { border-bottom: 1px solid var(--hongfen-border); } }
+@media (max-width: 800px) { .resources-page { height: auto; min-height: 100%; overflow: visible; } .resources-filter-bar { grid-template-columns: 1fr; } .last-seen-filter .el-input-number { width: 120px; flex-basis: 120px; } .resource-detail-summary { grid-template-columns: repeat(2, 1fr); } .resource-detail-summary > div:nth-child(2) { border-right: 0; } .resource-detail-summary > div:nth-child(-n + 2) { border-bottom: 1px solid var(--hongfen-border); } }
 </style>

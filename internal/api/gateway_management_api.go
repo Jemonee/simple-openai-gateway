@@ -585,6 +585,15 @@ func (a *GatewayManagementApi) resources(c *gin.Context) {
 		parsed := value == "true"
 		query.Sensitive = &parsed
 	}
+	if value := c.Query("lastSeenBeforeDays"); value != "" {
+		days, err := strconv.Atoi(value)
+		if err != nil || days <= 0 || days > 36500 {
+			c.JSON(http.StatusBadRequest, common.F[any](http.StatusBadRequest, "最后发现时间天数必须为正整数"))
+			return
+		}
+		cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+		query.LastSeenBefore = &cutoff
+	}
 	item, err := a.management.Resources(c.Request.Context(), query)
 	if err != nil {
 		managementError(c, err)

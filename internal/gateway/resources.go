@@ -54,11 +54,12 @@ type ResourceSummary struct {
 }
 
 type ResourceQuery struct {
-	Search    string
-	Kind      string
-	Sensitive *bool
-	Page      int
-	PageSize  int
+	Search         string
+	Kind           string
+	Sensitive      *bool
+	LastSeenBefore *time.Time
+	Page           int
+	PageSize       int
 }
 
 type ResourceCatalogItem struct {
@@ -407,6 +408,9 @@ func (s *ManagementService) Resources(ctx context.Context, query ResourceQuery) 
 	}
 	if query.Sensitive != nil {
 		db = db.Where("sensitive = ?", *query.Sensitive)
+	}
+	if query.LastSeenBefore != nil {
+		db = db.Where("last_seen_at < ?", query.LastSeenBefore.UTC())
 	}
 	var total int64
 	if err := db.Count(&total).Error; err != nil {

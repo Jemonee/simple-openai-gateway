@@ -2,9 +2,11 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestDetectResourcesFindsReferencesAndStableFingerprints(t *testing.T) {
@@ -64,5 +66,26 @@ func TestDetectResourcesExtractsCleanURLFromEmbeddedJSONText(t *testing.T) {
 	}
 	if items[0].Kind != "url" || items[0].URI != "https://example.com/report.pdf" || items[0].Name != "report.pdf" {
 		t.Fatalf("resource = %+v", items[0])
+	}
+}
+
+func TestResourcesFiltersByLastSeenBefore(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now().UTC()
+	old := GatewayResource{Fingerprint: "old", Kind: "url", URI: "https://example.com/old", FirstSeenAt: now.Add(-10 * 24 * time.Hour), LastSeenAt: now.Add(-10 * 24 * time.Hour)}
+	recent := GatewayResource{Fingerprint: "recent", Kind: "url", URI: "https://example.com/recent", FirstSeenAt: now.Add(-2 * 24 * time.Hour), LastSeenAt: now.Add(-2 * 24 * time.Hour)}
+	if err := store.db.Create(&old).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Create(&recent).Error; err != nil {
+		t.Fatal(err)
+	}
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	page, err := NewManagementService(store).Resources(context.Background(), ResourceQuery{LastSeenBefore: &cutoff, Page: 1, PageSize: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Fingerprint != old.Fingerprint {
+		t.Fatalf("filtered resources = %+v, total = %d", page.Items, page.Total)
 	}
 }
