@@ -75,6 +75,7 @@ func (a *GatewayManagementApi) Register(router *gin.RouterGroup) {
 	admin.GET("/verifications", a.verificationReports)
 	admin.GET("/verification-sessions", a.verificationSessions)
 	admin.GET("/verification-sessions/:id", a.verificationSession)
+	admin.POST("/verification-sessions/:id/stop", a.stopVerificationSession)
 	admin.GET("/verifications/:id", a.verificationReport)
 	admin.POST("/verifications", a.verifyChannel)
 
@@ -95,12 +96,25 @@ func (a *GatewayManagementApi) verifyChannel(c *gin.Context) {
 	if !bindManagementJSON(c, &input) {
 		return
 	}
-	report, err := a.verification.VerifyChannel(c.Request.Context(), input)
+	session, err := a.verification.Start(c.Request.Context(), input)
 	if err != nil {
 		managementError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, common.S(report))
+	c.JSON(http.StatusAccepted, common.S(session))
+}
+
+func (a *GatewayManagementApi) stopVerificationSession(c *gin.Context) {
+	if strings.TrimSpace(c.Param("id")) == "" {
+		c.JSON(http.StatusBadRequest, common.F[any](http.StatusBadRequest, "验证会话 ID 无效"))
+		return
+	}
+	session, err := a.verification.Stop(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, common.S(session))
 }
 
 func (a *GatewayManagementApi) verificationReports(c *gin.Context) {

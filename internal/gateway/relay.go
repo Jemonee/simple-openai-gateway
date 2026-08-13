@@ -241,10 +241,34 @@ func (s *RelayService) RelayWithTrace(ctx context.Context, writer http.ResponseW
 	consecutiveDNSErrors := 0
 	selection := plan.InitialSelection
 
-	for index := 0; index < maxAttempts; index++ {
+	for index := 0; index < len(plan.Candidates) && execution.attempts < maxAttempts; index++ {
 		candidate := plan.Candidates[index]
+		availability, availabilityErr := s.plannedCandidateAvailability(ctx, candidate)
+		if availabilityErr != nil {
+			publicErr := routePublicError(availabilityErr)
+			execution.responseBody = publicErrorBody(publicErr)
+			s.recordRequest(context.WithoutCancel(ctx), execution, publicErr.Status, publicErr.Code)
+			return publicErr
+		}
+		if !availability.Available {
+			if plan.Affinity {
+				publicErr := unavailablePlanError(plan, payload.PinnedChannelID)
+				execution.responseBody = publicErrorBody(publicErr)
+				s.recordRequest(context.WithoutCancel(ctx), execution, publicErr.Status, publicErr.Code)
+				return publicErr
+			}
+			selection = RouteSelection{
+				PreviousChannelID:   candidate.Channel.ID,
+				PreviousChannelName: candidate.Channel.Name,
+				Reason:              availability.Reason,
+				Detail:              availability.Detail,
+				Decision:            selection.Decision,
+			}
+			continue
+		}
 		execution.attempts++
-		result, attemptErr := s.performAttempt(ctx, writer, headers, rawQuery, execution, candidate, selection, index == maxAttempts-1, plan.Affinity)
+		lastAttempt := execution.attempts == maxAttempts || index == len(plan.Candidates)-1
+		result, attemptErr := s.performAttempt(ctx, writer, headers, rawQuery, execution, candidate, selection, lastAttempt, plan.Affinity)
 		s.addCanceledAttemptUsage(execution, result)
 		if result != nil && result.outcome == RelayOutcomeCanceled {
 			s.recordSessionAffinityAfterReusableAttempt(context.WithoutCancel(ctx), execution, candidate.Mapping.ID)
@@ -270,6 +294,12 @@ func (s *RelayService) RelayWithTrace(ctx context.Context, writer http.ResponseW
 		}
 		selection = retrySelection(candidate, result)
 	}
+	if execution.attempts == 0 {
+		publicErr := unavailablePlanError(plan, payload.PinnedChannelID)
+		execution.responseBody = publicErrorBody(publicErr)
+		s.recordRequest(context.WithoutCancel(ctx), execution, publicErr.Status, publicErr.Code)
+		return publicErr
+	}
 
 	message := "All available upstream channels failed."
 	status := http.StatusBadGateway
@@ -293,6 +323,53 @@ func (s *RelayService) RelayWithTrace(ctx context.Context, writer http.ResponseW
 	execution.responseBody = publicErrorBody(publicErr)
 	s.recordRequest(context.WithoutCancel(ctx), execution, publicErr.Status, publicErr.Code)
 	return publicErr
+}
+
+type plannedCandidateAvailability struct {
+	Available bool
+	Reason    string
+	Detail    string
+}
+
+func (s *RelayService) plannedCandidateAvailability(ctx context.Context, candidate RouteCandidate) (plannedCandidateAvailability, error) {
+	var state struct {
+		ChannelEnabled   bool
+		MappingEnabled   bool
+		CircuitOpenUntil *time.Time
+	}
+	err := s.store.db.WithContext(ctx).
+		Table("channel_models AS mapping").
+		Select("channel.enabled AS channel_enabled, mapping.enabled AS mapping_enabled, channel.circuit_open_until").
+		Joins("JOIN channels AS channel ON channel.id = mapping.channel_id").
+		Where("mapping.id = ? AND mapping.channel_id = ? AND mapping.model_id = ?", candidate.Mapping.ID, candidate.Channel.ID, candidate.Mapping.ModelID).
+		Take(&state).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return plannedCandidateAvailability{Reason: SelectionReasonAffinityTargetMissing}, nil
+	}
+	if err != nil {
+		return plannedCandidateAvailability{}, err
+	}
+	switch {
+	case !state.ChannelEnabled:
+		return plannedCandidateAvailability{Reason: SelectionReasonChannelDisabled}, nil
+	case !state.MappingEnabled:
+		return plannedCandidateAvailability{Reason: SelectionReasonMappingDisabled}, nil
+	case state.CircuitOpenUntil != nil && state.CircuitOpenUntil.After(time.Now()):
+		return plannedCandidateAvailability{Reason: SelectionReasonCircuitOpen, Detail: state.CircuitOpenUntil.UTC().Format(time.RFC3339)}, nil
+	default:
+		return plannedCandidateAvailability{Available: true}, nil
+	}
+}
+
+func unavailablePlanError(plan *RoutePlan, pinnedChannelID uint64) *PublicError {
+	switch {
+	case plan != nil && plan.Affinity:
+		return routePublicError(ErrAffinityUnavailable)
+	case pinnedChannelID != 0:
+		return routePublicError(ErrPinnedChannelUnavailable)
+	default:
+		return routePublicError(ErrNoAvailableChannel)
+	}
 }
 
 func (s *RelayService) currentPayloadLogDetail() string {
@@ -424,9 +501,10 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	usage, hasUsage := ParseUsage(responseBody)
 	retryableStatus := shouldRetryStatus(response.StatusCode)
 	channelUnavailable, channelFailureDetail := upstreamChannelFailure(response.StatusCode, responseBody)
+	retryableApplicationFailure := retryableHTTPApplicationFailure(response.StatusCode, responseBody)
 	execution.trace.Record(RelayStageResponseAnalysis, RelayStepCategoryGateway, attempt, responseAnalysisStarted, nil,
-		fmt.Sprintf("usage=%t channel_failure=%t channel_unavailable=%t", hasUsage, retryableStatus || channelUnavailable, channelUnavailable))
-	if retryableStatus || channelUnavailable {
+		fmt.Sprintf("usage=%t channel_failure=%t channel_unavailable=%t application_retry=%t", hasUsage, retryableStatus || channelUnavailable, channelUnavailable, retryableApplicationFailure != nil))
+	if retryableStatus || channelUnavailable || retryableApplicationFailure != nil {
 		result := &attemptResult{
 			response: response, body: responseBody, requestBody: body, usage: usage, sentTokens: sentTokens,
 			costSource: CostSourceFailedZero, latencyMS: latency, durationMS: elapsedMilliseconds(started, responseFinishedAt),
@@ -441,6 +519,12 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 			failureMessage = channelFailureDetail
 			result.retryDetail = truncateRunes(channelFailureDetail, 512)
 			attemptErr = errors.New(channelFailureDetail)
+		} else if retryableApplicationFailure != nil {
+			failureMessage = retryableApplicationFailure.Error()
+			result.retryReason = SelectionReasonUpstreamApplicationError
+			result.retryDetail = truncateRunes(retryableApplicationFailure.Message, 512)
+			attemptErr = retryableApplicationFailure
+			execution.refreshSessionAffinity = true
 		}
 		if readErr != nil {
 			result.retryReason = SelectionReasonResponseError
@@ -448,6 +532,8 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 		}
 		if channelUnavailable {
 			result.circuitOpenUntil = s.recordChannelUnavailable(logCtx, candidate.Channel.ID, candidate.Mapping.ID, failureMessage)
+		} else if retryableApplicationFailure != nil {
+			s.recordChannelResponsive(logCtx, candidate.Channel.ID)
 		} else {
 			result.circuitOpenUntil = s.recordChannelFailure(logCtx, candidate.Channel.ID, candidate.Mapping.ID, failureMessage)
 		}
@@ -849,6 +935,17 @@ func shouldRetryStatus(status int) bool {
 		status == http.StatusRequestTimeout ||
 		status == http.StatusTooManyRequests ||
 		status >= 500
+}
+
+func retryableHTTPApplicationFailure(status int, body []byte) *upstreamApplicationFailure {
+	if status != http.StatusForbidden {
+		return nil
+	}
+	failure, ok := upstreamApplicationError(body)
+	if !ok || !strings.EqualFold(strings.TrimSpace(failure.Code), "model_not_allowed") {
+		return nil
+	}
+	return failure
 }
 
 func upstreamChannelFailure(status int, body []byte) (bool, string) {

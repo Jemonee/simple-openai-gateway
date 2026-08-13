@@ -68,6 +68,7 @@ function strategyLabel(): string {
 }
 
 function modeLabel(): string {
+  if (decision.mode === 'single_candidate') return '仅一个可用渠道，直接使用'
   if (decision.mode === 'session_affinity') return '会话固定，沿用当前渠道'
   if (decision.mode === 'response_affinity') return '响应关联固定，沿用当前渠道'
   return '期望度归一化后随机抽取'

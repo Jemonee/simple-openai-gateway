@@ -471,10 +471,7 @@ func (r *Router) availableCandidates(ctx context.Context, modelID uint64, strate
 	for _, channel := range channels {
 		channelsByID[channel.ID] = channel
 	}
-	recentSuccess, err := loadRecentSuccessMetrics(ctx, r.store.db, channelIDs, channelModelIDs, now)
-	if err != nil {
-		return nil, err
-	}
+	availableMappingIDs := make([]uint64, 0, len(mappings))
 	routableMappingIDs := make([]uint64, 0, len(mappings))
 	maxRoutablePriority := 0
 	if strategy == RoutingPriorityWeighted {
@@ -488,9 +485,31 @@ func (r *Router) availableCandidates(ctx context.Context, modelID uint64, strate
 	for _, mapping := range mappings {
 		channel, exists := channelsByID[mapping.ChannelID]
 		eligiblePriority := strategy != RoutingPriorityWeighted || mapping.Priority == maxRoutablePriority
-		if exists && channel.Enabled && eligiblePriority && (channel.CircuitOpenUntil == nil || !channel.CircuitOpenUntil.After(now)) {
+		if !exists || !channel.Enabled || (channel.CircuitOpenUntil != nil && channel.CircuitOpenUntil.After(now)) {
+			continue
+		}
+		availableMappingIDs = append(availableMappingIDs, mapping.ID)
+		if eligiblePriority {
 			routableMappingIDs = append(routableMappingIDs, mapping.ID)
 		}
+	}
+	// A sole available mapping needs no routing metrics, scoring, sorting, or random draw.
+	if len(availableMappingIDs) == 1 {
+		for _, mapping := range mappings {
+			if mapping.ID != availableMappingIDs[0] {
+				continue
+			}
+			channel := channelsByID[mapping.ChannelID]
+			return []RouteCandidate{{
+				Channel: channel,
+				Mapping: mapping,
+				Cost:    CalculateCostMicros(mapping, Usage{InputTokens: inputTokens, OutputTokens: outputTokens}),
+			}}, nil
+		}
+	}
+	recentSuccess, err := loadRecentSuccessMetrics(ctx, r.store.db, channelIDs, channelModelIDs, now)
+	if err != nil {
+		return nil, err
 	}
 	recentRouting, err := loadRecentRoutingMetrics(ctx, r.store.db, routableMappingIDs, now)
 	if err != nil {
@@ -566,6 +585,12 @@ func (r *Router) recentOutputMedian(ctx context.Context, modelName string) int64
 }
 
 func (r *Router) orderCandidates(strategy string, candidates []RouteCandidate) *RouteDecision {
+	if len(candidates) == 0 {
+		return nil
+	}
+	if len(candidates) == 1 {
+		return deterministicRouteDecision(strategy, "single_candidate", candidates)
+	}
 	if len(candidates) > 0 && candidates[0].MetricsLoaded {
 		return r.expectationProbabilityOrder(strategy, candidates)
 	}
@@ -583,6 +608,9 @@ func (r *Router) orderCandidates(strategy string, candidates []RouteCandidate) *
 }
 
 func (r *Router) orderCandidatesWithoutWeightedAdvance(strategy string, candidates []RouteCandidate) {
+	if len(candidates) <= 1 {
+		return
+	}
 	if len(candidates) > 0 && candidates[0].MetricsLoaded {
 		decision, _ := r.scoredRouteDecision(strategy, candidates)
 		expectations := make(map[uint64]float64, len(decision.Candidates))

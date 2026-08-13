@@ -1,29 +1,33 @@
-// Channel verification detector composition and scoring are adapted from
-// Veridrop (https://github.com/canarybyte/veridrop), licensed under AGPL-3.0.
 package gateway
 
 import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 const (
-	VerificationModeQuick              = "quick"
-	VerificationModeStandard           = "standard"
-	VerificationModeFull               = "full"
-	verificationMaxBodyBytes     int64 = 4 << 20
-	verificationAttemptBodyBytes int64 = 128 << 10
+	verificationWorkers          = 8
+	verificationMaxAttempts      = 3
+	verificationMaxBodyBytes     = 4 << 20
+	verificationAttemptBodyBytes = 128 << 10
 )
 
 type VerificationRequest struct {
@@ -55,7 +59,11 @@ type VerificationReportView struct {
 	Mode                string                    `json:"mode"`
 	Score               float64                   `json:"score"`
 	Verdict             string                    `json:"verdict"`
+	OutcomeCode         string                    `json:"outcomeCode"`
+	Title               string                    `json:"title"`
 	Summary             string                    `json:"summary"`
+	FingerprintModel    string                    `json:"fingerprintModel,omitempty"`
+	FingerprintMatch    map[string]float64        `json:"fingerprintMatch,omitempty"`
 	Checks              []VerificationCheckResult `json:"checks"`
 	StartedAt           time.Time                 `json:"startedAt"`
 	FinishedAt          time.Time                 `json:"finishedAt"`
@@ -67,28 +75,31 @@ type VerificationReportView struct {
 }
 
 type VerificationSessionView struct {
-	ID                  string    `json:"id"`
-	ChannelID           uint64    `json:"channelId"`
-	ChannelName         string    `json:"channelName"`
-	ModelID             uint64    `json:"modelId"`
-	PublicModel         string    `json:"publicModel"`
-	UpstreamModel       string    `json:"upstreamModel"`
-	Mode                string    `json:"mode"`
-	Status              string    `json:"status"`
-	Score               float64   `json:"score"`
-	Verdict             string    `json:"verdict"`
-	Summary             string    `json:"summary"`
-	RequestCount        int64     `json:"requestCount"`
-	SuccessCount        int64     `json:"successCount"`
-	InputTokens         int64     `json:"inputTokens"`
-	OutputTokens        int64     `json:"outputTokens"`
-	CachedTokens        int64     `json:"cachedTokens"`
-	CacheWriteTokens    int64     `json:"cacheWriteTokens"`
-	EstimatedCostMicros int64     `json:"estimatedCostMicros"`
-	UpstreamCostMicros  int64     `json:"upstreamCostMicros"`
-	ErrorMessage        string    `json:"errorMessage"`
-	StartedAt           time.Time `json:"startedAt"`
-	FinishedAt          time.Time `json:"finishedAt"`
+	ID                  string     `json:"id"`
+	ChannelID           uint64     `json:"channelId"`
+	ChannelName         string     `json:"channelName"`
+	ModelID             uint64     `json:"modelId"`
+	PublicModel         string     `json:"publicModel"`
+	UpstreamModel       string     `json:"upstreamModel"`
+	Mode                string     `json:"mode"`
+	Status              string     `json:"status"`
+	PlannedCount        int64      `json:"plannedCount"`
+	CompletedCount      int64      `json:"completedCount"`
+	Score               float64    `json:"score"`
+	Verdict             string     `json:"verdict"`
+	Summary             string     `json:"summary"`
+	RequestCount        int64      `json:"requestCount"`
+	SuccessCount        int64      `json:"successCount"`
+	InputTokens         int64      `json:"inputTokens"`
+	OutputTokens        int64      `json:"outputTokens"`
+	CachedTokens        int64      `json:"cachedTokens"`
+	CacheWriteTokens    int64      `json:"cacheWriteTokens"`
+	EstimatedCostMicros int64      `json:"estimatedCostMicros"`
+	UpstreamCostMicros  int64      `json:"upstreamCostMicros"`
+	ErrorMessage        string     `json:"errorMessage"`
+	StopRequestedAt     *time.Time `json:"stopRequestedAt"`
+	StartedAt           time.Time  `json:"startedAt"`
+	FinishedAt          time.Time  `json:"finishedAt"`
 }
 
 type VerificationSessionPage struct {
@@ -101,7 +112,13 @@ type VerificationSessionPage struct {
 type VerificationAttemptView struct {
 	ID                    string    `json:"id"`
 	Sequence              int       `json:"sequence"`
+	JobID                 string    `json:"jobId"`
+	AttemptNo             int       `json:"attemptNo"`
 	DetectorName          string    `json:"detectorName"`
+	ProbeID               string    `json:"probeId"`
+	RequestFormat         string    `json:"requestFormat"`
+	ContextMode           string    `json:"contextMode"`
+	Effort                string    `json:"effort"`
 	Method                string    `json:"method"`
 	Path                  string    `json:"path"`
 	Stream                bool      `json:"stream"`
@@ -130,21 +147,18 @@ type VerificationSessionDetailView struct {
 	Session  VerificationSessionView   `json:"session"`
 	Attempts []VerificationAttemptView `json:"attempts"`
 }
-
 type VerificationReportPage struct {
 	Items    []VerificationReportView `json:"items"`
 	Total    int64                    `json:"total"`
 	Page     int                      `json:"page"`
 	PageSize int                      `json:"pageSize"`
 }
-
 type VerificationReportQuery struct {
 	ChannelID uint64
 	ModelID   uint64
 	Page      int
 	PageSize  int
 }
-
 type VerificationSessionQuery struct {
 	ChannelID uint64
 	ModelID   uint64
@@ -152,231 +166,1017 @@ type VerificationSessionQuery struct {
 	PageSize  int
 }
 
-type VerificationDetector interface {
-	Definition() verificationDetectorDefinition
-	Run(context.Context, *verificationProbe) VerificationCheckResult
-}
-
-type verificationDetectorDefinition struct {
-	Name     string
-	Label    string
-	Category string
-	Weight   float64
-}
-
 type VerificationService struct {
-	store     *Store
-	estimator *TokenEstimator
-	client    *http.Client
+	store      *Store
+	estimator  *TokenEstimator
+	client     *http.Client
+	mu         sync.Mutex
+	runs       map[string]context.CancelFunc
+	assetsOnce sync.Once
+	assetsDir  string
+	assetsErr  error
 }
 
 func NewVerificationService(store *Store, estimator *TokenEstimator) *VerificationService {
-	return &VerificationService{
-		store:     store,
-		estimator: estimator,
-		client: &http.Client{
-			Timeout: 35 * time.Second,
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
-	}
+	service := &VerificationService{store: store, estimator: estimator, client: &http.Client{Timeout: 310 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}, runs: map[string]context.CancelFunc{}}
+	go service.resumeRunningSessions()
+	return service
 }
 
-func (s *VerificationService) VerifyChannel(ctx context.Context, input VerificationRequest) (*VerificationReportView, error) {
+func (s *VerificationService) Start(ctx context.Context, input VerificationRequest) (*VerificationSessionView, error) {
+	mode, channel, mapping, model, claimedModel, err := s.validateRequest(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	jobs, err := buildVerificationJobs(mode)
+	if err != nil {
+		return nil, err
+	}
+	started := time.Now().UTC()
+	session := VerificationSession{ID: uuid.NewString(), ChannelID: channel.ID, ChannelName: channel.Name, ModelID: model.ID, PublicModel: model.Name, UpstreamModel: mapping.UpstreamModel, Mode: mode, Status: "running", PlannedCount: int64(len(jobs)), StartedAt: started, Summary: fmt.Sprintf("%s 指纹检测已启动，共 %d 个逻辑请求。", verificationModeLabel(mode), len(jobs))}
+	err = s.store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&session).Error; err != nil {
+			return err
+		}
+		rows := make([]VerificationJob, 0, len(jobs))
+		for index, manifest := range jobs {
+			jobID, err := verificationJobID(manifest)
+			if err != nil {
+				return err
+			}
+			// A session prefix keeps independently generated coverage values and repeated runs distinct.
+			jobID = session.ID + ":" + jobID[:24]
+			encoded, err := json.Marshal(manifest)
+			if err != nil {
+				return err
+			}
+			rows = append(rows, VerificationJob{ID: jobID, SessionID: session.ID, Sequence: index + 1, ProbeID: manifest.ProbeID, RequestFormat: manifest.RequestFormat, ContextMode: manifest.ContextMode, Effort: manifest.Effort, Status: "pending", ManifestJSON: string(encoded), CreatedAt: started, UpdatedAt: started})
+		}
+		return tx.Create(&rows).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.startRun(session.ID, claimedModel)
+	view := verificationSessionView(session)
+	return &view, nil
+}
+
+func (s *VerificationService) validateRequest(ctx context.Context, input VerificationRequest) (string, Channel, ChannelModel, GatewayModel, string, error) {
 	if input.ChannelID == 0 || input.ModelID == 0 {
-		return nil, errors.New("channelId and modelId are required")
+		return "", Channel{}, ChannelModel{}, GatewayModel{}, "", errors.New("channelId and modelId are required")
 	}
 	mode, err := normalizeVerificationMode(input.Mode)
 	if err != nil {
-		return nil, err
+		return "", Channel{}, ChannelModel{}, GatewayModel{}, "", err
 	}
-
 	var channel Channel
 	if err := s.store.db.WithContext(ctx).First(&channel, input.ChannelID).Error; err != nil {
-		return nil, err
+		return "", channel, ChannelModel{}, GatewayModel{}, "", err
 	}
 	var mapping ChannelModel
-	if err := s.store.db.WithContext(ctx).Where("channel_id = ? AND model_id = ?", input.ChannelID, input.ModelID).First(&mapping).Error; err != nil {
-		return nil, err
+	if err := s.store.db.WithContext(ctx).Where("channel_id = ? AND model_id = ? AND enabled = ?", input.ChannelID, input.ModelID, true).First(&mapping).Error; err != nil {
+		return "", channel, mapping, GatewayModel{}, "", err
 	}
 	var model GatewayModel
 	if err := s.store.db.WithContext(ctx).First(&model, input.ModelID).Error; err != nil {
-		return nil, err
+		return "", channel, mapping, model, "", err
+	}
+	claimed := strings.ToLower(strings.TrimSpace(model.Name))
+	if !containsString(verificationTargetModels, claimed) {
+		claimed = strings.ToLower(strings.TrimSpace(mapping.UpstreamModel))
+	}
+	if !containsString(verificationTargetModels, claimed) {
+		return "", channel, mapping, model, "", errors.New("模型指纹检测仅支持申报为 gpt-5.6-sol、gpt-5.6-terra 或 gpt-5.6-luna 的映射")
+	}
+	if _, err := normalizeVerificationBaseURL(channel.BaseURL); err != nil {
+		return "", channel, mapping, model, "", err
+	}
+	return mode, channel, mapping, model, claimed, nil
+}
+
+func containsString(items []string, value string) bool {
+	for _, item := range items {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *VerificationService) resumeRunningSessions() {
+	var sessions []VerificationSession
+	if err := s.store.db.Where("status IN ? AND stop_requested_at IS NOT NULL", []string{"running", "stopping"}).Find(&sessions).Error; err == nil {
+		for _, session := range sessions {
+			claimed := strings.ToLower(strings.TrimSpace(session.PublicModel))
+			if !containsString(verificationTargetModels, claimed) {
+				claimed = strings.ToLower(strings.TrimSpace(session.UpstreamModel))
+			}
+			if containsString(verificationTargetModels, claimed) {
+				if err := s.cancelRemainingJobsAndFinalize(session.ID, claimed); err != nil {
+					s.failSession(session.ID, err)
+				}
+			}
+		}
+	}
+	sessions = nil
+	if err := s.store.db.Where("status = ? AND stop_requested_at IS NULL", "running").Find(&sessions).Error; err != nil {
+		return
+	}
+	for _, session := range sessions {
+		claimed := strings.ToLower(strings.TrimSpace(session.PublicModel))
+		if !containsString(verificationTargetModels, claimed) {
+			claimed = strings.ToLower(strings.TrimSpace(session.UpstreamModel))
+		}
+		if containsString(verificationTargetModels, claimed) {
+			s.startRun(session.ID, claimed)
+		}
+	}
+}
+
+func (s *VerificationService) startRun(sessionID, claimedModel string) {
+	s.mu.Lock()
+	if _, exists := s.runs[sessionID]; exists {
+		s.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.runs[sessionID] = cancel
+	s.mu.Unlock()
+	go func() {
+		defer func() { s.mu.Lock(); delete(s.runs, sessionID); s.mu.Unlock() }()
+		s.runSession(ctx, sessionID, claimedModel)
+	}()
+}
+
+func (s *VerificationService) runSession(ctx context.Context, sessionID, claimedModel string) {
+	var session VerificationSession
+	if err := s.store.db.First(&session, "id = ?", sessionID).Error; err != nil {
+		return
+	}
+	var channel Channel
+	var mapping ChannelModel
+	if err := s.store.db.First(&channel, session.ChannelID).Error; err != nil {
+		s.failSession(sessionID, err)
+		return
+	}
+	if err := s.store.db.Where("channel_id = ? AND model_id = ?", session.ChannelID, session.ModelID).First(&mapping).Error; err != nil {
+		s.failSession(sessionID, err)
+		return
 	}
 	apiKey, err := s.store.secretBox.Decrypt(channel.APIKeyCipher)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt channel API key: %w", err)
+		s.failSession(sessionID, err)
+		return
 	}
+	defer func() { apiKey = "" }()
 	baseURL, err := normalizeVerificationBaseURL(channel.BaseURL)
 	if err != nil {
-		return nil, err
+		s.failSession(sessionID, err)
+		return
 	}
 
-	started := time.Now().UTC()
-	session := VerificationSession{
-		ID: uuid.NewString(), ChannelID: channel.ID, ChannelName: channel.Name,
-		ModelID: model.ID, PublicModel: model.Name, UpstreamModel: mapping.UpstreamModel,
-		Mode: mode, Status: "running", StartedAt: started,
+	var jobs []VerificationJob
+	if err := s.store.db.Where("session_id = ? AND status IN ?", sessionID, []string{"pending", "running"}).Order("sequence asc").Find(&jobs).Error; err != nil {
+		s.failSession(sessionID, err)
+		return
 	}
-	if err := s.store.db.WithContext(ctx).Create(&session).Error; err != nil {
-		return nil, err
-	}
-	probe := &verificationProbe{
-		client:    s.client,
-		baseURL:   baseURL,
-		apiKey:    apiKey,
-		model:     mapping.UpstreamModel,
-		mapping:   mapping,
-		estimator: s.estimator,
-		service:   s,
-		sessionID: session.ID,
-	}
-	runTimeout := 45 * time.Second
-	if mode == VerificationModeStandard {
-		runTimeout = 90 * time.Second
-	} else if mode == VerificationModeFull {
-		runTimeout = 3 * time.Minute
-	}
-	runCtx, cancel := context.WithTimeout(ctx, runTimeout)
-	defer cancel()
-	results := make([]VerificationCheckResult, 0, 6)
-	for _, detector := range verificationDetectors(mode) {
-		if err := runCtx.Err(); err != nil {
-			s.failVerificationSession(ctx, session.ID, err)
-			return nil, err
+	for index := range jobs {
+		if jobs[index].Status == "running" {
+			jobs[index].Status = "pending"
+			_ = s.store.db.Model(&VerificationJob{}).Where("id = ?", jobs[index].ID).Update("status", "pending").Error
 		}
-		definition := detector.Definition()
-		probe.detectorName = definition.Name
-		result := detector.Run(runCtx, probe)
-		result.Name = definition.Name
-		result.Label = definition.Label
-		result.Category = definition.Category
-		result.Weight = definition.Weight
-		results = append(results, result)
 	}
+	jobCh := make(chan VerificationJob)
+	var wg sync.WaitGroup
+	for range verificationWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobCh {
+				if ctx.Err() != nil || s.stopRequested(sessionID) {
+					return
+				}
+				if err := s.runJob(ctx, session, mapping, baseURL, apiKey, claimedModel, job); err != nil && errors.Is(err, errVerificationAuth) {
+					s.requestStop(sessionID, "认证或权限失败，已停止后续请求")
+					return
+				}
+			}
+		}()
+	}
+sendLoop:
+	for _, job := range jobs {
+		select {
+		case <-ctx.Done():
+			break sendLoop
+		case jobCh <- job:
+		}
+		if s.stopRequested(sessionID) {
+			break
+		}
+	}
+	close(jobCh)
+	wg.Wait()
+	if s.stopRequested(sessionID) {
+		if err := s.cancelRemainingJobsAndFinalize(sessionID, claimedModel); err != nil {
+			s.failSession(sessionID, err)
+		}
+		return
+	}
+	if err := s.finalizeSession(sessionID, claimedModel); err != nil {
+		s.failSession(sessionID, err)
+	}
+}
 
-	score, verdict := verificationScore(results)
-	finished := time.Now().UTC()
-	aggregate, aggregateErr := s.verificationAggregate(ctx, session.ID)
-	if aggregateErr != nil {
-		s.failVerificationSession(ctx, session.ID, aggregateErr)
-		return nil, aggregateErr
+func (s *VerificationService) cancelRemainingJobsAndFinalize(sessionID, claimedModel string) error {
+	cancelled := verificationJobResult{Status: "cancelled", ErrorCategory: "cancelled", ErrorMessage: "用户已停止检测"}
+	encoded, _ := json.Marshal(cancelled)
+	if err := s.store.db.Model(&VerificationJob{}).
+		Where("session_id = ? AND status IN ?", sessionID, []string{"pending", "running"}).
+		Updates(map[string]any{"status": "cancelled", "result_json": string(encoded), "updated_at": time.Now().UTC()}).Error; err != nil {
+		return err
 	}
-	report := VerificationReport{
-		ID:                  uuid.NewString(),
-		SessionID:           session.ID,
-		ChannelID:           channel.ID,
-		ChannelName:         channel.Name,
-		ModelID:             model.ID,
-		PublicModel:         model.Name,
-		UpstreamModel:       mapping.UpstreamModel,
-		Mode:                mode,
-		Score:               score,
-		Verdict:             verdict,
-		Summary:             verificationSummary(score, verdict, results),
-		RequestCount:        aggregate.RequestCount,
-		InputTokens:         aggregate.InputTokens,
-		OutputTokens:        aggregate.OutputTokens,
-		EstimatedCostMicros: aggregate.EstimatedCostMicros,
-		UpstreamCostMicros:  aggregate.UpstreamCostMicros,
-		StartedAt:           started,
-		FinishedAt:          finished,
+	return s.finalizeSession(sessionID, claimedModel)
+}
+
+var errVerificationAuth = errors.New("verification authentication failed")
+
+func (s *VerificationService) runJob(ctx context.Context, session VerificationSession, mapping ChannelModel, baseURL, apiKey, claimedModel string, job VerificationJob) error {
+	var manifest verificationJobManifest
+	if err := json.Unmarshal([]byte(job.ManifestJSON), &manifest); err != nil {
+		return s.finishJobError(job, "manifest_invalid", err)
 	}
-	encoded, err := json.Marshal(results)
+	_ = s.store.db.Model(&VerificationJob{}).Where("id = ?", job.ID).Updates(map[string]any{"status": "running", "updated_at": time.Now().UTC()}).Error
+	for attemptNo := job.AttemptsSent + 1; attemptNo <= verificationMaxAttempts; attemptNo++ {
+		if ctx.Err() != nil || s.stopRequested(session.ID) {
+			return s.cancelJob(job)
+		}
+		result, requestBody, responseBody, meta, err := s.performProbe(ctx, baseURL, apiKey, session.UpstreamModel, job.ID, manifest)
+		s.persistAttempt(session.ID, mapping, job, manifest, attemptNo, requestBody, responseBody, meta, err)
+		_ = s.store.db.Model(&VerificationJob{}).Where("id = ?", job.ID).Updates(map[string]any{"attempts_sent": attemptNo, "updated_at": time.Now().UTC()}).Error
+		if err == nil {
+			classified := classifyVerificationResult(manifest, claimedModel, result.Answer)
+			classified.HTTPStatus = meta.Status
+			encoded, _ := json.Marshal(classified)
+			return s.store.db.Model(&VerificationJob{}).Where("id = ?", job.ID).Updates(map[string]any{"status": "succeeded", "result_json": string(encoded), "updated_at": time.Now().UTC()}).Error
+		}
+		if meta.Status == http.StatusUnauthorized || meta.Status == http.StatusForbidden {
+			_ = s.finishJobError(job, "authentication_failed", err)
+			return errVerificationAuth
+		}
+		if !retryableVerificationError(meta.Status, err) || attemptNo == verificationMaxAttempts {
+			return s.finishJobError(job, verificationErrorCategory(meta.Status, err), err)
+		}
+		select {
+		case <-ctx.Done():
+			return s.cancelJob(job)
+		case <-time.After(time.Duration(250*(1<<(attemptNo-1))) * time.Millisecond):
+		}
+	}
+	return nil
+}
+
+type verificationTransportResult struct {
+	Answer         string
+	Usage          Usage
+	UpstreamCost   int64
+	UpstreamCostOK bool
+}
+type verificationTransportMeta struct {
+	Status        int
+	ContentType   string
+	LatencyMS     int64
+	Path          string
+	Stream        bool
+	RequestFormat string
+}
+
+func (s *VerificationService) performProbe(ctx context.Context, baseURL, apiKey, model, jobID string, manifest verificationJobManifest) (verificationTransportResult, []byte, []byte, verificationTransportMeta, error) {
+	if manifest.RequestFormat == "native_codex" {
+		return s.performNativeProbe(ctx, baseURL, apiKey, model, jobID, manifest)
+	}
+	return s.performNormalProbe(ctx, baseURL, apiKey, model, jobID, manifest)
+}
+
+func (s *VerificationService) performNormalProbe(ctx context.Context, baseURL, apiKey, model, jobID string, manifest verificationJobManifest) (verificationTransportResult, []byte, []byte, verificationTransportMeta, error) {
+	input := make([]any, 0, len(manifest.Messages)+128)
+	for index, message := range manifest.Messages {
+		if index == len(manifest.Messages)-1 && manifest.ContextMode == "fixed_32k_history" {
+			history, err := loadVerificationHistory()
+			if err != nil {
+				return verificationTransportResult{}, nil, nil, verificationTransportMeta{}, err
+			}
+			input = append(input, history...)
+		}
+		input = append(input, map[string]any{"role": message.Role, "content": message.Content})
+	}
+	payload := map[string]any{"model": model, "input": input, "reasoning": map[string]any{"effort": manifest.Effort}, "include": []string{"reasoning.encrypted_content"}, "store": false, "stream": true, "prompt_cache_key": uuid.NewString()}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return verificationTransportResult{}, nil, nil, verificationTransportMeta{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/responses", bytes.NewReader(body))
+	if err != nil {
+		return verificationTransportResult{}, body, nil, verificationTransportMeta{}, err
+	}
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "text/event-stream")
+	request.Header.Set("User-Agent", "simple-openai-gateway/gpt56-detector-4.1.0")
+	started := time.Now()
+	response, err := s.client.Do(request)
+	meta := verificationTransportMeta{Path: "/responses", Stream: true, RequestFormat: "normal", LatencyMS: time.Since(started).Milliseconds()}
+	if err != nil {
+		return verificationTransportResult{}, body, nil, meta, err
+	}
+	defer response.Body.Close()
+	meta.Status = response.StatusCode
+	meta.ContentType = response.Header.Get("Content-Type")
+	raw, err := readVerificationSSE(response.Body)
+	meta.LatencyMS = time.Since(started).Milliseconds()
+	if err != nil {
+		return verificationTransportResult{}, body, raw, meta, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return verificationTransportResult{}, body, raw, meta, fmt.Errorf("upstream returned HTTP %d", response.StatusCode)
+	}
+	parsed, err := parseResponsesSSE(raw)
+	if err != nil {
+		return verificationTransportResult{}, body, raw, meta, err
+	}
+	parsed.UpstreamCost, parsed.UpstreamCostOK = ParseUpstreamCostMicros(raw)
+	return parsed, body, raw, meta, nil
+}
+
+func readVerificationSSE(reader io.Reader) ([]byte, error) {
+	buffered := bufio.NewReader(reader)
+	raw := make([]byte, 0, 4096)
+	dataLines := []string{}
+	consumeEvent := func() (bool, error) {
+		if len(dataLines) == 0 {
+			return false, nil
+		}
+		payload := strings.Join(dataLines, "\n")
+		dataLines = dataLines[:0]
+		if payload == "" || payload == "[DONE]" {
+			return false, nil
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			return false, errors.New("invalid JSON in Responses SSE")
+		}
+		typeName, _ := event["type"].(string)
+		return typeName == "response.completed" || typeName == "response.failed" || typeName == "response.incomplete", nil
+	}
+	for {
+		line, err := buffered.ReadString('\n')
+		if len(raw)+len(line) > verificationMaxBodyBytes {
+			remaining := int(verificationMaxBodyBytes) - len(raw)
+			if remaining > 0 {
+				raw = append(raw, line[:remaining]...)
+			}
+			return raw, errors.New("verification response exceeded 4 MiB")
+		}
+		raw = append(raw, line...)
+		trimmed := strings.TrimRight(line, "\r\n")
+		if trimmed == "" {
+			terminal, consumeErr := consumeEvent()
+			if consumeErr != nil {
+				return raw, consumeErr
+			}
+			if terminal {
+				return raw, nil
+			}
+		} else if strings.HasPrefix(trimmed, "data:") {
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")))
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				return raw, err
+			}
+			terminal, consumeErr := consumeEvent()
+			if consumeErr != nil {
+				return raw, consumeErr
+			}
+			if terminal || len(raw) > 0 {
+				return raw, nil
+			}
+			return raw, io.EOF
+		}
+	}
+}
+
+func loadVerificationHistory() ([]any, error) {
+	data, err := verificationAssets.ReadFile("verification_assets/fixed_32k_history.json")
 	if err != nil {
 		return nil, err
 	}
-	report.ChecksJSON = string(encoded)
-	if err := s.store.db.WithContext(ctx).Create(&report).Error; err != nil {
-		s.failVerificationSession(ctx, session.ID, err)
+	var rows []struct{ Role, Text string }
+	if err := json.Unmarshal(data, &rows); err != nil {
 		return nil, err
 	}
-	if err := s.finishVerificationSession(ctx, session.ID, report); err != nil {
-		return nil, err
+	items := make([]any, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, map[string]any{"role": row.Role, "content": row.Text})
 	}
-	view := reportView(report)
-	return &view, nil
+	return items, nil
 }
 
-func (s *VerificationService) ListReports(ctx context.Context, query VerificationReportQuery) (*VerificationReportPage, error) {
-	page := query.Page
-	if page < 1 {
-		page = 1
+func parseResponsesSSE(raw []byte) (verificationTransportResult, error) {
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	scanner.Buffer(make([]byte, 4096), verificationMaxBodyBytes)
+	var deltas strings.Builder
+	terminal := ""
+	terminalAnswer := ""
+	usage := Usage{}
+	terminalSeen := false
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			return verificationTransportResult{}, errors.New("invalid JSON in Responses SSE")
+		}
+		typeName, _ := event["type"].(string)
+		if typeName == "response.output_text.delta" {
+			if delta, ok := event["delta"].(string); ok {
+				deltas.WriteString(delta)
+			}
+		}
+		if typeName == "response.completed" || typeName == "response.failed" || typeName == "response.incomplete" {
+			terminal, terminalSeen = typeName, true
+			response, _ := event["response"].(map[string]any)
+			terminalAnswer = responseOutputText(response)
+			usage = responsesUsage(response)
+		}
 	}
-	pageSize := query.PageSize
-	if pageSize < 1 || pageSize > 100 {
-		pageSize = 20
+	if err := scanner.Err(); err != nil {
+		return verificationTransportResult{}, err
 	}
+	if !terminalSeen {
+		return verificationTransportResult{}, errors.New("Responses stream ended without a terminal event")
+	}
+	if terminal != "response.completed" {
+		return verificationTransportResult{}, fmt.Errorf("Responses stream ended with %s", terminal)
+	}
+	deltaAnswer := strings.TrimSpace(deltas.String())
+	terminalAnswer = strings.TrimSpace(terminalAnswer)
+	if terminalAnswer != "" && deltaAnswer != "" && terminalAnswer != deltaAnswer {
+		return verificationTransportResult{}, errors.New("SSE terminal output conflicts with streamed text")
+	}
+	if terminalAnswer == "" {
+		terminalAnswer = deltaAnswer
+	}
+	if terminalAnswer == "" {
+		return verificationTransportResult{}, errors.New("Responses stream completed without output text")
+	}
+	return verificationTransportResult{Answer: terminalAnswer, Usage: usage}, nil
+}
+
+func responseOutputText(response map[string]any) string {
+	if value, ok := response["output_text"].(string); ok {
+		return value
+	}
+	var text strings.Builder
+	output, _ := response["output"].([]any)
+	for _, rawItem := range output {
+		item, _ := rawItem.(map[string]any)
+		content, _ := item["content"].([]any)
+		for _, rawPart := range content {
+			part, _ := rawPart.(map[string]any)
+			if part["type"] == "output_text" {
+				if value, ok := part["text"].(string); ok {
+					text.WriteString(value)
+				}
+			}
+		}
+	}
+	return text.String()
+}
+
+func responsesUsage(response map[string]any) Usage {
+	value, _ := response["usage"].(map[string]any)
+	usage := Usage{Source: "upstream"}
+	usage.InputTokens, _ = number(value["input_tokens"])
+	usage.OutputTokens, _ = number(value["output_tokens"])
+	if details, ok := value["input_tokens_details"].(map[string]any); ok {
+		usage.CachedTokens, _ = number(details["cached_tokens"])
+	}
+	return usage
+}
+
+func (s *VerificationService) materializeNativeAssets() (string, error) {
+	s.assetsOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "simple-openai-gateway-gpt56-")
+		if err != nil {
+			s.assetsErr = err
+			return
+		}
+		for _, name := range []string{"codex-native-transport.mjs", "fixed_32k_history.json", "native-0.147.0.raw"} {
+			data, err := verificationAssets.ReadFile("verification_assets/" + name)
+			if err != nil {
+				s.assetsErr = err
+				return
+			}
+			if name == "native-0.147.0.raw" && !bytes.Contains(data, []byte("\r\n\r\n")) {
+				data = bytes.ReplaceAll(data, []byte("\n"), []byte("\r\n"))
+			}
+			if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+				s.assetsErr = err
+				return
+			}
+		}
+		s.assetsDir = dir
+	})
+	return s.assetsDir, s.assetsErr
+}
+
+func (s *VerificationService) performNativeProbe(ctx context.Context, baseURL, apiKey, model, jobID string, manifest verificationJobManifest) (verificationTransportResult, []byte, []byte, verificationTransportMeta, error) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		return verificationTransportResult{}, nil, nil, verificationTransportMeta{Path: "/responses", Stream: true, RequestFormat: "native_codex"}, errors.New("Node.js is required for Native Codex verification")
+	}
+	dir, err := s.materializeNativeAssets()
+	if err != nil {
+		return verificationTransportResult{}, nil, nil, verificationTransportMeta{}, err
+	}
+	messages, _ := json.Marshal(manifest.Messages)
+	args := []string{filepath.Join(dir, "codex-native-transport.mjs"), "send-native", "--profile", filepath.Join(dir, "native-0.147.0.raw"), "--url", baseURL + "/responses", "--model", model, "--timeout", "300000", "--input-json", "true", "--effort", manifest.Effort, "--capture-sanitized-request", "false"}
+	if manifest.ContextMode == "fixed_32k_history" {
+		args = append(args, "--history-file", filepath.Join(dir, "fixed_32k_history.json"))
+	}
+	cmd := exec.CommandContext(ctx, node, args...)
+	cmd.Stdin = bytes.NewReader(messages)
+	cmd.Env = verificationCommandEnv(apiKey)
+	started := time.Now()
+	output, err := cmd.Output()
+	meta := verificationTransportMeta{Path: "/responses", Stream: true, RequestFormat: "native_codex", LatencyMS: time.Since(started).Milliseconds()}
+	if err != nil {
+		return verificationTransportResult{}, messages, output, meta, fmt.Errorf("native Codex transport failed: %w", err)
+	}
+	var report struct {
+		Status  int                 `json:"status"`
+		Body    string              `json:"body"`
+		Headers map[string][]string `json:"headers"`
+	}
+	if err := json.Unmarshal(output, &report); err != nil {
+		return verificationTransportResult{}, messages, output, meta, err
+	}
+	meta.Status = report.Status
+	raw := []byte(report.Body)
+	if values := report.Headers["content-type"]; len(values) > 0 {
+		meta.ContentType = values[0]
+	}
+	if report.Status < 200 || report.Status >= 300 {
+		return verificationTransportResult{}, messages, raw, meta, fmt.Errorf("upstream returned HTTP %d", report.Status)
+	}
+	parsed, err := parseResponsesSSE(raw)
+	if err != nil {
+		return verificationTransportResult{}, messages, raw, meta, err
+	}
+	parsed.UpstreamCost, parsed.UpstreamCostOK = ParseUpstreamCostMicros(raw)
+	return parsed, messages, raw, meta, nil
+}
+
+func verificationCommandEnv(apiKey string) []string {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "GPT56_NATIVE_AUTHORIZATION=") {
+			env = append(env, entry)
+		}
+	}
+	return append(env, "GPT56_NATIVE_AUTHORIZATION="+apiKey)
+}
+
+func retryableVerificationError(status int, err error) bool {
+	if err == nil {
+		return false
+	}
+	return status == 0 || status == 408 || status == 429 || status >= 500
+}
+func verificationErrorCategory(status int, err error) string {
+	switch {
+	case status == 401 || status == 403:
+		return "authentication_failed"
+	case status == 404:
+		return "not_found"
+	case status == 429:
+		return "rate_limited"
+	case status >= 500:
+		return "upstream_error"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	default:
+		return "transport_or_stream_error"
+	}
+}
+
+func (s *VerificationService) persistAttempt(sessionID string, mapping ChannelModel, job VerificationJob, manifest verificationJobManifest, attemptNo int, requestBody, responseBody []byte, meta verificationTransportMeta, requestErr error) {
+	usage := Usage{}
+	upstreamCost := int64(0)
+	upstreamOK := false
+	if requestErr == nil {
+		if parsed, err := parseResponsesSSE(responseBody); err == nil {
+			usage = parsed.Usage
+		}
+		upstreamCost, upstreamOK = ParseUpstreamCostMicros(responseBody)
+	}
+	inputTokens, outputTokens := usage.InputTokens, usage.OutputTokens
+	if inputTokens == 0 && s.estimator != nil {
+		inputTokens = s.estimator.EstimateJSON(requestBody)
+	}
+	if outputTokens == 0 && s.estimator != nil {
+		outputTokens = s.estimator.EstimateJSON(responseBody)
+	}
+	usage.InputTokens = inputTokens
+	usage.OutputTokens = outputTokens
+	estimated := CalculateCostMicros(mapping, usage)
+	costSource := CostSourceFallback
+	outcome := RelayOutcomeSuccess
+	if requestErr != nil || meta.Status < 200 || meta.Status >= 300 {
+		estimated = 0
+		upstreamCost = 0
+		costSource = CostSourceFailedZero
+		outcome = RelayOutcomeFailed
+	} else if upstreamOK {
+		costSource = CostSourceUpstream
+	} else {
+		upstreamCost = estimated
+	}
+	reqText, reqTrunc := boundVerificationBody(requestBody)
+	respText, respTrunc := boundVerificationBody(responseBody)
+	now := time.Now().UTC()
+	attempt := VerificationAttempt{ID: uuid.NewString(), SessionID: sessionID, Sequence: job.Sequence, JobID: job.ID, AttemptNo: attemptNo, DetectorName: manifest.ProbeID, ProbeID: manifest.ProbeID, RequestFormat: manifest.RequestFormat, ContextMode: manifest.ContextMode, Effort: manifest.Effort, Method: http.MethodPost, Path: "/responses", Stream: true, RequestBody: reqText, RequestBodyTruncated: reqTrunc, ResponseBody: respText, ResponseBodyTruncated: respTrunc, ContentType: meta.ContentType, StatusCode: meta.Status, Outcome: outcome, ErrorMessage: truncateVerificationText(errorString(requestErr), 512), InputTokens: inputTokens, OutputTokens: outputTokens, CachedTokens: usage.CachedTokens, CacheWriteTokens: usage.CacheWriteTokens, EstimatedCostMicros: estimated, UpstreamCostMicros: upstreamCost, CostSource: costSource, UsageSource: usage.Source, LatencyMS: meta.LatencyMS, StartedAt: now.Add(-time.Duration(meta.LatencyMS) * time.Millisecond), FinishedAt: now}
+	_ = s.store.db.Create(&attempt).Error
+}
+
+func (s *VerificationService) finishJobError(job VerificationJob, category string, err error) error {
+	result := verificationJobResult{Status: "error", ErrorCategory: category, ErrorMessage: truncateVerificationText(errorString(err), 512)}
+	encoded, _ := json.Marshal(result)
+	return s.store.db.Model(&VerificationJob{}).Where("id = ?", job.ID).Updates(map[string]any{"status": "error", "result_json": string(encoded), "updated_at": time.Now().UTC()}).Error
+}
+func (s *VerificationService) cancelJob(job VerificationJob) error {
+	result := verificationJobResult{Status: "cancelled", ErrorCategory: "cancelled", ErrorMessage: "用户已停止检测"}
+	encoded, _ := json.Marshal(result)
+	return s.store.db.Model(&VerificationJob{}).Where("id = ?", job.ID).Updates(map[string]any{"status": "cancelled", "result_json": string(encoded), "updated_at": time.Now().UTC()}).Error
+}
+
+func (s *VerificationService) stopRequested(sessionID string) bool {
+	var count int64
+	s.store.db.Model(&VerificationSession{}).Where("id = ? AND stop_requested_at IS NOT NULL", sessionID).Count(&count)
+	return count > 0
+}
+func (s *VerificationService) requestStop(sessionID, message string) {
+	now := time.Now().UTC()
+	_ = s.store.db.Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{"stop_requested_at": &now, "error_message": message}).Error
+	s.mu.Lock()
+	cancel := s.runs[sessionID]
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+func (s *VerificationService) Stop(ctx context.Context, sessionID string) (*VerificationSessionView, error) {
+	var session VerificationSession
+	if err := s.store.db.WithContext(ctx).First(&session, "id = ?", strings.TrimSpace(sessionID)).Error; err != nil {
+		return nil, err
+	}
+	if session.Status != "running" && session.Status != "stopping" {
+		return nil, fmt.Errorf("verification session is already %s", session.Status)
+	}
+	if session.Status == "stopping" {
+		view := verificationSessionView(session)
+		return &view, nil
+	}
+	s.requestStop(session.ID, "用户已请求停止检测")
+	session.StopRequestedAt = verificationTimePtr(time.Now().UTC())
+	session.Status = "stopping"
+	view := verificationSessionView(session)
+	return &view, nil
+}
+func verificationTimePtr(value time.Time) *time.Time { return &value }
+
+type verificationAggregate struct{ RequestCount, SuccessCount, InputTokens, OutputTokens, CachedTokens, CacheWriteTokens, EstimatedCostMicros, UpstreamCostMicros int64 }
+
+func (s *VerificationService) verificationAggregate(ctx context.Context, sessionID string) (verificationAggregate, error) {
+	var a verificationAggregate
+	err := s.store.db.WithContext(ctx).Model(&VerificationAttempt{}).Select("COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),0) AS success_count, COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(cached_tokens),0) AS cached_tokens, COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens, COALESCE(SUM(estimated_cost_micros),0) AS estimated_cost_micros, COALESCE(SUM(upstream_cost_micros),0) AS upstream_cost_micros").Where("session_id = ?", sessionID).Scan(&a).Error
+	return a, err
+}
+
+type verificationCombinedReport struct {
+	OutcomeCode     string             `json:"outcomeCode"`
+	Title           string             `json:"title"`
+	Subtitle        string             `json:"subtitle"`
+	JuiceState      string             `json:"juiceState"`
+	Fingerprint     fingerprintSummary `json:"fingerprintSummary"`
+	OutputSummary   map[string]any     `json:"outputIntegritySummary"`
+	CoverageSummary map[string]any     `json:"coverageSummary"`
+}
+
+func (s *VerificationService) finalizeSession(sessionID, claimedModel string) error {
+	var session VerificationSession
+	if err := s.store.db.First(&session, "id = ?", sessionID).Error; err != nil {
+		return err
+	}
+	var existing VerificationReport
+	if err := s.store.db.Where("session_id = ?", sessionID).First(&existing).Error; err == nil {
+		status := "completed"
+		if session.StopRequestedAt != nil {
+			status = "stopped"
+		}
+		var completed int64
+		if err := s.store.db.Model(&VerificationJob{}).Where("session_id = ? AND status IN ?", sessionID, []string{"succeeded", "error", "cancelled"}).Count(&completed).Error; err != nil {
+			return err
+		}
+		aggregate, err := s.verificationAggregate(context.Background(), sessionID)
+		if err != nil {
+			return err
+		}
+		return s.store.db.Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{"status": status, "completed_count": completed, "verdict": existing.Verdict, "summary": existing.Summary, "request_count": aggregate.RequestCount, "success_count": aggregate.SuccessCount, "input_tokens": aggregate.InputTokens, "output_tokens": aggregate.OutputTokens, "cached_tokens": aggregate.CachedTokens, "cache_write_tokens": aggregate.CacheWriteTokens, "estimated_cost_micros": aggregate.EstimatedCostMicros, "upstream_cost_micros": aggregate.UpstreamCostMicros, "finished_at": existing.FinishedAt}).Error
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	var jobs []VerificationJob
+	if err := s.store.db.Where("session_id = ?", sessionID).Order("sequence asc").Find(&jobs).Error; err != nil {
+		return err
+	}
+	manifests := map[string]verificationJobManifest{}
+	results := map[string]verificationJobResult{}
+	completed := int64(0)
+	for _, job := range jobs {
+		var manifest verificationJobManifest
+		_ = json.Unmarshal([]byte(job.ManifestJSON), &manifest)
+		manifests[job.ID] = manifest
+		if job.ResultJSON != "" {
+			var result verificationJobResult
+			_ = json.Unmarshal([]byte(job.ResultJSON), &result)
+			results[job.ID] = result
+			completed++
+		}
+	}
+	juiceState, juiceEvidence := summarizeJuice(session.Mode, claimedModel, manifests, results)
+	output := summarizeOutput(manifests, results)
+	coverage := summarizeCoverage(manifests, results)
+	if output["hardAnomaly"] == true || coverage["hardAnomaly"] == true {
+		juiceState = "mismatch"
+	}
+	fingerprint, err := scoreFingerprint(session.Mode, manifests, results)
+	if err != nil {
+		return err
+	}
+	outcome, title, subtitle := verificationOutcome(juiceState, fingerprint)
+	checks := []VerificationCheckResult{{Name: "juice", Label: "Juice 型号指纹", Category: "确定性证据", Status: verificationLayerStatus(juiceState), Summary: verificationJuiceSummary(juiceState), Evidence: juiceEvidence}, {Name: "output_integrity", Label: "32/48 输出完整性", Category: "确定性证据", Status: boolLayerStatus(output["hardAnomaly"] == true), Summary: "检查固定 32/48 是否被改写为 40 前缀。", Evidence: output}, {Name: "coverage", Label: "Juice 显式覆盖", Category: "确定性证据", Status: boolLayerStatus(coverage["hardAnomaly"] == true), Summary: "检查显式 developer 定义是否被隐藏 Juice 提示覆盖。", Evidence: coverage}, {Name: "fingerprint", Label: "行为指纹", Category: "相对行为证据", Status: fingerprintLayerStatus(fingerprint), Summary: verificationFingerprintSummary(fingerprint), Evidence: map[string]any{"scoringVersion": fingerprint.ScoringVersion, "baselineId": fingerprint.BaselineID, "baselineSha256": fingerprint.BaselineSHA256, "fingerprintModel": fingerprint.Model, "fingerprintMatch": fingerprint.Match, "thresholds": fingerprint.Thresholds, "officialEligible": fingerprint.OfficialEligible, "unclearReasons": fingerprint.UnclearReasons, "cells": fingerprint.Cells, "families": fingerprint.FamilyContributions}}}
+	checksJSON, _ := json.Marshal(checks)
+	combined := verificationCombinedReport{OutcomeCode: outcome, Title: title, Subtitle: subtitle, JuiceState: juiceState, Fingerprint: fingerprint, OutputSummary: output, CoverageSummary: coverage}
+	reportJSON, _ := json.Marshal(combined)
+	aggregate, err := s.verificationAggregate(context.Background(), sessionID)
+	if err != nil {
+		return err
+	}
+	finished := time.Now().UTC()
+	status := "completed"
+	if session.StopRequestedAt != nil {
+		status = "stopped"
+	}
+	report := VerificationReport{ID: uuid.NewString(), SessionID: session.ID, ChannelID: session.ChannelID, ChannelName: session.ChannelName, ModelID: session.ModelID, PublicModel: session.PublicModel, UpstreamModel: session.UpstreamModel, Mode: session.Mode, Score: 0, Verdict: outcome, Summary: subtitle, RequestCount: aggregate.RequestCount, InputTokens: aggregate.InputTokens, OutputTokens: aggregate.OutputTokens, EstimatedCostMicros: aggregate.EstimatedCostMicros, UpstreamCostMicros: aggregate.UpstreamCostMicros, ChecksJSON: string(checksJSON), ReportJSON: string(reportJSON), StartedAt: session.StartedAt, FinishedAt: finished}
+	return s.store.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&report).Error; err != nil {
+			return err
+		}
+		return tx.Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{"status": status, "completed_count": completed, "verdict": outcome, "summary": subtitle, "request_count": aggregate.RequestCount, "success_count": aggregate.SuccessCount, "input_tokens": aggregate.InputTokens, "output_tokens": aggregate.OutputTokens, "cached_tokens": aggregate.CachedTokens, "cache_write_tokens": aggregate.CacheWriteTokens, "estimated_cost_micros": aggregate.EstimatedCostMicros, "upstream_cost_micros": aggregate.UpstreamCostMicros, "finished_at": finished}).Error
+	})
+}
+
+func summarizeJuice(mode, claimed string, manifests map[string]verificationJobManifest, results map[string]verificationJobResult) (string, map[string]any) {
+	effortNeeded := map[string]int{}
+	for _, m := range manifests {
+		if strings.HasPrefix(m.ProbeID, "juice_") && m.ProbeID != "juice_coverage" {
+			if _, ok := effortNeeded[m.Effort]; !ok {
+				effortNeeded[m.Effort] = m.Repeat
+			}
+		}
+	}
+	counts := map[string]map[string]int{}
+	mixedModels := map[string]bool{}
+	for id, r := range results {
+		m := manifests[id]
+		if !strings.HasPrefix(m.ProbeID, "juice_") || m.ProbeID == "juice_coverage" {
+			continue
+		}
+		if counts[m.Effort] == nil {
+			counts[m.Effort] = map[string]int{}
+		}
+		counts[m.Effort][r.Classification]++
+		for _, model := range r.MixedModels {
+			mixedModels[model] = true
+		}
+	}
+	state := "pass"
+	mixed := false
+	allUnsuccessful := len(effortNeeded) > 0
+	missing := []string{}
+	for effort, needed := range effortNeeded {
+		c := counts[effort]
+		if c["mixed"] > 0 {
+			mixed = true
+		}
+		if c["current_success"] == 0 {
+			missing = append(missing, effort)
+		}
+		valid := c["current_success"] + c["mixed"] + c["unsuccessful"]
+		if valid < needed || c["current_success"] > 0 || c["mixed"] > 0 || c["unsuccessful"] != valid {
+			allUnsuccessful = false
+		}
+	}
+	if mixed {
+		state = "mismatch"
+	} else if allUnsuccessful {
+		state = "possible_non_gpt"
+	} else if len(missing) > 0 {
+		state = "insufficient"
+	}
+	models := []string{}
+	for model := range mixedModels {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	sort.Strings(missing)
+	return state, map[string]any{"claimedModel": claimed, "perEffort": counts, "minimumValidByEffort": effortNeeded, "mixedModelsObserved": models, "missingCurrentSuccessEfforts": missing}
+}
+func summarizeOutput(manifests map[string]verificationJobManifest, results map[string]verificationJobResult) map[string]any {
+	requests, exact, invalid := 0, 0, 0
+	failures := []map[string]any{}
+	for id, r := range results {
+		m := manifests[id]
+		if !strings.HasPrefix(m.ProbeID, "output_") || r.Status != "ok" {
+			continue
+		}
+		requests++
+		if r.Exact {
+			exact++
+		}
+		if r.Classification == "unsuccessful" {
+			invalid++
+		}
+		if r.HardAnomaly {
+			failures = append(failures, map[string]any{"probeId": m.ProbeID, "observed": r.Answer, "classification": r.Classification})
+		}
+	}
+	return map[string]any{"requests": requests, "exact": exact, "invalid": invalid, "hardAnomaly": len(failures) > 0, "failures": failures}
+}
+func summarizeCoverage(manifests map[string]verificationJobManifest, results map[string]verificationJobResult) map[string]any {
+	counts := map[string]int{}
+	failures := []map[string]any{}
+	for id, r := range results {
+		m := manifests[id]
+		if m.ProbeID != "juice_coverage" || r.Status != "ok" {
+			continue
+		}
+		counts[r.Classification]++
+		if r.HardAnomaly {
+			failures = append(failures, map[string]any{"observed": r.Answer, "expected": m.SyntheticValue, "classification": r.Classification})
+		}
+	}
+	return map[string]any{"requests": sumMapCounts(counts), "classifications": counts, "hardAnomaly": len(failures) > 0, "failures": failures}
+}
+func sumMapCounts(values map[string]int) int {
+	total := 0
+	for _, v := range values {
+		total += v
+	}
+	return total
+}
+
+func verificationOutcome(juice string, fingerprint fingerprintSummary) (string, string, string) {
+	strong := fingerprint.Status == "strong_match" && fingerprint.Model != ""
+	fp := "指纹证据不明确"
+	if strong {
+		fp = "指纹强烈指向 " + verificationModelLabel(fingerprint.Model)
+	}
+	if juice == "possible_non_gpt" {
+		return "possible_non_gpt", "可能非GPT", "所有达到数量要求的有效 Juice 响应均未命中已知型号指纹；也可能由统一输出改写、参数未透传或探针拦截造成。"
+	}
+	juiceLabel := map[string]string{"pass": "Juice通过", "mismatch": "Juice与申报型号不一致", "insufficient": "Juice证据不足"}[juice]
+	codePart := map[string]string{"pass": "pass", "mismatch": "mismatch", "insufficient": "insufficient"}[juice]
+	code := fmt.Sprintf("juice_%s_fingerprint_%s", codePart, map[bool]string{true: "strong", false: "unclear"}[strong])
+	title := juiceLabel + "；" + fp
+	subtitle := title + "。两层证据必须分别阅读，指纹匹配度不是真实路由概率。"
+	return code, title, subtitle
+}
+func verificationModelLabel(model string) string {
+	return map[string]string{"gpt-5.6-sol": "Sol", "gpt-5.6-terra": "Terra", "gpt-5.6-luna": "Luna"}[model]
+}
+func verificationLayerStatus(state string) string {
+	if state == "mismatch" || state == "possible_non_gpt" {
+		return "failed"
+	}
+	if state == "pass" {
+		return "passed"
+	}
+	return "skipped"
+}
+func boolLayerStatus(failed bool) string {
+	if failed {
+		return "failed"
+	}
+	return "passed"
+}
+func fingerprintLayerStatus(f fingerprintSummary) string {
+	if f.Status == "strong_match" {
+		return "passed"
+	}
+	return "skipped"
+}
+func verificationJuiceSummary(state string) string {
+	return map[string]string{"pass": "所有启用思考档均取得申报型号命中，且未发现其他已知型号。", "mismatch": "检测到其他已知型号 Juice 或确定性输出异常。", "possible_non_gpt": "足量有效响应均未命中任何已知 GPT Juice。", "insufficient": "至少一个启用思考档没有取得申报型号命中。"}[state]
+}
+func verificationFingerprintSummary(f fingerprintSummary) string {
+	if f.Status == "strong_match" {
+		return fmt.Sprintf("行为分布越过正式门槛，强烈指向 %s（这不是身份概率）。", verificationModelLabel(f.Model))
+	}
+	if containsString(f.UnclearReasons, "builtin_fingerprint_not_enabled") {
+		return "低档未启用行为指纹，这是预期的主动弃权。"
+	}
+	return "行为层未形成正式强指向，请结合完成率和线路错误阅读。"
+}
+func verificationModeLabel(mode string) string {
+	return map[string]string{"low": "低档", "medium": "中档", "high": "高档"}[mode]
+}
+
+func (s *VerificationService) failSession(sessionID string, err error) {
+	_ = s.store.db.Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{"status": "failed", "error_message": truncateVerificationText(errorString(err), 512), "finished_at": time.Now().UTC()}).Error
+}
+
+func (s *VerificationService) ListReports(ctx context.Context, q VerificationReportQuery) (*VerificationReportPage, error) {
+	page, size := normalizeVerificationPage(q.Page, q.PageSize)
 	db := s.store.db.WithContext(ctx).Model(&VerificationReport{})
-	if query.ChannelID > 0 {
-		db = db.Where("channel_id = ?", query.ChannelID)
+	if q.ChannelID > 0 {
+		db = db.Where("channel_id = ?", q.ChannelID)
 	}
-	if query.ModelID > 0 {
-		db = db.Where("model_id = ?", query.ModelID)
+	if q.ModelID > 0 {
+		db = db.Where("model_id = ?", q.ModelID)
 	}
 	var total int64
 	if err := db.Count(&total).Error; err != nil {
 		return nil, err
 	}
-	var reports []VerificationReport
-	if err := db.Order("finished_at desc").Offset((page - 1) * pageSize).Limit(pageSize).Find(&reports).Error; err != nil {
+	var rows []VerificationReport
+	if err := db.Order("finished_at desc").Offset((page - 1) * size).Limit(size).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	items := make([]VerificationReportView, 0, len(reports))
-	for _, report := range reports {
-		items = append(items, reportView(report))
+	items := make([]VerificationReportView, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, reportView(row))
 	}
-	return &VerificationReportPage{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
+	return &VerificationReportPage{Items: items, Total: total, Page: page, PageSize: size}, nil
 }
-
 func (s *VerificationService) Report(ctx context.Context, id string) (*VerificationReportView, error) {
-	var report VerificationReport
-	if err := s.store.db.WithContext(ctx).First(&report, "id = ?", strings.TrimSpace(id)).Error; err != nil {
+	var row VerificationReport
+	if err := s.store.db.WithContext(ctx).First(&row, "id = ?", strings.TrimSpace(id)).Error; err != nil {
 		return nil, err
 	}
-	view := reportView(report)
+	view := reportView(row)
 	return &view, nil
 }
-
-func (s *VerificationService) ListSessions(ctx context.Context, query VerificationSessionQuery) (*VerificationSessionPage, error) {
-	page := query.Page
-	if page < 1 {
-		page = 1
-	}
-	pageSize := query.PageSize
-	if pageSize < 1 || pageSize > 100 {
-		pageSize = 20
-	}
+func (s *VerificationService) ListSessions(ctx context.Context, q VerificationSessionQuery) (*VerificationSessionPage, error) {
+	page, size := normalizeVerificationPage(q.Page, q.PageSize)
 	db := s.store.db.WithContext(ctx).Model(&VerificationSession{})
-	if query.ChannelID > 0 {
-		db = db.Where("channel_id = ?", query.ChannelID)
+	if q.ChannelID > 0 {
+		db = db.Where("channel_id = ?", q.ChannelID)
 	}
-	if query.ModelID > 0 {
-		db = db.Where("model_id = ?", query.ModelID)
+	if q.ModelID > 0 {
+		db = db.Where("model_id = ?", q.ModelID)
 	}
 	var total int64
 	if err := db.Count(&total).Error; err != nil {
 		return nil, err
 	}
-	var sessions []VerificationSession
-	if err := db.Order("started_at desc").Offset((page - 1) * pageSize).Limit(pageSize).Find(&sessions).Error; err != nil {
+	var rows []VerificationSession
+	if err := db.Order("started_at desc").Offset((page - 1) * size).Limit(size).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	items := make([]VerificationSessionView, 0, len(sessions))
-	for _, session := range sessions {
-		items = append(items, verificationSessionView(session))
+	items := make([]VerificationSessionView, 0, len(rows))
+	for _, row := range rows {
+		s.refreshSessionProgress(&row)
+		items = append(items, verificationSessionView(row))
 	}
-	return &VerificationSessionPage{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
+	return &VerificationSessionPage{Items: items, Total: total, Page: page, PageSize: size}, nil
 }
-
 func (s *VerificationService) Session(ctx context.Context, id string) (*VerificationSessionDetailView, error) {
 	var session VerificationSession
 	if err := s.store.db.WithContext(ctx).First(&session, "id = ?", strings.TrimSpace(id)).Error; err != nil {
 		return nil, err
 	}
+	s.refreshSessionProgress(&session)
 	var attempts []VerificationAttempt
-	if err := s.store.db.WithContext(ctx).Where("session_id = ?", session.ID).Order("sequence asc").Find(&attempts).Error; err != nil {
+	if err := s.store.db.WithContext(ctx).Where("session_id = ?", session.ID).Order("sequence asc, attempt_no asc").Find(&attempts).Error; err != nil {
 		return nil, err
 	}
 	views := make([]VerificationAttemptView, 0, len(attempts))
@@ -385,359 +1185,44 @@ func (s *VerificationService) Session(ctx context.Context, id string) (*Verifica
 	}
 	return &VerificationSessionDetailView{Session: verificationSessionView(session), Attempts: views}, nil
 }
-
-type verificationAggregate struct {
-	RequestCount        int64
-	SuccessCount        int64
-	InputTokens         int64
-	OutputTokens        int64
-	CachedTokens        int64
-	CacheWriteTokens    int64
-	EstimatedCostMicros int64
-	UpstreamCostMicros  int64
-}
-
-func (s *VerificationService) verificationAggregate(ctx context.Context, sessionID string) (verificationAggregate, error) {
-	var aggregate verificationAggregate
-	err := s.store.db.WithContext(ctx).Model(&VerificationAttempt{}).
-		Select("COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END), 0) AS success_count, COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens, COALESCE(SUM(cached_tokens), 0) AS cached_tokens, COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens, COALESCE(SUM(estimated_cost_micros), 0) AS estimated_cost_micros, COALESCE(SUM(upstream_cost_micros), 0) AS upstream_cost_micros").
-		Where("session_id = ?", sessionID).Scan(&aggregate).Error
-	return aggregate, err
-}
-
-func (s *VerificationService) finishVerificationSession(ctx context.Context, sessionID string, report VerificationReport) error {
-	aggregate, err := s.verificationAggregate(ctx, sessionID)
-	if err != nil {
-		return err
-	}
-	return s.store.db.WithContext(ctx).Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{
-		"status": "completed", "score": report.Score, "verdict": report.Verdict, "summary": report.Summary,
-		"request_count": aggregate.RequestCount, "success_count": aggregate.SuccessCount,
-		"input_tokens": aggregate.InputTokens, "output_tokens": aggregate.OutputTokens,
-		"cached_tokens": aggregate.CachedTokens, "cache_write_tokens": aggregate.CacheWriteTokens,
-		"estimated_cost_micros": aggregate.EstimatedCostMicros, "upstream_cost_micros": aggregate.UpstreamCostMicros,
-		"finished_at": report.FinishedAt,
-	}).Error
-}
-
-func (s *VerificationService) failVerificationSession(ctx context.Context, sessionID string, err error) {
-	if strings.TrimSpace(sessionID) == "" {
+func (s *VerificationService) refreshSessionProgress(session *VerificationSession) {
+	if session.Status != "running" && session.Status != "stopping" {
 		return
 	}
-	_ = s.store.db.WithContext(context.WithoutCancel(ctx)).Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{
-		"status": "failed", "error_message": truncateVerificationText(errorString(err), 512), "finished_at": time.Now().UTC(),
-	})
+	var completed int64
+	_ = s.store.db.Model(&VerificationJob{}).Where("session_id = ? AND status IN ?", session.ID, []string{"succeeded", "error", "cancelled"}).Count(&completed).Error
+	session.CompletedCount = completed
+	aggregate, _ := s.verificationAggregate(context.Background(), session.ID)
+	session.RequestCount = aggregate.RequestCount
+	session.SuccessCount = aggregate.SuccessCount
+	session.InputTokens = aggregate.InputTokens
+	session.OutputTokens = aggregate.OutputTokens
+	session.UpstreamCostMicros = aggregate.UpstreamCostMicros
+	if session.StopRequestedAt != nil {
+		session.Status = "stopping"
+	}
 }
-
-func reportView(report VerificationReport) VerificationReportView {
+func normalizeVerificationPage(page, size int) (int, int) {
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 100 {
+		size = 20
+	}
+	return page, size
+}
+func reportView(row VerificationReport) VerificationReportView {
 	var checks []VerificationCheckResult
-	if err := json.Unmarshal([]byte(report.ChecksJSON), &checks); err != nil {
-		checks = []VerificationCheckResult{}
-	}
-	return VerificationReportView{ID: report.ID, SessionID: report.SessionID, ChannelID: report.ChannelID, ChannelName: report.ChannelName, ModelID: report.ModelID, PublicModel: report.PublicModel, UpstreamModel: report.UpstreamModel, Mode: report.Mode, Score: report.Score, Verdict: report.Verdict, Summary: report.Summary, Checks: checks, StartedAt: report.StartedAt, FinishedAt: report.FinishedAt, RequestCount: report.RequestCount, InputTokens: report.InputTokens, OutputTokens: report.OutputTokens, EstimatedCostMicros: report.EstimatedCostMicros, UpstreamCostMicros: report.UpstreamCostMicros}
+	_ = json.Unmarshal([]byte(row.ChecksJSON), &checks)
+	combined := verificationCombinedReport{}
+	_ = json.Unmarshal([]byte(row.ReportJSON), &combined)
+	return VerificationReportView{ID: row.ID, SessionID: row.SessionID, ChannelID: row.ChannelID, ChannelName: row.ChannelName, ModelID: row.ModelID, PublicModel: row.PublicModel, UpstreamModel: row.UpstreamModel, Mode: row.Mode, Score: row.Score, Verdict: row.Verdict, OutcomeCode: combined.OutcomeCode, Title: combined.Title, Summary: row.Summary, FingerprintModel: combined.Fingerprint.Model, FingerprintMatch: combined.Fingerprint.Match, Checks: checks, StartedAt: row.StartedAt, FinishedAt: row.FinishedAt, RequestCount: row.RequestCount, InputTokens: row.InputTokens, OutputTokens: row.OutputTokens, EstimatedCostMicros: row.EstimatedCostMicros, UpstreamCostMicros: row.UpstreamCostMicros}
 }
-
-func verificationSessionView(session VerificationSession) VerificationSessionView {
-	return VerificationSessionView{ID: session.ID, ChannelID: session.ChannelID, ChannelName: session.ChannelName, ModelID: session.ModelID, PublicModel: session.PublicModel, UpstreamModel: session.UpstreamModel, Mode: session.Mode, Status: session.Status, Score: session.Score, Verdict: session.Verdict, Summary: session.Summary, RequestCount: session.RequestCount, SuccessCount: session.SuccessCount, InputTokens: session.InputTokens, OutputTokens: session.OutputTokens, CachedTokens: session.CachedTokens, CacheWriteTokens: session.CacheWriteTokens, EstimatedCostMicros: session.EstimatedCostMicros, UpstreamCostMicros: session.UpstreamCostMicros, ErrorMessage: session.ErrorMessage, StartedAt: session.StartedAt, FinishedAt: session.FinishedAt}
+func verificationSessionView(row VerificationSession) VerificationSessionView {
+	return VerificationSessionView{ID: row.ID, ChannelID: row.ChannelID, ChannelName: row.ChannelName, ModelID: row.ModelID, PublicModel: row.PublicModel, UpstreamModel: row.UpstreamModel, Mode: row.Mode, Status: row.Status, PlannedCount: row.PlannedCount, CompletedCount: row.CompletedCount, Score: row.Score, Verdict: row.Verdict, Summary: row.Summary, RequestCount: row.RequestCount, SuccessCount: row.SuccessCount, InputTokens: row.InputTokens, OutputTokens: row.OutputTokens, CachedTokens: row.CachedTokens, CacheWriteTokens: row.CacheWriteTokens, EstimatedCostMicros: row.EstimatedCostMicros, UpstreamCostMicros: row.UpstreamCostMicros, ErrorMessage: row.ErrorMessage, StopRequestedAt: row.StopRequestedAt, StartedAt: row.StartedAt, FinishedAt: row.FinishedAt}
 }
-
-func verificationAttemptView(attempt VerificationAttempt) VerificationAttemptView {
-	return VerificationAttemptView{ID: attempt.ID, Sequence: attempt.Sequence, DetectorName: attempt.DetectorName, Method: attempt.Method, Path: attempt.Path, Stream: attempt.Stream, RequestBody: attempt.RequestBody, RequestBodyTruncated: attempt.RequestBodyTruncated, ResponseBody: attempt.ResponseBody, ResponseBodyTruncated: attempt.ResponseBodyTruncated, ContentType: attempt.ContentType, StatusCode: attempt.StatusCode, Outcome: attempt.Outcome, ErrorMessage: attempt.ErrorMessage, InputTokens: attempt.InputTokens, OutputTokens: attempt.OutputTokens, CachedTokens: attempt.CachedTokens, CacheWriteTokens: attempt.CacheWriteTokens, EstimatedCostMicros: attempt.EstimatedCostMicros, UpstreamCostMicros: attempt.UpstreamCostMicros, CostSource: attempt.CostSource, UsageSource: attempt.UsageSource, LatencyMS: attempt.LatencyMS, StartedAt: attempt.StartedAt, FinishedAt: attempt.FinishedAt}
-}
-
-func normalizeVerificationMode(value string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", VerificationModeQuick:
-		return VerificationModeQuick, nil
-	case VerificationModeStandard:
-		return VerificationModeStandard, nil
-	case VerificationModeFull:
-		return VerificationModeFull, nil
-	default:
-		return "", fmt.Errorf("unsupported verification mode %q", value)
-	}
-}
-
-func verificationDetectors(mode string) []VerificationDetector {
-	detectors := []VerificationDetector{basicRequestDetector{}, modelConsistencyDetector{}}
-	if mode == VerificationModeStandard || mode == VerificationModeFull {
-		detectors = append(detectors, streamIntegrityDetector{}, usageBillingDetector{})
-	}
-	if mode == VerificationModeFull {
-		detectors = append(detectors, toolCallsDetector{}, structuredOutputDetector{})
-	}
-	return detectors
-}
-
-func verificationScore(results []VerificationCheckResult) (float64, string) {
-	var weighted, total float64
-	critical := false
-	for _, result := range results {
-		if result.Status == "skipped" {
-			continue
-		}
-		weighted += result.Score * result.Weight
-		total += result.Weight
-		critical = critical || (result.Critical && result.Status == "failed")
-	}
-	score := 0.0
-	if total > 0 {
-		score = weighted / total
-	}
-	verdict := "failed"
-	if score >= 70 {
-		verdict = "passed"
-	} else if score >= 50 {
-		verdict = "marginal"
-	}
-	if critical && verdict == "passed" {
-		verdict = "marginal"
-	}
-	return mathRound(score), verdict
-}
-
-func mathRound(value float64) float64 { return float64(int(value*10+0.5)) / 10 }
-
-func verificationSummary(score float64, verdict string, results []VerificationCheckResult) string {
-	failed := 0
-	for _, result := range results {
-		if result.Status == "failed" {
-			failed++
-		}
-	}
-	if failed == 0 {
-		return fmt.Sprintf("验证完成，%.1f 分，结果为 %s。", score, verdict)
-	}
-	return fmt.Sprintf("验证完成，%.1f 分，结果为 %s，%d 项检测未通过。", score, verdict, failed)
-}
-
-type verificationProbe struct {
-	client       *http.Client
-	baseURL      string
-	apiKey       string
-	model        string
-	mapping      ChannelModel
-	estimator    *TokenEstimator
-	service      *VerificationService
-	sessionID    string
-	detectorName string
-	sequence     int
-}
-
-type probeResponse struct {
-	status  int
-	latency int64
-	body    []byte
-	json    map[string]any
-	headers http.Header
-}
-
-func (p *verificationProbe) recordAttempt(started time.Time, stream bool, requestBody, responseBody []byte, status int, contentType, outcome string, err error, usage Usage, upstreamCost int64, upstreamCostOK bool) {
-	if p.service == nil || p.sessionID == "" {
-		return
-	}
-	p.sequence++
-	finished := time.Now().UTC()
-	usageSource := usage.Source
-	inputTokens := usage.InputTokens
-	outputTokens := usage.OutputTokens
-	if inputTokens == 0 && p.estimator != nil {
-		inputTokens = p.estimator.EstimateJSON(requestBody)
-	}
-	if outputTokens == 0 && p.estimator != nil {
-		outputTokens = p.estimator.EstimateJSON(responseBody)
-	}
-	usage.InputTokens = inputTokens
-	usage.OutputTokens = outputTokens
-	if usageSource == "" && (inputTokens > 0 || outputTokens > 0) {
-		usageSource = "estimated_verification"
-	}
-	estimatedCost := CalculateCostMicros(p.mapping, usage)
-	costSource := CostSourceFallback
-	if err != nil || status < 200 || status >= 300 {
-		estimatedCost = 0
-		upstreamCost = 0
-		costSource = CostSourceFailedZero
-	} else if upstreamCostOK {
-		costSource = CostSourceUpstream
-	} else {
-		upstreamCost = estimatedCost
-	}
-	if err != nil {
-		outcome = RelayOutcomeFailed
-	}
-	attempt := VerificationAttempt{
-		ID: uuid.NewString(), SessionID: p.sessionID, Sequence: p.sequence, DetectorName: p.detectorName,
-		Method: http.MethodPost, Path: "/chat/completions", Stream: stream,
-		RequestBody: string(requestBody), ResponseBody: string(responseBody), ContentType: contentType,
-		StatusCode: status, Outcome: outcome, ErrorMessage: truncateVerificationText(errorString(err), 512),
-		InputTokens: inputTokens, OutputTokens: outputTokens, CachedTokens: usage.CachedTokens, CacheWriteTokens: usage.CacheWriteTokens,
-		EstimatedCostMicros: estimatedCost, UpstreamCostMicros: upstreamCost, CostSource: costSource, UsageSource: usageSource,
-		LatencyMS: time.Since(started).Milliseconds(), StartedAt: started.UTC(), FinishedAt: finished,
-	}
-	attempt.RequestBody, attempt.RequestBodyTruncated = boundVerificationBody(requestBody)
-	attempt.ResponseBody, attempt.ResponseBodyTruncated = boundVerificationBody(responseBody)
-	_ = p.service.store.db.WithContext(context.Background()).Create(&attempt).Error
-}
-
-func boundVerificationBody(data []byte) (string, bool) {
-	if int64(len(data)) <= verificationAttemptBodyBytes {
-		return string(data), false
-	}
-	return string(data[:verificationAttemptBodyBytes]) + "\n... [truncated]", true
-}
-
-func truncateVerificationText(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	return value[:limit] + "..."
-}
-
-func (p *verificationProbe) request(ctx context.Context, payload map[string]any) (probeResponse, error) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return probeResponse{}, err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return probeResponse{}, err
-	}
-	request.Header.Set("Authorization", "Bearer "+p.apiKey)
-	request.Header.Set("Content-Type", "application/json")
-	started := time.Now()
-	response, err := p.client.Do(request)
-	if err != nil {
-		p.recordAttempt(started, false, body, nil, 0, "", RelayOutcomeFailed, err, Usage{}, 0, false)
-		return probeResponse{}, err
-	}
-	defer response.Body.Close()
-	limited := io.LimitReader(response.Body, verificationMaxBodyBytes+1)
-	responseBody, err := io.ReadAll(limited)
-	if err != nil {
-		p.recordAttempt(started, false, body, responseBody, response.StatusCode, response.Header.Get("Content-Type"), RelayOutcomeFailed, err, Usage{}, 0, false)
-		return probeResponse{}, err
-	}
-	if int64(len(responseBody)) > verificationMaxBodyBytes {
-		p.recordAttempt(started, false, body, responseBody, response.StatusCode, response.Header.Get("Content-Type"), RelayOutcomeFailed, errors.New("verification response exceeded 4 MiB"), Usage{}, 0, false)
-		return probeResponse{}, errors.New("verification response exceeded 4 MiB")
-	}
-	result := probeResponse{status: response.StatusCode, latency: time.Since(started).Milliseconds(), body: responseBody, headers: response.Header.Clone()}
-	usage, usageOK := ParseUsage(responseBody)
-	upstreamCost, upstreamCostOK := ParseUpstreamCostMicros(responseBody)
-	if !usageOK {
-		usage = Usage{}
-	}
-	outcome := RelayOutcomeFailed
-	if response.StatusCode >= 200 && response.StatusCode < 300 {
-		_ = json.Unmarshal(responseBody, &result.json)
-		outcome = RelayOutcomeSuccess
-	}
-	p.recordAttempt(started, false, body, responseBody, response.StatusCode, response.Header.Get("Content-Type"), outcome, nil, usage, upstreamCost, upstreamCostOK)
-	return result, nil
-}
-
-type streamProbeResponse struct {
-	status        int
-	latency       int64
-	contentType   string
-	chunkCount    int
-	eventNames    []string
-	responseID    string
-	responseModel string
-	usage         map[string]any
-	firstToken    bool
-	terminal      bool
-	body          []byte
-}
-
-func (p *verificationProbe) stream(ctx context.Context, payload map[string]any) (streamProbeResponse, error) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return streamProbeResponse{}, err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return streamProbeResponse{}, err
-	}
-	request.Header.Set("Authorization", "Bearer "+p.apiKey)
-	request.Header.Set("Content-Type", "application/json")
-	started := time.Now()
-	response, err := p.client.Do(request)
-	if err != nil {
-		p.recordAttempt(started, true, body, nil, 0, "", RelayOutcomeFailed, err, Usage{}, 0, false)
-		return streamProbeResponse{}, err
-	}
-	defer response.Body.Close()
-	result := streamProbeResponse{status: response.StatusCode, latency: time.Since(started).Milliseconds(), contentType: response.Header.Get("Content-Type"), eventNames: []string{}}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		responseBody, _ := io.ReadAll(io.LimitReader(response.Body, verificationAttemptBodyBytes+1))
-		result.body, _ = responseBody, false
-		p.recordAttempt(started, true, body, responseBody, response.StatusCode, result.contentType, RelayOutcomeFailed, nil, Usage{}, 0, false)
-		return result, nil
-	}
-	var captured bytes.Buffer
-	scanner := bufio.NewScanner(io.LimitReader(response.Body, verificationMaxBodyBytes))
-	scanner.Buffer(make([]byte, 4096), 1<<20)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if captured.Len() < int(verificationAttemptBodyBytes) {
-			captured.WriteString(line)
-			captured.WriteByte('\n')
-		}
-		if line == "" || !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if data == "[DONE]" {
-			result.terminal = true
-			continue
-		}
-		var chunk map[string]any
-		if json.Unmarshal([]byte(data), &chunk) != nil {
-			continue
-		}
-		result.chunkCount++
-		if value, ok := chunk["id"].(string); ok {
-			result.responseID = value
-		}
-		if value, ok := chunk["model"].(string); ok {
-			result.responseModel = value
-		}
-		if choices, ok := chunk["choices"].([]any); ok && len(choices) > 0 {
-			if choice, ok := choices[0].(map[string]any); ok {
-				if reason, ok := choice["finish_reason"].(string); ok && reason != "" {
-					result.terminal = true
-				}
-				if delta, ok := choice["delta"].(map[string]any); ok {
-					if content, ok := delta["content"].(string); ok && content != "" {
-						result.firstToken = true
-					}
-				}
-			}
-		}
-		if usage, ok := chunk["usage"].(map[string]any); ok {
-			result.usage = usage
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		result.body = captured.Bytes()
-		p.recordAttempt(started, true, body, result.body, result.status, result.contentType, RelayOutcomeFailed, err, Usage{}, 0, false)
-		return result, err
-	}
-	result.body = captured.Bytes()
-	usage := Usage{}
-	if len(result.usage) > 0 {
-		encoded, _ := json.Marshal(map[string]any{"usage": result.usage})
-		usage, _ = ParseUsage(encoded)
-	}
-	upstreamCost, upstreamCostOK := ParseUpstreamCostMicros(result.body)
-	outcome := RelayOutcomeFailed
-	if result.terminal {
-		outcome = RelayOutcomeSuccess
-	}
-	p.recordAttempt(started, true, body, result.body, result.status, result.contentType, outcome, nil, usage, upstreamCost, upstreamCostOK)
-	return result, nil
+func verificationAttemptView(a VerificationAttempt) VerificationAttemptView {
+	return VerificationAttemptView{ID: a.ID, Sequence: a.Sequence, JobID: a.JobID, AttemptNo: a.AttemptNo, DetectorName: a.DetectorName, ProbeID: a.ProbeID, RequestFormat: a.RequestFormat, ContextMode: a.ContextMode, Effort: a.Effort, Method: a.Method, Path: a.Path, Stream: a.Stream, RequestBody: a.RequestBody, RequestBodyTruncated: a.RequestBodyTruncated, ResponseBody: a.ResponseBody, ResponseBodyTruncated: a.ResponseBodyTruncated, ContentType: a.ContentType, StatusCode: a.StatusCode, Outcome: a.Outcome, ErrorMessage: a.ErrorMessage, InputTokens: a.InputTokens, OutputTokens: a.OutputTokens, CachedTokens: a.CachedTokens, CacheWriteTokens: a.CacheWriteTokens, EstimatedCostMicros: a.EstimatedCostMicros, UpstreamCostMicros: a.UpstreamCostMicros, CostSource: a.CostSource, UsageSource: a.UsageSource, LatencyMS: a.LatencyMS, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt}
 }
 
 func normalizeVerificationBaseURL(value string) (string, error) {
@@ -748,18 +1233,30 @@ func normalizeVerificationBaseURL(value string) (string, error) {
 	if base.User != nil || base.RawQuery != "" || base.Fragment != "" {
 		return "", errors.New("channel base URL cannot contain user info, query parameters, or fragments")
 	}
+	path := strings.TrimRight(base.Path, "/")
+	if path == "" {
+		path = "/v1"
+	}
+	base.Path = path
 	return strings.TrimRight(base.String(), "/"), nil
 }
-
-func basicPayload(model string, prompt string) map[string]any {
-	return map[string]any{"model": model, "messages": []any{map[string]any{"role": "user", "content": prompt}}, "max_tokens": 16}
-}
-
-func responseUsage(value map[string]any) map[string]any {
-	if usage, ok := value["usage"].(map[string]any); ok {
-		return usage
+func boundVerificationBody(data []byte) (string, bool) {
+	if len(data) <= verificationAttemptBodyBytes {
+		return string(data), false
 	}
-	return nil
+	return string(data[:verificationAttemptBodyBytes]) + "\n... [truncated]", true
+}
+func truncateVerificationText(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "..."
+}
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 func number(value any) (int64, bool) {
 	switch typed := value.(type) {
@@ -770,6 +1267,8 @@ func number(value any) (int64, bool) {
 		return parsed, err == nil
 	case int64:
 		return typed, true
+	case int:
+		return int64(typed), true
 	default:
 		return 0, false
 	}
@@ -789,222 +1288,6 @@ func usageNumbers(usage map[string]any) (int64, int64, int64, bool) {
 	total, okTotal := number(usage["total_tokens"])
 	return in, out, total, okIn && okOut && okTotal
 }
-func responseModel(value map[string]any) string { model, _ := value["model"].(string); return model }
-func responseChoices(value map[string]any) []any {
-	choices, _ := value["choices"].([]any)
-	return choices
-}
-func responseMessage(value map[string]any) map[string]any {
-	choices := responseChoices(value)
-	if len(choices) == 0 {
-		return nil
-	}
-	choice, _ := choices[0].(map[string]any)
-	message, _ := choice["message"].(map[string]any)
-	return message
-}
 
-type basicRequestDetector struct{}
-
-func (basicRequestDetector) Definition() verificationDetectorDefinition {
-	return verificationDetectorDefinition{"basic_request", "基础请求", "真伪", 15}
-}
-func (basicRequestDetector) Run(ctx context.Context, probe *verificationProbe) VerificationCheckResult {
-	response, err := probe.request(ctx, basicPayload(probe.model, "Reply with exactly: ok"))
-	if err != nil {
-		return failedCheck("无法完成基础请求: "+err.Error(), true, nil)
-	}
-	choices := responseChoices(response.json)
-	message := responseMessage(response.json)
-	content, _ := message["content"].(string)
-	passed := response.status >= 200 && response.status < 300 && len(choices) > 0 && strings.TrimSpace(content) != ""
-	evidence := map[string]any{"httpStatus": response.status, "latencyMs": response.latency, "responseModel": responseModel(response.json), "hasChoices": len(choices) > 0}
-	if passed {
-		return passedCheck("基础请求返回了可解析的 OpenAI Chat Completions 响应。", evidence)
-	}
-	return failedCheck("基础请求未返回有效的 choices.message.content。", true, evidence)
-}
-
-type modelConsistencyDetector struct{}
-
-func (modelConsistencyDetector) Definition() verificationDetectorDefinition {
-	return verificationDetectorDefinition{"model_consistency", "model 字段一致性", "协议", 15}
-}
-func (modelConsistencyDetector) Run(ctx context.Context, probe *verificationProbe) VerificationCheckResult {
-	models := []string{}
-	statuses := []int{}
-	for index := 0; index < 2; index++ {
-		response, err := probe.request(ctx, basicPayload(probe.model, "Return the word ok."))
-		if err != nil {
-			return failedCheck("模型一致性请求失败: "+err.Error(), false, nil)
-		}
-		statuses = append(statuses, response.status)
-		models = append(models, responseModel(response.json))
-	}
-	exact := len(models) == 2 && models[0] == probe.model && models[1] == probe.model
-	stable := len(models) == 2 && models[0] != "" && models[0] == models[1]
-	score := 0.0
-	if stable {
-		score = 50
-	}
-	if exact {
-		score = 100
-	}
-	evidence := map[string]any{"expectedModel": probe.model, "responseModels": models, "httpStatuses": statuses}
-	if exact {
-		return passedCheck("连续请求的 response.model 与渠道映射一致。", evidence)
-	}
-	result := failedCheck("response.model 与渠道映射不一致或多次响应不稳定。", false, evidence)
-	result.Score = score
-	return result
-}
-
-type streamIntegrityDetector struct{}
-
-func (streamIntegrityDetector) Definition() verificationDetectorDefinition {
-	return verificationDetectorDefinition{"stream_integrity", "流式协议完整性", "协议", 15}
-}
-func (streamIntegrityDetector) Run(ctx context.Context, probe *verificationProbe) VerificationCheckResult {
-	prompt := "Reply with exactly: streamed"
-	nonStream, err := probe.request(ctx, basicPayload(probe.model, prompt))
-	if err != nil {
-		return failedCheck("非流式对照请求失败: "+err.Error(), false, nil)
-	}
-	response, err := probe.stream(ctx, basicPayload(probe.model, prompt))
-	if err != nil {
-		return failedCheck("流式请求失败: "+err.Error(), false, nil)
-	}
-	nonStreamMessage := responseMessage(nonStream.json)
-	nonStreamContent, _ := nonStreamMessage["content"].(string)
-	modelConsistent := responseModel(nonStream.json) == probe.model && response.responseModel == probe.model
-	passed := nonStream.status >= 200 && nonStream.status < 300 && strings.TrimSpace(nonStreamContent) != "" && response.status >= 200 && response.status < 300 && strings.Contains(strings.ToLower(response.contentType), "text/event-stream") && response.chunkCount > 0 && response.firstToken && response.terminal && modelConsistent
-	evidence := map[string]any{"nonStreamStatus": nonStream.status, "streamStatus": response.status, "contentType": response.contentType, "chunkCount": response.chunkCount, "firstToken": response.firstToken, "terminal": response.terminal, "nonStreamModel": responseModel(nonStream.json), "streamModel": response.responseModel, "responseIdPresent": response.responseID != "", "nonStreamOutputPresent": strings.TrimSpace(nonStreamContent) != ""}
-	if passed {
-		return passedCheck("同一提示词的流式与非流式响应均可解析，模型字段和输出阶段一致。", evidence)
-	}
-	return failedCheck("流式与非流式响应在模型、SSE、输出或终止阶段存在差异。", false, evidence)
-}
-
-type usageBillingDetector struct{}
-
-func (usageBillingDetector) Definition() verificationDetectorDefinition {
-	return verificationDetectorDefinition{"usage_billing", "usage 计费合理性", "计费", 20}
-}
-func (usageBillingDetector) Run(ctx context.Context, probe *verificationProbe) VerificationCheckResult {
-	short, err := probe.request(ctx, basicPayload(probe.model, "Reply with exactly: ok"))
-	if err != nil {
-		return failedCheck("短请求失败: "+err.Error(), false, nil)
-	}
-	longPrompt := "Reply with exactly: ok. Reference text: " + strings.Repeat("apple ", 80)
-	long, err := probe.request(ctx, basicPayload(probe.model, longPrompt))
-	if err != nil {
-		return failedCheck("长请求失败: "+err.Error(), false, nil)
-	}
-	streamPayload := basicPayload(probe.model, "Reply with exactly: ok")
-	streamPayload["stream"] = true
-	streamPayload["stream_options"] = map[string]any{"include_usage": true}
-	streamed, streamErr := probe.stream(ctx, streamPayload)
-	shortIn, shortOut, shortTotal, shortOK := usageNumbers(responseUsage(short.json))
-	longIn, _, longTotal, longOK := usageNumbers(responseUsage(long.json))
-	arithmetic := shortOK && shortIn+shortOut == shortTotal && longOK && longIn <= longTotal
-	delta := longIn - shortIn
-	expected := int64(0)
-	if probe.estimator != nil {
-		expected = probe.estimator.EstimateText(longPrompt) - probe.estimator.EstimateText("Reply with exactly: ok")
-	}
-	deltaOK := delta > 0 && (expected == 0 || (delta >= expected/3 && delta <= expected*3))
-	streamIn, streamOut, streamTotal, streamOK := usageNumbers(streamed.usage)
-	streamCompatible := streamErr == nil && streamOK && streamIn >= 0 && streamOut > 0 && streamTotal == streamIn+streamOut && (streamIn-shortIn <= 2 && shortIn-streamIn <= 2)
-	passedCount := 0
-	if arithmetic {
-		passedCount++
-	}
-	if deltaOK {
-		passedCount++
-	}
-	if streamCompatible {
-		passedCount++
-	}
-	score := float64(passedCount) / 3 * 100
-	evidence := map[string]any{"shortUsage": responseUsage(short.json), "longUsage": responseUsage(long.json), "streamUsage": streamed.usage, "promptTokenDelta": delta, "estimatedPromptDelta": expected, "streamError": errorString(streamErr)}
-	result := failedCheck("usage 字段存在性、自洽性或流式一致性存在问题。", false, evidence)
-	result.Score = score
-	if score >= 66.6 {
-		result.Status = "passed"
-		result.Summary = "usage 字段基本自洽，但仍有部分交叉校验未通过。"
-		result.Critical = false
-	}
-	if score == 100 {
-		result.Summary = "usage 加法、长文本增量和流式统计均通过校验。"
-	}
-	return result
-}
-
-type toolCallsDetector struct{}
-
-func (toolCallsDetector) Definition() verificationDetectorDefinition {
-	return verificationDetectorDefinition{"tool_calls", "Tool Calls", "能力", 20}
-}
-func (toolCallsDetector) Run(ctx context.Context, probe *verificationProbe) VerificationCheckResult {
-	payload := basicPayload(probe.model, "Call the verification_echo function with value ok.")
-	payload["tools"] = []any{map[string]any{"type": "function", "function": map[string]any{"name": "verification_echo", "description": "Echo a verification value.", "parameters": map[string]any{"type": "object", "properties": map[string]any{"value": map[string]any{"type": "string"}}, "required": []string{"value"}, "additionalProperties": false}}}}
-	payload["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": "verification_echo"}}
-	response, err := probe.request(ctx, payload)
-	if err != nil {
-		return failedCheck("Tool Calls 请求失败: "+err.Error(), false, nil)
-	}
-	message := responseMessage(response.json)
-	calls, _ := message["tool_calls"].([]any)
-	valid := false
-	callID := ""
-	functionName := ""
-	if len(calls) > 0 {
-		call, _ := calls[0].(map[string]any)
-		callID, _ = call["id"].(string)
-		function, _ := call["function"].(map[string]any)
-		functionName, _ = function["name"].(string)
-		valid = strings.HasPrefix(callID, "call_") && functionName == "verification_echo"
-	}
-	evidence := map[string]any{"httpStatus": response.status, "toolCallCount": len(calls), "callIdPrefixValid": strings.HasPrefix(callID, "call_"), "functionName": functionName}
-	if valid {
-		return passedCheck("上游返回了符合 OpenAI 结构的 tool_calls。", evidence)
-	}
-	return failedCheck("未返回符合要求的 tool_calls 结构。", false, evidence)
-}
-
-type structuredOutputDetector struct{}
-
-func (structuredOutputDetector) Definition() verificationDetectorDefinition {
-	return verificationDetectorDefinition{"structured_output", "Structured Output", "能力", 15}
-}
-func (structuredOutputDetector) Run(ctx context.Context, probe *verificationProbe) VerificationCheckResult {
-	payload := basicPayload(probe.model, "Return a JSON object with ok=true.")
-	payload["response_format"] = map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "verification_result", "strict": true, "schema": map[string]any{"type": "object", "properties": map[string]any{"ok": map[string]any{"type": "boolean"}}, "required": []string{"ok"}, "additionalProperties": false}}}
-	response, err := probe.request(ctx, payload)
-	if err != nil {
-		return failedCheck("Structured Output 请求失败: "+err.Error(), false, nil)
-	}
-	message := responseMessage(response.json)
-	content, _ := message["content"].(string)
-	var value map[string]any
-	parseErr := json.Unmarshal([]byte(content), &value)
-	valid := response.status >= 200 && response.status < 300 && parseErr == nil && value["ok"] == true
-	evidence := map[string]any{"httpStatus": response.status, "jsonParsed": parseErr == nil, "okField": value["ok"]}
-	if valid {
-		return passedCheck("上游返回了符合 strict JSON Schema 的结构化输出。", evidence)
-	}
-	return failedCheck("未返回符合 strict JSON Schema 的结构化输出。", false, evidence)
-}
-
-func passedCheck(summary string, evidence map[string]any) VerificationCheckResult {
-	return VerificationCheckResult{Status: "passed", Score: 100, Summary: summary, Evidence: evidence}
-}
-func failedCheck(summary string, critical bool, evidence map[string]any) VerificationCheckResult {
-	return VerificationCheckResult{Status: "failed", Score: 0, Summary: summary, Critical: critical, Evidence: evidence}
-}
-func errorString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
+// Keep imports used by generated builds that compile without Native support paths.
+var _ = base64.StdEncoding

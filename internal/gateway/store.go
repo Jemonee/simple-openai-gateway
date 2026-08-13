@@ -77,6 +77,7 @@ func (s *Store) migrate() error {
 		&RelayRequestLog{},
 		&VerificationReport{},
 		&VerificationSession{},
+		&VerificationJob{},
 		&VerificationAttempt{},
 		&GatewayResource{},
 		&RequestResource{},

@@ -150,6 +150,19 @@ function sessionOrigin(value: string): { label: string; kind: 'user' | 'subagent
   return { label: '其他', kind: 'other' }
 }
 
+function isSourceSelected(source: ActiveSessionSource): boolean {
+  return selectedSources.value.includes(source)
+}
+
+function toggleSource(source: ActiveSessionSource) {
+  if (isSourceSelected(source)) {
+    if (selectedSources.value.length === 1) return
+    selectedSources.value = selectedSources.value.filter(value => value !== source)
+    return
+  }
+  selectedSources.value = [...selectedSources.value, source]
+}
+
 function channelState(session: CodexSessionSummary): { label: string; type: 'success' | 'warning' | 'danger' | 'info' } {
   const channel = session.currentChannel
   if (!channel) return { label: '未分配', type: 'info' }
@@ -250,9 +263,21 @@ onMounted(() => {
       />
       <div class="source-filter" role="group" aria-label="会话来源">
         <span>来源</span>
-        <el-checkbox-group v-model="selectedSources" :min="1">
-          <el-checkbox v-for="option in ACTIVE_SESSION_SOURCE_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</el-checkbox>
-        </el-checkbox-group>
+        <div class="source-tags">
+          <button
+            v-for="option in ACTIVE_SESSION_SOURCE_OPTIONS"
+            :key="option.value"
+            class="source-tag"
+            :class="{ 'is-selected': isSourceSelected(option.value) }"
+            type="button"
+            :aria-pressed="isSourceSelected(option.value)"
+            :aria-label="`${isSourceSelected(option.value) ? '取消筛选' : '筛选'} ${option.label}`"
+            :title="isSourceSelected(option.value) && selectedSources.length === 1 ? '至少保留一个来源' : undefined"
+            @click="toggleSource(option.value)"
+          >
+            {{ option.label }}
+          </button>
+        </div>
       </div>
       <el-button type="primary" :icon="Search" :loading="loading" @click="searchSessions">查询</el-button>
       <span class="active-count"><ChatDotRound />{{ loading ? '正在查询' : `${formatCompactNumber(total)} 个活跃会话` }}</span>
@@ -382,8 +407,12 @@ onMounted(() => {
 .active-query-bar .el-button { min-width: 88px; }
 .source-filter { display: flex; min-height: 32px; flex: 1 1 480px; align-items: center; gap: 10px; padding: 0 9px; border: 1px solid var(--hongfen-border); border-radius: var(--hongfen-radius-control); background: var(--hongfen-page); }
 .source-filter > span { flex: none; color: var(--hongfen-text-subtle); font-size: 11px; }
-.source-filter :deep(.el-checkbox-group) { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; column-gap: 12px; row-gap: 2px; }
-.source-filter :deep(.el-checkbox) { height: 30px; margin-right: 0; }
+.source-tags { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 5px; }
+.source-tag { min-height: 26px; padding: 3px 9px; border: 1px solid var(--hongfen-border); border-radius: var(--hongfen-radius-control); color: var(--hongfen-text-muted); background: var(--hongfen-surface-muted); font: 500 12px/1.2 var(--hongfen-font-sans); cursor: pointer; transition: color 140ms ease, border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease; }
+.source-tag:hover { border-color: var(--hongfen-border-strong); color: var(--hongfen-text); background: var(--hongfen-surface-strong); }
+.source-tag:focus-visible { outline: 2px solid var(--hongfen-primary); outline-offset: 2px; }
+.source-tag.is-selected { border-color: var(--hongfen-primary); color: var(--hongfen-surface); background: var(--hongfen-primary); box-shadow: 0 0 0 1px color-mix(in srgb, var(--hongfen-primary) 22%, transparent); }
+.source-tag.is-selected:hover { border-color: var(--hongfen-primary-hover); background: var(--hongfen-primary-hover); }
 .active-count { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; margin-left: auto; color: var(--hongfen-text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .active-count svg { width: 15px; height: 15px; color: var(--hongfen-success); }
 .active-table-panel { display: flex; min-width: 0; flex-direction: column; }

@@ -244,8 +244,18 @@ export interface CircuitRecordPage {
   pageSize: number
 }
 
-export type VerificationMode = 'quick' | 'standard' | 'full'
-export type VerificationVerdict = 'passed' | 'marginal' | 'failed'
+export type VerificationMode = 'low' | 'medium' | 'high' | 'quick' | 'standard' | 'full'
+export type VerificationVerdict =
+  | 'juice_pass_fingerprint_strong'
+  | 'juice_pass_fingerprint_unclear'
+  | 'juice_mismatch_fingerprint_strong'
+  | 'juice_mismatch_fingerprint_unclear'
+  | 'juice_insufficient_fingerprint_strong'
+  | 'juice_insufficient_fingerprint_unclear'
+  | 'possible_non_gpt'
+  | 'passed'
+  | 'marginal'
+  | 'failed'
 
 export interface VerificationCheckResult {
   /** Stable detector identifier used for filtering and future baseline comparisons. */
@@ -289,8 +299,16 @@ export interface VerificationReport {
   score: number
   /** Report-level verdict derived from score and critical failures. */
   verdict: VerificationVerdict
+  /** Canonical gpt56 detector seven-state outcome code. */
+  outcomeCode: VerificationVerdict
+  /** Chinese two-axis verdict title. */
+  title: string
   /** Short report summary. */
   summary: string
+  /** Model receiving a formal strong behavioral match, when any. */
+  fingerprintModel?: string
+  /** Relative matches inside the frozen Sol/Terra/Luna reference set. */
+  fingerprintMatch?: Record<string, number>
   /** Number of upstream detector calls in this run. */
   requestCount: number
   /** Aggregate input tokens observed or estimated for detector calls. */
@@ -309,7 +327,7 @@ export interface VerificationReport {
   finishedAt: string
 }
 
-export type VerificationSessionStatus = 'running' | 'completed' | 'failed'
+export type VerificationSessionStatus = 'running' | 'stopping' | 'completed' | 'stopped' | 'failed'
 
 export interface VerificationSession {
   /** Persistent verification session identifier. */
@@ -328,6 +346,10 @@ export interface VerificationSession {
   mode: VerificationMode
   /** Session lifecycle state. */
   status: VerificationSessionStatus
+  /** Frozen logical request count for the selected v4.1.0 preset. */
+  plannedCount: number
+  /** Logical requests with a final success, error, or cancellation. */
+  completedCount: number
   /** Weighted detector score. */
   score: number
   /** Final session verdict. */
@@ -352,6 +374,8 @@ export interface VerificationSession {
   upstreamCostMicros: number
   /** Failure message when status is failed. */
   errorMessage: string
+  /** Time a stop request was persisted, or null while continuing. */
+  stopRequestedAt: string | null
   /** Session start timestamp. */
   startedAt: string
   /** Session completion timestamp, or empty while running. */
@@ -363,8 +387,20 @@ export interface VerificationAttempt {
   id: string
   /** One-based call order within the session. */
   sequence: number
+  /** Stable logical job identity shared by all retries. */
+  jobId: string
+  /** One-based HTTP attempt number; maximum is three. */
+  attemptNo: number
   /** Detector that initiated this call. */
   detectorName: string
+  /** Stable v4.1.0 probe identifier. */
+  probeId: string
+  /** Normal Responses or Native Codex request profile. */
+  requestFormat: 'normal' | 'native_codex'
+  /** No history or frozen 32K history context. */
+  contextMode: 'no_history' | 'fixed_32k_history'
+  /** Reasoning effort sent to the upstream Responses endpoint. */
+  effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   /** HTTP method used for the probe. */
   method: string
   /** Upstream path used for the probe. */
@@ -844,8 +880,8 @@ export interface RouteDecisionWeights {
 export interface RouteDecision {
   /** Model routing strategy active for this decision. */
   strategy: RoutingStrategy
-  /** Probability draw or deterministic affinity mode. */
-  mode: 'probability' | 'session_affinity' | 'response_affinity'
+  /** Probability draw, sole-candidate shortcut, or deterministic affinity mode. */
+  mode: 'probability' | 'single_candidate' | 'session_affinity' | 'response_affinity'
   /** Runtime scoring proportions captured with this decision. */
   weights: RouteDecisionWeights
   /** Eligible candidates and the exact inputs used by the decision. */

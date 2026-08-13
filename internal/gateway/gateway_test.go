@@ -1811,6 +1811,35 @@ func TestRouterPlanLoadsRecentModelSuccessRates(t *testing.T) {
 	}
 }
 
+func TestRouterPlanUsesSingleCandidateWithoutRoutingAlgorithm(t *testing.T) {
+	store := newTestStore(t)
+	token, model, _, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, "http://one.invalid")
+	router := NewRouter(store, NewClientAccessService(store), nil)
+	randomCalls := 0
+	router.random = func(int) int {
+		randomCalls++
+		return 0
+	}
+
+	plan, err := router.Plan(context.Background(), token, model.Name, 10, 10, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Candidates) != 1 || plan.Candidates[0].Mapping.ID != mappings[0].ID {
+		t.Fatalf("candidates = %+v", plan.Candidates)
+	}
+	if plan.Candidates[0].MetricsLoaded {
+		t.Fatalf("single candidate unexpectedly loaded routing metrics: %+v", plan.Candidates[0])
+	}
+	decision := plan.InitialSelection.Decision
+	if decision == nil || decision.Mode != "single_candidate" || len(decision.Candidates) != 1 || !decision.Candidates[0].Selected || decision.Candidates[0].Probability != 1 {
+		t.Fatalf("decision = %+v", decision)
+	}
+	if randomCalls != 0 {
+		t.Fatalf("random calls = %d, want 0", randomCalls)
+	}
+}
+
 func TestRouterExpectationProbabilityIncludesEveryRoutingSignal(t *testing.T) {
 	router := &Router{random: func(int) int { return 0 }}
 	candidates := []RouteCandidate{
@@ -4449,6 +4478,77 @@ func relayAttempts(t *testing.T, store *Store) []RelayAttemptLog {
 	return attempts
 }
 
+func TestRelayRechecksChannelBeforeUpstreamAttempt(t *testing.T) {
+	store := newTestStore(t)
+	var firstCalls atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		firstCalls.Add(1)
+		writer.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer first.Close()
+	var secondCalls atomic.Int32
+	second := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		secondCalls.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"resp_fallback","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}`))
+	}))
+	defer second.Close()
+	token, _, channels, _ := createRouteFixture(t, store, RoutingPriorityWeighted, first.URL, second.URL)
+	relay := newTestRelay(store)
+	relay.router.random = func(int) int {
+		relay.router.random = func(int) int { return 0 }
+		if err := store.db.Model(&Channel{}).Where("id = ?", channels[0].ID).Update("enabled", false).Error; err != nil {
+			t.Fatal(err)
+		}
+		return 0
+	}
+	body := []byte(`{"model":"public-model","input":"hello"}`)
+	payload, err := ParseRelayPayload(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	if publicErr := relay.Relay(context.Background(), recorder, nil, "", "responses", token, payload, body); publicErr != nil {
+		t.Fatal(publicErr)
+	}
+	if recorder.Code != http.StatusOK || firstCalls.Load() != 0 || secondCalls.Load() != 1 {
+		t.Fatalf("status=%d calls=%d/%d body=%s", recorder.Code, firstCalls.Load(), secondCalls.Load(), recorder.Body.String())
+	}
+	attempts := relayAttempts(t, store)
+	if len(attempts) != 1 || attempts[0].ChannelID != channels[1].ID || attempts[0].SelectionReason != SelectionReasonChannelDisabled || attempts[0].PreviousChannelID != channels[0].ID {
+		t.Fatalf("attempts = %+v", attempts)
+	}
+}
+
+func TestRelayRejectsDisabledChannelWithEnabledMapping(t *testing.T) {
+	store := newTestStore(t)
+	token, _, channels, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, "http://upstream.invalid")
+	relay := newTestRelay(store)
+	if err := store.db.Model(&Channel{}).Where("id = ?", channels[0].ID).Update("enabled", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"model":"public-model","input":"hello"}`)
+	payload, err := ParseRelayPayload(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicErr := relay.Relay(context.Background(), httptest.NewRecorder(), nil, "", "responses", token, payload, body)
+	if publicErr == nil || publicErr.Status != http.StatusServiceUnavailable || publicErr.Code != "no_available_channel" {
+		t.Fatalf("public error = %+v", publicErr)
+	}
+	if len(relayAttempts(t, store)) != 0 {
+		t.Fatalf("attempts=%+v", relayAttempts(t, store))
+	}
+	var stored Channel
+	if err := store.db.First(&stored, channels[0].ID).Error; err != nil || stored.Enabled {
+		t.Fatalf("stored channel = %+v, %v", stored, err)
+	}
+	var storedMapping ChannelModel
+	if err := store.db.First(&storedMapping, mappings[0].ID).Error; err != nil || !storedMapping.Enabled {
+		t.Fatalf("stored mapping = %+v, %v", storedMapping, err)
+	}
+}
+
 func TestRelayMovesCodexSessionAffinityAfterRetryableFailure(t *testing.T) {
 	store := newTestStore(t)
 	var firstCalls atomic.Int32
@@ -5029,9 +5129,11 @@ func TestRelayCircuitsSubscriptionUsageLimitAndMovesSessionRoute(t *testing.T) {
 	}
 }
 
-func TestRelayDoesNotSwitchForOrdinaryForbiddenResponse(t *testing.T) {
+func TestRelaySwitchesForForbiddenModelNotAllowedResponse(t *testing.T) {
 	store := newTestStore(t)
+	var firstCalls atomic.Int32
 	first := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		firstCalls.Add(1)
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(http.StatusForbidden)
 		_, _ = writer.Write([]byte(`{"error":{"code":"model_not_allowed","message":"This model is not permitted."}}`))
@@ -5040,10 +5142,59 @@ func TestRelayDoesNotSwitchForOrdinaryForbiddenResponse(t *testing.T) {
 	var secondCalls atomic.Int32
 	second := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		secondCalls.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"resp_switched","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"switched"}]}]}`))
+	}))
+	defer second.Close()
+	token, model, channels, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, first.URL, second.URL)
+	relay := newTestRelay(store)
+	relay.router.RecordSessionAffinity(context.Background(), token.ID, model.ID, "model-permission-session", mappings[0].ID)
+	body := []byte(`{"model":"public-model","prompt_cache_key":"model-permission-session","input":"forbidden"}`)
+	payload, err := ParseRelayPayload(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	if publicErr := relay.Relay(context.Background(), recorder, nil, "", "responses", token, payload, body); publicErr != nil {
+		t.Fatal(publicErr)
+	}
+	if recorder.Code != http.StatusOK || firstCalls.Load() != 1 || secondCalls.Load() != 1 || !strings.Contains(recorder.Body.String(), "resp_switched") {
+		t.Fatalf("status=%d calls=%d/%d body=%s", recorder.Code, firstCalls.Load(), secondCalls.Load(), recorder.Body.String())
+	}
+	var channel Channel
+	if err := store.db.First(&channel, channels[0].ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if channel.ConsecutiveFailures != 0 || channel.CircuitOpenUntil != nil {
+		t.Fatalf("model-not-allowed channel = %+v", channel)
+	}
+	if attempts := relayAttempts(t, store); len(attempts) != 2 || attempts[0].SelectionReason != SelectionReasonSessionAffinity || attempts[0].StatusCode != http.StatusForbidden || attempts[1].SelectionReason != SelectionReasonUpstreamApplicationError || !attempts[1].Success {
+		t.Fatalf("attempts = %+v", attempts)
+	}
+	var affinity SessionAffinity
+	if err := store.db.Where("token_id = ? AND model_id = ? AND session_hash = ?", token.ID, model.ID, hashSecret("model-permission-session")).First(&affinity).Error; err != nil {
+		t.Fatal(err)
+	}
+	if affinity.ChannelModelID != mappings[1].ID {
+		t.Fatalf("affinity mapping = %d, want %d", affinity.ChannelModelID, mappings[1].ID)
+	}
+}
+
+func TestRelayDoesNotSwitchForOtherForbiddenResponse(t *testing.T) {
+	store := newTestStore(t)
+	first := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(`{"error":{"code":"content_policy_violation","message":"Request blocked by policy."}}`))
+	}))
+	defer first.Close()
+	var secondCalls atomic.Int32
+	second := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		secondCalls.Add(1)
 		writer.WriteHeader(http.StatusOK)
 	}))
 	defer second.Close()
-	token, _, channels, _ := createRouteFixture(t, store, RoutingPriorityWeighted, first.URL, second.URL)
+	token, _, _, _ := createRouteFixture(t, store, RoutingPriorityWeighted, first.URL, second.URL)
 	body := []byte(`{"model":"public-model","input":"forbidden"}`)
 	payload, err := ParseRelayPayload(body)
 	if err != nil {
@@ -5053,18 +5204,8 @@ func TestRelayDoesNotSwitchForOrdinaryForbiddenResponse(t *testing.T) {
 	if publicErr := newTestRelay(store).Relay(context.Background(), recorder, nil, "", "responses", token, payload, body); publicErr != nil {
 		t.Fatal(publicErr)
 	}
-	if recorder.Code != http.StatusForbidden || secondCalls.Load() != 0 || !strings.Contains(recorder.Body.String(), "model_not_allowed") {
+	if recorder.Code != http.StatusForbidden || secondCalls.Load() != 0 || !strings.Contains(recorder.Body.String(), "content_policy_violation") {
 		t.Fatalf("status=%d second calls=%d body=%s", recorder.Code, secondCalls.Load(), recorder.Body.String())
-	}
-	var channel Channel
-	if err := store.db.First(&channel, channels[0].ID).Error; err != nil {
-		t.Fatal(err)
-	}
-	if channel.ConsecutiveFailures != 0 || channel.CircuitOpenUntil != nil {
-		t.Fatalf("ordinary forbidden channel = %+v", channel)
-	}
-	if attempts := relayAttempts(t, store); len(attempts) != 1 || attempts[0].StatusCode != http.StatusForbidden {
-		t.Fatalf("attempts = %+v", attempts)
 	}
 }
 
