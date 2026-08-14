@@ -1,13 +1,18 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
-import { Collection, Document, Link, Picture, Refresh, RefreshLeft, Search, Tickets, View } from '@element-plus/icons-vue'
+import { computed, defineAsyncComponent, onMounted, reactive, ref } from 'vue'
+import { Collection, Document, DocumentCopy, Link, MagicStick, Picture, Refresh, RefreshLeft, Search, Tickets, View } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import type { ResourceCatalogItem, ResourceDetail, ResourcePage } from '@/types/gateway'
+import RequestPayloadDialog from '@/components/RequestPayloadDialog.vue'
+import SessionLogDrawer from '@/components/SessionLogDrawer.vue'
+import type { CodexSessionDetail, CodexSessionSummary, RelayRequestLog, ResourceCatalogItem, ResourceDetail, ResourcePage, ResourceRequestRef, ResourceSessionRef } from '@/types/gateway'
 import { request } from '@/utils/api'
 import { formatCompactNumber } from '@/utils/formatters'
 import { resourceExternalHref, resourceFallbackLabel, resourcePreviewMode, resourcePreviewSource, resourceReferenceLabel } from '@/utils/resourcePreview'
+import { sourceCodePreview } from '@/utils/codeLanguage'
 import ImagePreviewDialog from '@/components/ImagePreviewDialog.vue'
 import ResourceFallbackPreview from '@/components/ResourceFallbackPreview.vue'
+
+const SourceCodePreview = defineAsyncComponent(() => import('@/components/SourceCodePreview.vue'))
 
 const loading = ref(true)
 const errorMessage = ref('')
@@ -19,10 +24,19 @@ const customLastSeenDays = ref<number | undefined>()
 const detailOpen = ref(false)
 const detailLoading = ref(false)
 const detail = ref<ResourceDetail | null>(null)
+const detailSourcePreview = computed(() => detail.value ? sourceCodePreview(detail.value.resource) : null)
+const sessionDrawerOpen = ref(false)
+const selectedSession = ref<CodexSessionSummary | null>(null)
+const sessionDetailLoadingKey = ref('')
+const requestDetailOpen = ref(false)
+const selectedRequest = ref<RelayRequestLog | null>(null)
+const requestDetailLoadingId = ref('')
 
 const kindOptions = [
   { value: 'image', label: '图片', icon: Picture },
   { value: 'file', label: '文件', icon: Document },
+  { value: 'code', label: '代码', icon: DocumentCopy },
+  { value: 'skill', label: 'Skill', icon: MagicStick },
   { value: 'url', label: '链接', icon: Link },
   { value: 'data', label: '内嵌资源', icon: Collection },
   { value: 'reference', label: '其他', icon: Tickets },
@@ -43,7 +57,7 @@ function kindLabel(kind: string): string {
 
 function kindType(kind: string): 'success' | 'warning' | 'info' | 'danger' {
   if (kind === 'image') return 'success'
-  if (kind === 'file' || kind === 'data') return 'warning'
+  if (kind === 'file' || kind === 'data' || kind === 'skill') return 'warning'
   if (kind === 'url') return 'info'
   return 'danger'
 }
@@ -106,6 +120,49 @@ async function openDetail(row: ResourceCatalogItem) {
   }
 }
 
+function resourceSessionKey(session: ResourceSessionRef): string {
+  return session.sessionId ? `${session.tokenId}:${session.sessionId}` : `request:${session.fallbackRequestId}`
+}
+
+async function openReferencedSession(session: ResourceSessionRef) {
+  if (sessionDetailLoadingKey.value) return
+  const key = resourceSessionKey(session)
+  if (!session.sessionId && !session.fallbackRequestId) {
+    ElMessage.error('该引用缺少可用的会话标识')
+    return
+  }
+  sessionDetailLoadingKey.value = key
+  const query = new URLSearchParams({ page: '1', pageSize: '25' })
+  if (session.sessionId) {
+    query.set('sessionId', session.sessionId)
+    query.set('tokenId', String(session.tokenId))
+  } else {
+    query.set('requestId', session.fallbackRequestId)
+  }
+  try {
+    const sessionDetail = await request<CodexSessionDetail>(`/admin/gateway/sessions/detail?${query}`)
+    selectedSession.value = sessionDetail.summary
+    sessionDrawerOpen.value = true
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '会话详情加载失败')
+  } finally {
+    sessionDetailLoadingKey.value = ''
+  }
+}
+
+async function openReferencedRequest(requestRef: ResourceRequestRef) {
+  if (requestDetailLoadingId.value) return
+  requestDetailLoadingId.value = requestRef.id
+  try {
+    selectedRequest.value = await request<RelayRequestLog>(`/admin/gateway/logs/${encodeURIComponent(requestRef.id)}`)
+    requestDetailOpen.value = true
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '调用详情加载失败')
+  } finally {
+    requestDetailLoadingId.value = ''
+  }
+}
+
 async function toggleSensitive(row: ResourceCatalogItem, value: boolean) {
   try {
     await request<null>(`/admin/gateway/resources/${row.id}/sensitive`, {
@@ -164,14 +221,16 @@ onMounted(loadResources)
           <div><span>涉及会话</span><strong>{{ detail.sessions.length }}</strong></div>
           <div><span>敏感状态</span><el-tag :type="detail.resource.sensitive ? 'danger' : 'info'" effect="plain">{{ detail.resource.sensitive ? '敏感资源' : '普通资源' }}</el-tag></div>
         </section>
-        <section class="resource-detail-meta"><div class="catalog-browser-preview"><ImagePreviewDialog v-if="resourcePreviewMode(detail.resource) === 'image'" :src="resourcePreviewSource(detail.resource)" :alt="detailTitle" :title="detailTitle"><img :src="resourcePreviewSource(detail.resource)" alt="资源图片预览" /></ImagePreviewDialog><iframe v-else-if="resourcePreviewMode(detail.resource) === 'pdf'" :src="resourcePreviewSource(detail.resource)" :title="`${detailTitle} 预览`" /><iframe v-else-if="resourcePreviewMode(detail.resource) === 'text'" :src="resourcePreviewSource(detail.resource)" :title="`${detailTitle} 预览`" sandbox="" /><audio v-else-if="resourcePreviewMode(detail.resource) === 'audio'" :src="resourcePreviewSource(detail.resource)" controls /><video v-else-if="resourcePreviewMode(detail.resource) === 'video'" :src="resourcePreviewSource(detail.resource)" controls /><ResourceFallbackPreview v-else :message="resourceFallbackLabel(detail.resource)" :reference="resourceReferenceLabel(detail.resource.uri || detail.resource.preview)" :href="resourceExternalHref(detail.resource.uri)" /></div><div v-if="detail.resource.sha256"><span>SHA-256</span><el-tooltip :content="detail.resource.sha256" placement="top-start" :show-after="250"><code class="resource-truncated">{{ detail.resource.sha256 }}</code></el-tooltip></div><div><span>敏感标记</span><el-switch :model-value="detail.resource.sensitive" aria-label="切换资源敏感标记" @change="toggleSensitive(resources.find((item) => item.id === detail?.resource.id) ?? ({ ...detail.resource, requestCount: detail.requests.length, useCount: detail.requests.length, sessionCount: detail.sessions.length } as ResourceCatalogItem), Boolean($event))" /></div></section>
+        <section class="resource-detail-meta"><div class="catalog-browser-preview"><SourceCodePreview v-if="detailSourcePreview" :code="detailSourcePreview.code" :language="detailSourcePreview.language" :label="`${detailTitle} 源码预览`" /><ImagePreviewDialog v-else-if="resourcePreviewMode(detail.resource) === 'image'" :src="resourcePreviewSource(detail.resource)" :alt="detailTitle" :title="detailTitle"><img :src="resourcePreviewSource(detail.resource)" alt="资源图片预览" /></ImagePreviewDialog><iframe v-else-if="resourcePreviewMode(detail.resource) === 'pdf'" :src="resourcePreviewSource(detail.resource)" :title="`${detailTitle} 预览`" /><iframe v-else-if="resourcePreviewMode(detail.resource) === 'text'" :src="resourcePreviewSource(detail.resource)" :title="`${detailTitle} 预览`" sandbox="" /><audio v-else-if="resourcePreviewMode(detail.resource) === 'audio'" :src="resourcePreviewSource(detail.resource)" controls /><video v-else-if="resourcePreviewMode(detail.resource) === 'video'" :src="resourcePreviewSource(detail.resource)" controls /><ResourceFallbackPreview v-else :message="resourceFallbackLabel(detail.resource)" :reference="resourceReferenceLabel(detail.resource.uri || detail.resource.preview)" :href="resourceExternalHref(detail.resource.uri)" /></div><div v-if="detail.resource.sha256"><span>SHA-256</span><el-tooltip :content="detail.resource.sha256" placement="top-start" :show-after="250"><code class="resource-truncated">{{ detail.resource.sha256 }}</code></el-tooltip></div><div><span>敏感标记</span><el-switch :model-value="detail.resource.sensitive" aria-label="切换资源敏感标记" @change="toggleSensitive(resources.find((item) => item.id === detail?.resource.id) ?? ({ ...detail.resource, requestCount: detail.requests.length, useCount: detail.requests.length, sessionCount: detail.sessions.length } as ResourceCatalogItem), Boolean($event))" /></div></section>
         <el-tabs>
-          <el-tab-pane label="引用会话"><el-table :data="detail.sessions" max-height="340" empty-text="暂无可归属会话"><el-table-column label="会话" min-width="240"><template #default="scope"><div class="primary-cell"><el-tooltip class="resource-cell-tooltip" :content="scope.row.sessionName || '未命名会话'" placement="top-start" :show-after="250"><strong>{{ scope.row.sessionName || '未命名会话' }}</strong></el-tooltip><el-tooltip class="resource-cell-tooltip" :content="scope.row.sessionId || '未识别会话'" placement="top-start" :show-after="250"><small>{{ scope.row.sessionId || '未识别会话' }}</small></el-tooltip></div></template></el-table-column><el-table-column label="请求数" width="120" align="right"><template #default="scope">{{ scope.row.requestCount }}</template></el-table-column><el-table-column label="令牌" width="100" align="right"><template #default="scope">#{{ scope.row.tokenId }}</template></el-table-column></el-table></el-tab-pane>
-          <el-tab-pane label="引用请求"><el-table :data="detail.requests" max-height="340" empty-text="暂无引用请求"><el-table-column label="时间" width="170"><template #default="scope">{{ formatDate(scope.row.createdAt) }}</template></el-table-column><el-table-column label="请求 ID" min-width="250"><template #default="scope"><el-tooltip class="resource-cell-tooltip" :content="scope.row.id" placement="top-start" :show-after="250"><code>{{ scope.row.id }}</code></el-tooltip></template></el-table-column><el-table-column label="会话" min-width="180"><template #default="scope"><el-tooltip class="resource-cell-tooltip" :content="scope.row.sessionName || scope.row.sessionId || '未命名会话'" placement="top-start" :show-after="250"><span>{{ scope.row.sessionName || scope.row.sessionId || '未命名会话' }}</span></el-tooltip></template></el-table-column><el-table-column label="模型" min-width="140"><template #default="scope"><el-tooltip class="resource-cell-tooltip" :content="scope.row.requestedModel" placement="top-start" :show-after="250"><code>{{ scope.row.requestedModel }}</code></el-tooltip></template></el-table-column><el-table-column label="位置" min-width="180"><template #default="scope"><el-tooltip class="resource-cell-tooltip" :content="scope.row.location" placement="top-start" :show-after="250"><code>{{ scope.row.location }}</code></el-tooltip></template></el-table-column></el-table></el-tab-pane>
+          <el-tab-pane label="引用会话"><el-table :data="detail.sessions" max-height="340" empty-text="暂无可归属会话"><el-table-column label="会话" min-width="240"><template #default="scope"><div class="primary-cell"><el-tooltip class="resource-cell-tooltip" :content="scope.row.sessionName || '未命名会话'" placement="top-start" :show-after="250"><strong>{{ scope.row.sessionName || '未命名会话' }}</strong></el-tooltip><el-tooltip class="resource-cell-tooltip" :content="scope.row.sessionId || scope.row.fallbackRequestId || '未识别会话'" placement="top-start" :show-after="250"><small>{{ scope.row.sessionId || scope.row.fallbackRequestId || '未识别会话' }}</small></el-tooltip></div></template></el-table-column><el-table-column label="请求数" width="120" align="right"><template #default="scope">{{ scope.row.requestCount }}</template></el-table-column><el-table-column label="令牌" width="100" align="right"><template #default="scope">#{{ scope.row.tokenId }}</template></el-table-column><el-table-column label="详情" width="62" fixed="right" align="right"><template #default="scope"><el-tooltip content="查看会话详情" placement="top"><el-button class="table-action-button" text :icon="View" :loading="sessionDetailLoadingKey === resourceSessionKey(scope.row)" aria-label="查看会话详情" @click.stop="openReferencedSession(scope.row)" /></el-tooltip></template></el-table-column></el-table></el-tab-pane>
+          <el-tab-pane label="引用请求"><el-table :data="detail.requests" max-height="340" empty-text="暂无引用请求"><el-table-column label="时间" width="170"><template #default="scope">{{ formatDate(scope.row.createdAt) }}</template></el-table-column><el-table-column label="请求 ID" min-width="250"><template #default="scope"><el-tooltip class="resource-cell-tooltip" :content="scope.row.id" placement="top-start" :show-after="250"><code>{{ scope.row.id }}</code></el-tooltip></template></el-table-column><el-table-column label="会话" min-width="180"><template #default="scope"><el-tooltip class="resource-cell-tooltip" :content="scope.row.sessionName || scope.row.sessionId || '未命名会话'" placement="top-start" :show-after="250"><span>{{ scope.row.sessionName || scope.row.sessionId || '未命名会话' }}</span></el-tooltip></template></el-table-column><el-table-column label="模型" min-width="140"><template #default="scope"><el-tooltip class="resource-cell-tooltip" :content="scope.row.requestedModel" placement="top-start" :show-after="250"><code>{{ scope.row.requestedModel }}</code></el-tooltip></template></el-table-column><el-table-column label="位置" min-width="180"><template #default="scope"><el-tooltip class="resource-cell-tooltip" :content="scope.row.location" placement="top-start" :show-after="250"><code>{{ scope.row.location }}</code></el-tooltip></template></el-table-column><el-table-column label="详情" width="62" fixed="right" align="right"><template #default="scope"><el-tooltip content="查看调用详情" placement="top"><el-button class="table-action-button" text :icon="View" :loading="requestDetailLoadingId === scope.row.id" aria-label="查看调用详情" @click.stop="openReferencedRequest(scope.row)" /></el-tooltip></template></el-table-column></el-table></el-tab-pane>
         </el-tabs>
       </div>
       <template #footer><el-button @click="detailOpen = false">关闭</el-button></template>
     </el-dialog>
+    <SessionLogDrawer v-model="sessionDrawerOpen" :summary="selectedSession" />
+    <RequestPayloadDialog v-model="requestDetailOpen" :request="selectedRequest" />
   </div>
 </template>
 
@@ -201,7 +260,7 @@ onMounted(loadResources)
 .resource-detail-summary span, .resource-detail-meta span { color: var(--hongfen-text-muted); font-size: 11px; }
 .resource-detail-summary strong { color: var(--hongfen-text); font: 650 18px/1 var(--hongfen-font-mono); }
 .resource-detail-meta { display: grid; gap: 7px; margin: 12px 0; padding: 10px 12px; border: 1px solid var(--hongfen-border); }
-.resource-detail-meta > div { display: grid; grid-template-columns: 68px minmax(0, 1fr); gap: 9px; min-width: 0; }
+.resource-detail-meta > div:not(.catalog-browser-preview) { display: grid; grid-template-columns: 68px minmax(0, 1fr); gap: 9px; min-width: 0; }
 .resource-detail-meta > div > .el-tooltip { min-width: 0; }
 .resource-detail-meta code { min-width: 0; }
 .resource-dialog-title { display: block; max-width: min(720px, 76vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -209,7 +268,7 @@ onMounted(loadResources)
 .resource-detail-dialog :global(.el-tooltip) { min-width: 0; max-width: 100%; }
 .resource-cell-tooltip { display: block; min-width: 0; max-width: 100%; overflow: hidden; }
 .resource-cell-tooltip > strong, .resource-cell-tooltip > small, .resource-cell-tooltip > span, .resource-cell-tooltip > code { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.catalog-browser-preview { display: flex; min-height: 100px; max-height: 300px; grid-column: 1 / -1; padding: 8px; border-bottom: 1px solid var(--hongfen-border); background: var(--hongfen-surface-muted); }
+.resource-detail-meta > .catalog-browser-preview { display: flex; width: 100%; min-width: 0; max-width: 100%; min-height: 100px; max-height: 300px; grid-column: 1 / -1; padding: 8px; overflow: hidden; border-bottom: 1px solid var(--hongfen-border); background: var(--hongfen-surface-muted); box-sizing: border-box; }
 .catalog-browser-preview img, .catalog-browser-preview video { max-width: 100%; max-height: 280px; margin: auto; object-fit: contain; }
 .catalog-browser-preview iframe { width: 100%; min-height: 270px; border: 0; background: var(--hongfen-surface); }
 .catalog-browser-preview audio { width: 100%; margin: auto; }

@@ -42,9 +42,15 @@ export interface ResourcePage {
 }
 
 export interface ResourceSessionRef {
+  /** Token that owns the referenced session or fallback request. */
   tokenId: number
+  /** Extracted session identifier, blank when the request could not be assigned to a session. */
   sessionId: string
+  /** Request identifier used to open an unidentified session record. */
+  fallbackRequestId: string
+  /** Display name retained for the referenced session. */
   sessionName: string
+  /** Distinct retained requests in this session that reference the resource. */
   requestCount: number
 }
 

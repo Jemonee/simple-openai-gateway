@@ -1,6 +1,8 @@
 export type ResourcePreviewMode = 'image' | 'pdf' | 'audio' | 'video' | 'text' | null
 
 export interface ResourcePreviewInput {
+  /** Resource category assigned by the request payload detector. */
+  kind?: string
   /** Stored MIME type, when the upstream payload supplied one. */
   mimeType?: string
   /** Resource URI or data URI used as the browser preview source. */
@@ -26,8 +28,10 @@ function extensionFromUri(uri: string): string {
 
 /** Returns the safest native browser preview mode for a stored resource. */
 export function resourcePreviewMode(resource: ResourcePreviewInput): ResourcePreviewMode {
+  if (resource.kind === 'code') return null
   const source = resource.previewData || resource.uri || ''
   if (!source) return null
+  if (resource.kind === 'file' && !/^(?:https?:|data:)/i.test(source)) return null
   if (!resource.previewData && source.startsWith('data:')) return null
   const mime = (resource.mimeType || mimeFromDataUri(source)).toLowerCase().split(';', 1)[0].trim()
   if (mime.startsWith('image/')) return 'image'
@@ -71,7 +75,10 @@ export function resourceExternalHref(uri?: string): string {
 }
 
 export function resourceFallbackLabel(resource: ResourcePreviewInput): string {
+  if (resource.kind === 'skill') return '已识别 Skill 调用；该请求未携带可预览的 SKILL.md 正文'
   if (resource.uri?.startsWith('data:')) return '内嵌内容未保留完整，无法恢复预览'
   if (resource.uri?.startsWith('file-') || resource.uri?.startsWith('file_')) return '仅有文件标识，当前没有可下载地址'
+  const mime = resource.mimeType?.toLowerCase().split(';', 1)[0].trim() ?? ''
+  if (resource.kind === 'file' && (mime.startsWith('text/') || ['application/json', 'application/xml', 'application/yaml'].includes(mime))) return '请求中只包含源码路径，没有可高亮的文件内容'
   return '浏览器不支持此资源的内嵌预览'
 }
