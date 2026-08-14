@@ -329,10 +329,16 @@ export interface VerificationReport {
   title: string
   /** Short report summary. */
   summary: string
+  /** Model identity evaluated by Juice and fingerprint consistency checks. */
+  claimedModel: string
+  /** Exact model identifier sent to the upstream channel. */
+  requestModel: string
   /** Model receiving a formal strong behavioral match, when any. */
   fingerprintModel?: string
   /** Relative matches inside the frozen Sol/Terra/Luna reference set. */
   fingerprintMatch?: Record<string, number>
+  /** Whether a formal strong behavior match points away from the claimed model. */
+  fingerprintClaimMismatch: boolean
   /** Number of upstream detector calls in this run. */
   requestCount: number
   /** Aggregate input tokens observed or estimated for detector calls. */
@@ -370,7 +376,7 @@ export interface VerificationSession {
   mode: VerificationMode
   /** Session lifecycle state. */
   status: VerificationSessionStatus
-  /** Frozen logical request count for the selected v4.1.0 preset. */
+  /** Frozen logical request count for the selected v4.1.1 preset. */
   plannedCount: number
   /** Logical requests with a final success, error, or cancellation. */
   completedCount: number
@@ -417,7 +423,7 @@ export interface VerificationAttempt {
   attemptNo: number
   /** Detector that initiated this call. */
   detectorName: string
-  /** Stable v4.1.0 probe identifier. */
+  /** Stable v4.1.1 probe identifier. */
   probeId: string
   /** Normal Responses or Native Codex request profile. */
   requestFormat: 'normal' | 'native_codex'

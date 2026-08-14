@@ -49,29 +49,32 @@ type VerificationCheckResult struct {
 }
 
 type VerificationReportView struct {
-	ID                  string                    `json:"id"`
-	SessionID           string                    `json:"sessionId"`
-	ChannelID           uint64                    `json:"channelId"`
-	ChannelName         string                    `json:"channelName"`
-	ModelID             uint64                    `json:"modelId"`
-	PublicModel         string                    `json:"publicModel"`
-	UpstreamModel       string                    `json:"upstreamModel"`
-	Mode                string                    `json:"mode"`
-	Score               float64                   `json:"score"`
-	Verdict             string                    `json:"verdict"`
-	OutcomeCode         string                    `json:"outcomeCode"`
-	Title               string                    `json:"title"`
-	Summary             string                    `json:"summary"`
-	FingerprintModel    string                    `json:"fingerprintModel,omitempty"`
-	FingerprintMatch    map[string]float64        `json:"fingerprintMatch,omitempty"`
-	Checks              []VerificationCheckResult `json:"checks"`
-	StartedAt           time.Time                 `json:"startedAt"`
-	FinishedAt          time.Time                 `json:"finishedAt"`
-	RequestCount        int64                     `json:"requestCount"`
-	InputTokens         int64                     `json:"inputTokens"`
-	OutputTokens        int64                     `json:"outputTokens"`
-	EstimatedCostMicros int64                     `json:"estimatedCostMicros"`
-	UpstreamCostMicros  int64                     `json:"upstreamCostMicros"`
+	ID                       string                    `json:"id"`
+	SessionID                string                    `json:"sessionId"`
+	ChannelID                uint64                    `json:"channelId"`
+	ChannelName              string                    `json:"channelName"`
+	ModelID                  uint64                    `json:"modelId"`
+	PublicModel              string                    `json:"publicModel"`
+	UpstreamModel            string                    `json:"upstreamModel"`
+	Mode                     string                    `json:"mode"`
+	Score                    float64                   `json:"score"`
+	Verdict                  string                    `json:"verdict"`
+	OutcomeCode              string                    `json:"outcomeCode"`
+	Title                    string                    `json:"title"`
+	Summary                  string                    `json:"summary"`
+	ClaimedModel             string                    `json:"claimedModel"`
+	RequestModel             string                    `json:"requestModel"`
+	FingerprintModel         string                    `json:"fingerprintModel,omitempty"`
+	FingerprintMatch         map[string]float64        `json:"fingerprintMatch,omitempty"`
+	FingerprintClaimMismatch bool                      `json:"fingerprintClaimMismatch"`
+	Checks                   []VerificationCheckResult `json:"checks"`
+	StartedAt                time.Time                 `json:"startedAt"`
+	FinishedAt               time.Time                 `json:"finishedAt"`
+	RequestCount             int64                     `json:"requestCount"`
+	InputTokens              int64                     `json:"inputTokens"`
+	OutputTokens             int64                     `json:"outputTokens"`
+	EstimatedCostMicros      int64                     `json:"estimatedCostMicros"`
+	UpstreamCostMicros       int64                     `json:"upstreamCostMicros"`
 }
 
 type VerificationSessionView struct {
@@ -176,6 +179,12 @@ type VerificationService struct {
 	assetsDir  string
 	assetsErr  error
 }
+
+var (
+	verificationUserAgentOnce  sync.Once
+	verificationUserAgentValue string
+	verificationUserAgentErr   error
+)
 
 func NewVerificationService(store *Store, estimator *TokenEstimator) *VerificationService {
 	service := &VerificationService{store: store, estimator: estimator, client: &http.Client{Timeout: 310 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}, runs: map[string]context.CancelFunc{}}
@@ -482,7 +491,14 @@ func (s *VerificationService) performNormalProbe(ctx context.Context, baseURL, a
 	request.Header.Set("Authorization", "Bearer "+apiKey)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
-	request.Header.Set("User-Agent", "simple-openai-gateway/gpt56-detector-4.1.0")
+	userAgent := strings.TrimSpace(os.Getenv("GPT56_USER_AGENT"))
+	if userAgent == "" {
+		userAgent, err = verificationNativeUserAgent()
+		if err != nil {
+			return verificationTransportResult{}, body, nil, verificationTransportMeta{}, err
+		}
+	}
+	request.Header.Set("User-Agent", userAgent)
 	started := time.Now()
 	response, err := s.client.Do(request)
 	meta := verificationTransportMeta{Path: "/responses", Stream: true, RequestFormat: "normal", LatencyMS: time.Since(started).Milliseconds()}
@@ -871,13 +887,16 @@ func (s *VerificationService) verificationAggregate(ctx context.Context, session
 }
 
 type verificationCombinedReport struct {
-	OutcomeCode     string             `json:"outcomeCode"`
-	Title           string             `json:"title"`
-	Subtitle        string             `json:"subtitle"`
-	JuiceState      string             `json:"juiceState"`
-	Fingerprint     fingerprintSummary `json:"fingerprintSummary"`
-	OutputSummary   map[string]any     `json:"outputIntegritySummary"`
-	CoverageSummary map[string]any     `json:"coverageSummary"`
+	OutcomeCode              string             `json:"outcomeCode"`
+	Title                    string             `json:"title"`
+	Subtitle                 string             `json:"subtitle"`
+	ClaimedModel             string             `json:"claimedModel"`
+	RequestModel             string             `json:"requestModel"`
+	FingerprintClaimMismatch bool               `json:"fingerprintClaimMismatch"`
+	JuiceState               string             `json:"juiceState"`
+	Fingerprint              fingerprintSummary `json:"fingerprintSummary"`
+	OutputSummary            map[string]any     `json:"outputIntegritySummary"`
+	CoverageSummary          map[string]any     `json:"coverageSummary"`
 }
 
 func (s *VerificationService) finalizeSession(sessionID, claimedModel string) error {
@@ -932,9 +951,10 @@ func (s *VerificationService) finalizeSession(sessionID, claimedModel string) er
 		return err
 	}
 	outcome, title, subtitle := verificationOutcome(juiceState, fingerprint)
-	checks := []VerificationCheckResult{{Name: "juice", Label: "Juice 型号指纹", Category: "确定性证据", Status: verificationLayerStatus(juiceState), Summary: verificationJuiceSummary(juiceState), Evidence: juiceEvidence}, {Name: "output_integrity", Label: "32/48 输出完整性", Category: "确定性证据", Status: boolLayerStatus(output["hardAnomaly"] == true), Summary: "检查固定 32/48 是否被改写为 40 前缀。", Evidence: output}, {Name: "coverage", Label: "Juice 显式覆盖", Category: "确定性证据", Status: boolLayerStatus(coverage["hardAnomaly"] == true), Summary: "检查显式 developer 定义是否被隐藏 Juice 提示覆盖。", Evidence: coverage}, {Name: "fingerprint", Label: "行为指纹", Category: "相对行为证据", Status: fingerprintLayerStatus(fingerprint), Summary: verificationFingerprintSummary(fingerprint), Evidence: map[string]any{"scoringVersion": fingerprint.ScoringVersion, "baselineId": fingerprint.BaselineID, "baselineSha256": fingerprint.BaselineSHA256, "fingerprintModel": fingerprint.Model, "fingerprintMatch": fingerprint.Match, "thresholds": fingerprint.Thresholds, "officialEligible": fingerprint.OfficialEligible, "unclearReasons": fingerprint.UnclearReasons, "cells": fingerprint.Cells, "families": fingerprint.FamilyContributions}}}
+	fingerprintClaimMismatch := fingerprint.Status == "strong_match" && fingerprint.Model != "" && fingerprint.Model != claimedModel
+	checks := []VerificationCheckResult{{Name: "juice", Label: "Juice 型号指纹", Category: "确定性证据", Status: verificationLayerStatus(juiceState), Summary: verificationJuiceSummary(juiceState), Evidence: juiceEvidence}, {Name: "output_integrity", Label: "32/48 输出完整性", Category: "确定性证据", Status: boolLayerStatus(output["hardAnomaly"] == true), Summary: "检查固定 32/48 是否被改写为 40 前缀。", Evidence: output}, {Name: "coverage", Label: "Juice 显式覆盖", Category: "确定性证据", Status: boolLayerStatus(coverage["hardAnomaly"] == true), Summary: "检查显式 developer 定义是否被隐藏 Juice 提示覆盖。", Evidence: coverage}, {Name: "fingerprint", Label: "行为指纹", Category: "相对行为证据", Status: fingerprintLayerStatus(fingerprint, fingerprintClaimMismatch), Summary: verificationFingerprintSummary(fingerprint, claimedModel), Evidence: map[string]any{"scoringVersion": fingerprint.ScoringVersion, "policyVersion": fingerprint.PolicyVersion, "baselineId": fingerprint.BaselineID, "baselineSha256": fingerprint.BaselineSHA256, "fingerprintModel": fingerprint.Model, "fingerprintMatch": fingerprint.Match, "fingerprintClaimMismatch": fingerprintClaimMismatch, "thresholds": fingerprint.Thresholds, "officialEligible": fingerprint.OfficialEligible, "unclearReasons": fingerprint.UnclearReasons, "cells": fingerprint.Cells, "families": fingerprint.FamilyContributions}}}
 	checksJSON, _ := json.Marshal(checks)
-	combined := verificationCombinedReport{OutcomeCode: outcome, Title: title, Subtitle: subtitle, JuiceState: juiceState, Fingerprint: fingerprint, OutputSummary: output, CoverageSummary: coverage}
+	combined := verificationCombinedReport{OutcomeCode: outcome, Title: title, Subtitle: subtitle, ClaimedModel: claimedModel, RequestModel: session.UpstreamModel, FingerprintClaimMismatch: fingerprintClaimMismatch, JuiceState: juiceState, Fingerprint: fingerprint, OutputSummary: output, CoverageSummary: coverage}
 	reportJSON, _ := json.Marshal(combined)
 	aggregate, err := s.verificationAggregate(context.Background(), sessionID)
 	if err != nil {
@@ -1088,7 +1108,11 @@ func boolLayerStatus(failed bool) string {
 	}
 	return "passed"
 }
-func fingerprintLayerStatus(f fingerprintSummary) string {
+
+func fingerprintLayerStatus(f fingerprintSummary, claimMismatch bool) string {
+	if claimMismatch {
+		return "failed"
+	}
 	if f.Status == "strong_match" {
 		return "passed"
 	}
@@ -1097,12 +1121,12 @@ func fingerprintLayerStatus(f fingerprintSummary) string {
 func verificationJuiceSummary(state string) string {
 	return map[string]string{"pass": "所有启用思考档均取得申报型号命中，且未发现其他已知型号。", "mismatch": "检测到其他已知型号 Juice 或确定性输出异常。", "possible_non_gpt": "足量有效响应均未命中任何已知 GPT Juice。", "insufficient": "至少一个启用思考档没有取得申报型号命中。"}[state]
 }
-func verificationFingerprintSummary(f fingerprintSummary) string {
+func verificationFingerprintSummary(f fingerprintSummary, claimedModel string) string {
 	if f.Status == "strong_match" {
+		if f.Model != claimedModel {
+			return fmt.Sprintf("申报型号为 %s，但行为分布越过正式门槛并强烈指向 %s。", verificationModelLabel(claimedModel), verificationModelLabel(f.Model))
+		}
 		return fmt.Sprintf("行为分布越过正式门槛，强烈指向 %s（这不是身份概率）。", verificationModelLabel(f.Model))
-	}
-	if containsString(f.UnclearReasons, "builtin_fingerprint_not_enabled") {
-		return "低档未启用行为指纹，这是预期的主动弃权。"
 	}
 	return "行为层未形成正式强指向，请结合完成率和线路错误阅读。"
 }
@@ -1216,7 +1240,15 @@ func reportView(row VerificationReport) VerificationReportView {
 	_ = json.Unmarshal([]byte(row.ChecksJSON), &checks)
 	combined := verificationCombinedReport{}
 	_ = json.Unmarshal([]byte(row.ReportJSON), &combined)
-	return VerificationReportView{ID: row.ID, SessionID: row.SessionID, ChannelID: row.ChannelID, ChannelName: row.ChannelName, ModelID: row.ModelID, PublicModel: row.PublicModel, UpstreamModel: row.UpstreamModel, Mode: row.Mode, Score: row.Score, Verdict: row.Verdict, OutcomeCode: combined.OutcomeCode, Title: combined.Title, Summary: row.Summary, FingerprintModel: combined.Fingerprint.Model, FingerprintMatch: combined.Fingerprint.Match, Checks: checks, StartedAt: row.StartedAt, FinishedAt: row.FinishedAt, RequestCount: row.RequestCount, InputTokens: row.InputTokens, OutputTokens: row.OutputTokens, EstimatedCostMicros: row.EstimatedCostMicros, UpstreamCostMicros: row.UpstreamCostMicros}
+	claimedModel := combined.ClaimedModel
+	if claimedModel == "" {
+		claimedModel = row.PublicModel
+	}
+	requestModel := combined.RequestModel
+	if requestModel == "" {
+		requestModel = row.UpstreamModel
+	}
+	return VerificationReportView{ID: row.ID, SessionID: row.SessionID, ChannelID: row.ChannelID, ChannelName: row.ChannelName, ModelID: row.ModelID, PublicModel: row.PublicModel, UpstreamModel: row.UpstreamModel, Mode: row.Mode, Score: row.Score, Verdict: row.Verdict, OutcomeCode: combined.OutcomeCode, Title: combined.Title, Summary: row.Summary, ClaimedModel: claimedModel, RequestModel: requestModel, FingerprintModel: combined.Fingerprint.Model, FingerprintMatch: combined.Fingerprint.Match, FingerprintClaimMismatch: combined.FingerprintClaimMismatch, Checks: checks, StartedAt: row.StartedAt, FinishedAt: row.FinishedAt, RequestCount: row.RequestCount, InputTokens: row.InputTokens, OutputTokens: row.OutputTokens, EstimatedCostMicros: row.EstimatedCostMicros, UpstreamCostMicros: row.UpstreamCostMicros}
 }
 func verificationSessionView(row VerificationSession) VerificationSessionView {
 	return VerificationSessionView{ID: row.ID, ChannelID: row.ChannelID, ChannelName: row.ChannelName, ModelID: row.ModelID, PublicModel: row.PublicModel, UpstreamModel: row.UpstreamModel, Mode: row.Mode, Status: row.Status, PlannedCount: row.PlannedCount, CompletedCount: row.CompletedCount, Score: row.Score, Verdict: row.Verdict, Summary: row.Summary, RequestCount: row.RequestCount, SuccessCount: row.SuccessCount, InputTokens: row.InputTokens, OutputTokens: row.OutputTokens, CachedTokens: row.CachedTokens, CacheWriteTokens: row.CacheWriteTokens, EstimatedCostMicros: row.EstimatedCostMicros, UpstreamCostMicros: row.UpstreamCostMicros, ErrorMessage: row.ErrorMessage, StopRequestedAt: row.StopRequestedAt, StartedAt: row.StartedAt, FinishedAt: row.FinishedAt}
@@ -1239,6 +1271,31 @@ func normalizeVerificationBaseURL(value string) (string, error) {
 	}
 	base.Path = path
 	return strings.TrimRight(base.String(), "/"), nil
+}
+
+func verificationNativeUserAgent() (string, error) {
+	verificationUserAgentOnce.Do(func() {
+		raw, err := verificationAssets.ReadFile("verification_assets/native-0.147.0.raw")
+		if err != nil {
+			verificationUserAgentErr = err
+			return
+		}
+		headerBlock := raw
+		if index := bytes.Index(raw, []byte("\r\n\r\n")); index >= 0 {
+			headerBlock = raw[:index]
+		}
+		for _, line := range bytes.Split(headerBlock, []byte("\n")) {
+			parts := bytes.SplitN(bytes.TrimSpace(line), []byte(":"), 2)
+			if len(parts) == 2 && strings.EqualFold(strings.TrimSpace(string(parts[0])), "user-agent") {
+				verificationUserAgentValue = strings.TrimSpace(string(parts[1]))
+				if verificationUserAgentValue != "" {
+					return
+				}
+			}
+		}
+		verificationUserAgentErr = errors.New("native request profile is missing User-Agent")
+	})
+	return verificationUserAgentValue, verificationUserAgentErr
 }
 func boundVerificationBody(data []byte) (string, bool) {
 	if len(data) <= verificationAttemptBodyBytes {

@@ -3,20 +3,21 @@ package gateway
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestVerificationPresetsMatchV410LogicalRequestCounts(t *testing.T) {
+func TestVerificationPresetsMatchV411LogicalRequestCounts(t *testing.T) {
 	tests := []struct {
 		mode string
 		want int
 	}{
-		{VerificationModeLow, 14},
-		{VerificationModeMedium, 64},
-		{VerificationModeHigh, 202},
+		{VerificationModeLow, 19},
+		{VerificationModeMedium, 49},
+		{VerificationModeHigh, 158},
 	}
 	for _, test := range tests {
 		jobs, err := buildVerificationJobs(test.mode)
@@ -25,6 +26,13 @@ func TestVerificationPresetsMatchV410LogicalRequestCounts(t *testing.T) {
 		}
 		if got := len(jobs); got != test.want {
 			t.Errorf("buildVerificationJobs(%q) = %d, want %d", test.mode, got, test.want)
+		}
+		manifests := make(map[string]verificationJobManifest, len(jobs))
+		for index, job := range jobs {
+			manifests[fmt.Sprintf("job-%03d", index)] = job
+		}
+		if !matchesOfficialFingerprintPolicy(test.mode, manifests) {
+			t.Errorf("buildVerificationJobs(%q) does not match the v4.1.1 runtime policy", test.mode)
 		}
 	}
 }
@@ -120,7 +128,7 @@ func TestFingerprintBaselineIdentityAndCells(t *testing.T) {
 }
 
 func TestFingerprintCompletionGateUsesNinetyPercent(t *testing.T) {
-	manifests, results := syntheticMediumFingerprint(18, 9)
+	manifests, results := syntheticFingerprint(t, VerificationModeMedium, map[string]int{"rand_country": 9, "rand_bird": 9, "b80_letter_count": 9})
 	summary, err := scoreFingerprint(VerificationModeMedium, manifests, results)
 	if err != nil {
 		t.Fatal(err)
@@ -128,11 +136,11 @@ func TestFingerprintCompletionGateUsesNinetyPercent(t *testing.T) {
 	if !summary.OfficialEligible {
 		t.Fatalf("90%% completion should be eligible: %#v", summary.UnclearReasons)
 	}
-	if summary.Cells["rand_country|normal+no_history"].Minimum != 18 || summary.Cells["b80_letter_count|normal+no_history"].Minimum != 9 {
+	if summary.Cells["rand_country|normal+no_history"].Minimum != 9 || summary.Cells["rand_bird|normal+no_history"].Minimum != 9 || summary.Cells["b80_letter_count|normal+no_history"].Minimum != 9 {
 		t.Fatalf("unexpected completion minima: %#v", summary.Cells)
 	}
 
-	manifests, results = syntheticMediumFingerprint(17, 9)
+	manifests, results = syntheticFingerprint(t, VerificationModeMedium, map[string]int{"rand_country": 8, "rand_bird": 9, "b80_letter_count": 9})
 	summary, err = scoreFingerprint(VerificationModeMedium, manifests, results)
 	if err != nil {
 		t.Fatal(err)
@@ -143,12 +151,12 @@ func TestFingerprintCompletionGateUsesNinetyPercent(t *testing.T) {
 }
 
 func TestFingerprintThresholdIsStrictlyGreater(t *testing.T) {
-	thresholds := map[string]float64{"gpt-5.6-sol": .70, "gpt-5.6-terra": .75, "gpt-5.6-luna": .90}
-	matches := map[string]float64{"gpt-5.6-sol": .70, "gpt-5.6-terra": .20, "gpt-5.6-luna": .10}
+	thresholds := fingerprintThresholds(VerificationModeMedium)
+	matches := map[string]float64{"gpt-5.6-sol": .82, "gpt-5.6-terra": .10, "gpt-5.6-luna": .08}
 	if winners := fingerprintThresholdWinners(matches, thresholds, true); len(winners) != 0 {
 		t.Fatalf("match equal to threshold must not win: %#v", winners)
 	}
-	matches["gpt-5.6-sol"] = .7000001
+	matches["gpt-5.6-sol"] = .8200001
 	if winners := fingerprintThresholdWinners(matches, thresholds, true); len(winners) != 1 || winners[0] != "gpt-5.6-sol" {
 		t.Fatalf("match above threshold should win: %#v", winners)
 	}
@@ -157,19 +165,108 @@ func TestFingerprintThresholdIsStrictlyGreater(t *testing.T) {
 	}
 }
 
-func syntheticMediumFingerprint(countryCount, b80Count int) (map[string]verificationJobManifest, map[string]verificationJobResult) {
+func syntheticFingerprint(t *testing.T, mode string, completed map[string]int) (map[string]verificationJobManifest, map[string]verificationJobResult) {
+	t.Helper()
+	jobs, err := buildVerificationJobs(mode)
+	if err != nil {
+		t.Fatal(err)
+	}
 	manifests := map[string]verificationJobManifest{}
 	results := map[string]verificationJobResult{}
-	add := func(prefix, probe, category string, count int) {
-		for index := 0; index < count; index++ {
-			id := prefix + string(rune('a'+index))
-			manifests[id] = verificationJobManifest{ProbeID: probe, RequestFormat: "normal", ContextMode: "no_history"}
-			results[id] = verificationJobResult{Status: "ok", Classification: "category", Category: category}
+	seen := map[string]int{}
+	for index, manifest := range jobs {
+		id := fmt.Sprintf("job-%03d", index)
+		manifests[id] = manifest
+		if _, ok := completed[manifest.ProbeID]; !ok || seen[manifest.ProbeID] >= completed[manifest.ProbeID] {
+			continue
+		}
+		seen[manifest.ProbeID]++
+		category := "uruguay"
+		if manifest.ProbeID == "rand_bird" {
+			category = "robin"
+		} else if manifest.ProbeID == "b80_letter_count" {
+			category = "exact_3"
+		}
+		results[id] = verificationJobResult{Status: "ok", Classification: "category", Category: category}
+	}
+	return manifests, results
+}
+
+func TestFingerprintThresholdsMatchV411Policy(t *testing.T) {
+	want := map[string]map[string]float64{
+		VerificationModeLow:    {"gpt-5.6-sol": .54, "gpt-5.6-terra": .58, "gpt-5.6-luna": .77},
+		VerificationModeMedium: {"gpt-5.6-sol": .82, "gpt-5.6-terra": .84, "gpt-5.6-luna": .97},
+		VerificationModeHigh:   {"gpt-5.6-sol": .98, "gpt-5.6-terra": .97, "gpt-5.6-luna": .99},
+	}
+	for mode, expected := range want {
+		got := fingerprintThresholds(mode)
+		for model, threshold := range expected {
+			if got[model] != threshold {
+				t.Errorf("%s threshold for %s = %v, want %v", mode, model, got[model], threshold)
+			}
 		}
 	}
-	add("country-", "rand_country", "uruguay", countryCount)
-	add("b80-", "b80_letter_count", "exact_3", b80Count)
-	return manifests, results
+}
+
+func TestLowPresetUsesOfficialFingerprintPolicy(t *testing.T) {
+	manifests, results := syntheticFingerprint(t, VerificationModeLow, map[string]int{"rand_country": 3, "rand_bird": 3, "b80_letter_count": 3})
+	summary, err := scoreFingerprint(VerificationModeLow, manifests, results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !summary.OfficialEligible || summary.PolicyVersion != verificationPolicyVersion {
+		t.Fatalf("low preset should use official v4.1.1 policy: %#v", summary)
+	}
+}
+
+func TestFingerprintPolicyRejectsLegacyRuntimeShape(t *testing.T) {
+	manifests, results := syntheticFingerprint(t, VerificationModeHigh, map[string]int{"rand_country": 40, "rand_bird": 40, "b80_letter_count": 10})
+	manifests["legacy-extra"] = verificationJobManifest{ProbeID: "juice_high", RequestFormat: "normal", ContextMode: "no_history", Effort: "high"}
+	summary, err := scoreFingerprint(VerificationModeHigh, manifests, results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.OfficialEligible || !containsString(summary.UnclearReasons, "no_exact_runtime_policy") {
+		t.Fatalf("legacy runtime shape must be reference-only: %#v", summary)
+	}
+}
+
+func TestFingerprintPolicyRejectsModifiedPrompt(t *testing.T) {
+	jobs, err := buildVerificationJobs(VerificationModeLow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifests := make(map[string]verificationJobManifest, len(jobs))
+	for index, job := range jobs {
+		if job.ProbeID == "rand_country" {
+			job.Messages[0].Content = "Name any country."
+		}
+		manifests[fmt.Sprintf("job-%03d", index)] = job
+	}
+	if matchesOfficialFingerprintPolicy(VerificationModeLow, manifests) {
+		t.Fatal("modified fingerprint prompt must not match the official runtime policy")
+	}
+}
+
+func TestVerificationNativeUserAgent(t *testing.T) {
+	got, err := verificationNativeUserAgent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Codex Desktop/0.147.0-alpha.1.2 (Windows 10.0.26200; x86_64) unknown (codex_exec; 0.147.0-alpha.1.2)"
+	if got != want {
+		t.Fatalf("native User-Agent = %q, want %q", got, want)
+	}
+}
+
+func TestFingerprintClaimMismatchIsFailedCheck(t *testing.T) {
+	summary := fingerprintSummary{Status: "strong_match", Model: "gpt-5.6-luna"}
+	if got := fingerprintLayerStatus(summary, true); got != "failed" {
+		t.Fatalf("mismatch layer status = %q, want failed", got)
+	}
+	if text := verificationFingerprintSummary(summary, "gpt-5.6-sol"); !strings.Contains(text, "Sol") || !strings.Contains(text, "Luna") {
+		t.Fatalf("mismatch summary = %q", text)
+	}
 }
 
 func TestParseResponsesSSEContracts(t *testing.T) {

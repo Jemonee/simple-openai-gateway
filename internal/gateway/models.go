@@ -243,7 +243,7 @@ type VerificationSession struct {
 	FinishedAt          time.Time  `gorm:"index" json:"finishedAt"`
 }
 
-// VerificationJob freezes one logical v4.1.0 probe. HTTP retries share this identity
+// VerificationJob freezes one logical detector probe. HTTP retries share this identity
 // and never replenish their budget after a restart.
 type VerificationJob struct {
 	ID            string    `gorm:"size:64;primaryKey" json:"id"`

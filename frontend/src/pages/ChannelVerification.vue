@@ -22,7 +22,7 @@ import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatte
 interface ModeOption {
   /** Preset label shown in the segmented control. */
   label: string
-  /** Backend v4.1.0 preset identifier. */
+  /** Backend v4.1.1 preset identifier. */
   value: VerificationMode
   /** Frozen logical request count for the preset. */
   requests: number
@@ -31,9 +31,9 @@ interface ModeOption {
 }
 
 const modeOptions: ModeOption[] = [
-  { label: '低', value: 'low', requests: 14, scope: 'Juice、32/48、显式覆盖' },
-  { label: '中', value: 'medium', requests: 64, scope: '增加国家与 B80 行为指纹' },
-  { label: '高', value: 'high', requests: 202, scope: '四种请求画像、32K 上下文、完整指纹' },
+  { label: '低', value: 'low', requests: 19, scope: 'Juice、确定性检查、三组轻量行为指纹' },
+  { label: '中', value: 'medium', requests: 49, scope: '三组 10 次行为指纹与扩展 Juice' },
+  { label: '高', value: 'high', requests: 158, scope: '四种请求画像、32K 上下文、完整指纹' },
 ]
 
 const route = useRoute()
@@ -389,6 +389,10 @@ onUnmounted(() => {
 
         <template v-if="selectedReport">
           <div class="verdict-band"><strong>{{ selectedReport.title }}</strong><span>{{ selectedReport.summary }}</span></div>
+          <div v-if="selectedReport.fingerprintClaimMismatch" class="fingerprint-mismatch" role="alert">
+            <strong>模型指纹与申报不一致</strong>
+            <span>申报 {{ modelLabel(selectedReport.claimedModel) }}，实际请求 {{ selectedReport.requestModel }}，行为指纹强烈指向 {{ modelLabel(selectedReport.fingerprintModel ?? '') }}。</span>
+          </div>
           <section class="fingerprint-grid" aria-label="行为指纹匹配度">
             <div v-for="row in fingerprintRows" :key="row.model"><span>{{ modelLabel(row.model) }}</span><el-progress :percentage="Math.round(row.value * 1000) / 10" :show-text="false" :stroke-width="7" /><strong>{{ (row.value * 100).toFixed(3) }}%</strong></div>
           </section>
@@ -462,6 +466,9 @@ onUnmounted(() => {
 .verdict-band { display: grid; gap: 6px; margin: 16px 0 0; border-left: 3px solid var(--hongfen-primary); padding: 8px 12px; background: var(--hongfen-surface-muted); }
 .verdict-band strong { color: var(--hongfen-text); font-size: 15px; }
 .verdict-band span { color: var(--hongfen-text-muted); font-size: 12px; line-height: 1.5; }
+.fingerprint-mismatch { display: grid; gap: 4px; margin-top: 10px; border: 1px solid var(--hongfen-danger-border); border-radius: 4px; padding: 9px 12px; background: var(--hongfen-danger-soft); }
+.fingerprint-mismatch strong { color: var(--hongfen-danger); font-size: 13px; }
+.fingerprint-mismatch span { color: var(--hongfen-text); font-size: 12px; line-height: 1.5; }
 .fingerprint-grid { display: grid; gap: 8px; margin: 16px 0; }
 .fingerprint-grid > div { display: grid; grid-template-columns: 48px minmax(0, 1fr) 76px; align-items: center; gap: 10px; }
 .fingerprint-grid span { color: var(--hongfen-text); font-size: 12px; }

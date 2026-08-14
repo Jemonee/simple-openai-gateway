@@ -1,7 +1,7 @@
 // The GPT-5.6 detector rules in this file are adapted from
-// chen-006/gpt56_api_detector v4.1.0 (AGPL-3.0), scoring version
-// trusted-fingerprint-v3. The prompts, thresholds, baseline and seven-state
-// semantics intentionally remain compatible with that release.
+// chen-006/gpt56_api_detector v4.1.0 (AGPL-3.0), with the independently
+// implemented v4.1.1 preset and decision-policy parameters. The frozen
+// trusted-fingerprint-v3 baseline remains byte-identical across both releases.
 package gateway
 
 import (
@@ -27,6 +27,7 @@ const (
 
 	verificationBaselineVersion = "trusted-fingerprint-v3"
 	verificationBaselineSHA256  = "b637fcf4d959389b14779a32c6b40dd8346501d84ad7b873c928a8783e421fe5"
+	verificationPolicyVersion   = "fingerprint-runtime-policy-v4.1.1"
 )
 
 var (
@@ -111,6 +112,7 @@ type fingerprintCellResult struct {
 
 type fingerprintSummary struct {
 	ScoringVersion      string                           `json:"scoringVersion"`
+	PolicyVersion       string                           `json:"policyVersion"`
 	BaselineID          string                           `json:"baselineId"`
 	BaselineSHA256      string                           `json:"baselineSha256"`
 	Status              string                           `json:"fingerprintStatus"`
@@ -142,11 +144,11 @@ func normalizeVerificationMode(value string) (string, error) {
 func verificationPresetCount(mode string) int {
 	switch mode {
 	case VerificationModeLow:
-		return 14
+		return 19
 	case VerificationModeMedium:
-		return 64
+		return 49
 	case VerificationModeHigh:
-		return 202
+		return 158
 	default:
 		return 0
 	}
@@ -166,7 +168,8 @@ func buildVerificationJobs(mode string) ([]verificationJobManifest, error) {
 			requests   int
 			profiles   []string
 		}{
-			{"juice_high", "high", 8, nil}, {"juice_low", "low", 3, nil}, {"output_luna_48", "high", 1, nil}, {"output_terra_32", "high", 1, nil}, {"juice_coverage", "high", 1, nil},
+			{"juice_high", "high", 5, nil}, {"juice_low", "low", 2, nil}, {"output_luna_48", "high", 1, nil}, {"output_terra_32", "high", 1, nil}, {"juice_coverage", "high", 1, nil},
+			{"rand_country", "low", 3, nil}, {"rand_bird", "low", 3, nil}, {"b80_letter_count", "low", 3, nil},
 		}
 	case VerificationModeMedium:
 		probes = []struct {
@@ -174,9 +177,9 @@ func buildVerificationJobs(mode string) ([]verificationJobManifest, error) {
 			requests   int
 			profiles   []string
 		}{
-			{"juice_high", "high", 12, nil}, {"juice_low", "low", 6, nil}, {"juice_xhigh", "xhigh", 6, nil}, {"juice_max", "max", 6, nil},
+			{"juice_high", "high", 6, nil}, {"juice_low", "low", 3, nil}, {"juice_xhigh", "xhigh", 3, nil}, {"juice_max", "max", 3, nil},
 			{"output_luna_48", "high", 1, nil}, {"output_terra_32", "high", 1, nil}, {"juice_coverage", "high", 2, nil},
-			{"rand_country", "low", 20, nil}, {"b80_letter_count", "low", 10, nil},
+			{"rand_country", "low", 10, nil}, {"rand_bird", "low", 10, nil}, {"b80_letter_count", "low", 10, nil},
 		}
 	case VerificationModeHigh:
 		profiles = []string{"normal+no_history", "normal+fixed_32k_history", "native_codex+no_history", "native_codex+fixed_32k_history"}
@@ -185,7 +188,7 @@ func buildVerificationJobs(mode string) ([]verificationJobManifest, error) {
 			requests   int
 			profiles   []string
 		}{
-			{"juice_high", "high", 8, nil}, {"juice_low", "low", 4, nil}, {"juice_medium", "medium", 4, nil}, {"juice_xhigh", "xhigh", 4, nil}, {"juice_max", "max", 4, nil},
+			{"juice_high", "high", 5, nil}, {"juice_low", "low", 2, nil}, {"juice_medium", "medium", 2, nil}, {"juice_xhigh", "xhigh", 2, nil}, {"juice_max", "max", 2, nil},
 			{"output_luna_48", "high", 1, nil}, {"output_terra_32", "high", 1, nil}, {"juice_coverage", "high", 2, nil},
 			{"rand_country", "low", 10, nil}, {"rand_bird", "low", 10, nil}, {"b80_letter_count", "low", 10, []string{"normal+no_history"}},
 		}
@@ -473,8 +476,11 @@ func loadFingerprintBaseline() (*fingerprintBaseline, error) {
 }
 
 func fingerprintPlan(mode string) map[string]int {
+	if mode == VerificationModeLow {
+		return map[string]int{"rand_country|normal+no_history": 3, "rand_bird|normal+no_history": 3, "b80_letter_count|normal+no_history": 3}
+	}
 	if mode == VerificationModeMedium {
-		return map[string]int{"rand_country|normal+no_history": 20, "b80_letter_count|normal+no_history": 10}
+		return map[string]int{"rand_country|normal+no_history": 10, "rand_bird|normal+no_history": 10, "b80_letter_count|normal+no_history": 10}
 	}
 	if mode != VerificationModeHigh {
 		return nil
@@ -486,16 +492,102 @@ func fingerprintPlan(mode string) map[string]int {
 	}
 }
 
+func fingerprintThresholds(mode string) map[string]float64 {
+	switch mode {
+	case VerificationModeLow:
+		return map[string]float64{"gpt-5.6-sol": .54, "gpt-5.6-terra": .58, "gpt-5.6-luna": .77}
+	case VerificationModeMedium:
+		return map[string]float64{"gpt-5.6-sol": .82, "gpt-5.6-terra": .84, "gpt-5.6-luna": .97}
+	case VerificationModeHigh:
+		return map[string]float64{"gpt-5.6-sol": .98, "gpt-5.6-terra": .97, "gpt-5.6-luna": .99}
+	default:
+		return nil
+	}
+}
+
+func matchesOfficialFingerprintPolicy(mode string, manifests map[string]verificationJobManifest) bool {
+	expected := officialVerificationRuntimeShape(mode)
+	if len(expected) == 0 || len(manifests) != verificationPresetCount(mode) {
+		return false
+	}
+	observed := map[string]int{}
+	for _, manifest := range manifests {
+		key := manifest.ProbeID + "|" + manifest.RequestFormat + "+" + manifest.ContextMode + "|" + manifest.Effort
+		observed[key]++
+		if strings.HasPrefix(manifest.ProbeID, "rand_") || manifest.ProbeID == "b80_letter_count" {
+			if !matchesOfficialFingerprintPrompt(manifest) {
+				return false
+			}
+		}
+	}
+	if len(observed) != len(expected) {
+		return false
+	}
+	for key, count := range expected {
+		if observed[key] != count {
+			return false
+		}
+	}
+	return true
+}
+
+func matchesOfficialFingerprintPrompt(manifest verificationJobManifest) bool {
+	prompts := map[string]string{
+		"rand_country":     "Name a random country. Reply with ONLY the country name.",
+		"rand_bird":        "Name a random bird. Reply with ONLY the bird name, one word.",
+		"b80_letter_count": "Count the letter r in strawberry. Reply only with the integer.",
+	}
+	expected, ok := prompts[manifest.ProbeID]
+	return ok && manifest.Effort == "low" && len(manifest.Messages) == 1 && manifest.Messages[0].Role == "user" && manifest.Messages[0].Content == expected
+}
+
+func officialVerificationRuntimeShape(mode string) map[string]int {
+	profiles := []string{"normal+no_history"}
+	type probeShape struct {
+		probeID string
+		effort  string
+		count   int
+		profile []string
+	}
+	var probes []probeShape
+	switch mode {
+	case VerificationModeLow:
+		probes = []probeShape{{"juice_high", "high", 5, nil}, {"juice_low", "low", 2, nil}, {"output_luna_48", "high", 1, nil}, {"output_terra_32", "high", 1, nil}, {"juice_coverage", "high", 1, nil}, {"rand_country", "low", 3, nil}, {"rand_bird", "low", 3, nil}, {"b80_letter_count", "low", 3, nil}}
+	case VerificationModeMedium:
+		probes = []probeShape{{"juice_high", "high", 6, nil}, {"juice_low", "low", 3, nil}, {"juice_xhigh", "xhigh", 3, nil}, {"juice_max", "max", 3, nil}, {"output_luna_48", "high", 1, nil}, {"output_terra_32", "high", 1, nil}, {"juice_coverage", "high", 2, nil}, {"rand_country", "low", 10, nil}, {"rand_bird", "low", 10, nil}, {"b80_letter_count", "low", 10, nil}}
+	case VerificationModeHigh:
+		profiles = []string{"normal+no_history", "normal+fixed_32k_history", "native_codex+no_history", "native_codex+fixed_32k_history"}
+		probes = []probeShape{{"juice_high", "high", 5, nil}, {"juice_low", "low", 2, nil}, {"juice_medium", "medium", 2, nil}, {"juice_xhigh", "xhigh", 2, nil}, {"juice_max", "max", 2, nil}, {"output_luna_48", "high", 1, nil}, {"output_terra_32", "high", 1, nil}, {"juice_coverage", "high", 2, nil}, {"rand_country", "low", 10, nil}, {"rand_bird", "low", 10, nil}, {"b80_letter_count", "low", 10, []string{"normal+no_history"}}}
+	default:
+		return nil
+	}
+	shape := map[string]int{}
+	for _, probe := range probes {
+		applicable := probe.profile
+		if len(applicable) == 0 {
+			applicable = profiles
+		}
+		for _, profile := range applicable {
+			shape[probe.probeID+"|"+profile+"|"+probe.effort] = probe.count
+		}
+	}
+	return shape
+}
+
 func scoreFingerprint(mode string, manifests map[string]verificationJobManifest, results map[string]verificationJobResult) (fingerprintSummary, error) {
 	baseline, err := loadFingerprintBaseline()
 	if err != nil {
 		return fingerprintSummary{}, err
 	}
-	summary := fingerprintSummary{ScoringVersion: verificationBaselineVersion, BaselineID: baseline.BaselineID, BaselineSHA256: baseline.ContentSHA256, Status: "unclear", Match: map[string]float64{}, Thresholds: map[string]float64{}, Scores: map[string]float64{}, Cells: map[string]fingerprintCellResult{}, FamilyContributions: map[string]map[string]float64{}}
+	summary := fingerprintSummary{ScoringVersion: verificationBaselineVersion, PolicyVersion: verificationPolicyVersion, BaselineID: baseline.BaselineID, BaselineSHA256: baseline.ContentSHA256, Status: "unclear", Match: map[string]float64{}, Thresholds: fingerprintThresholds(mode), Scores: map[string]float64{}, Cells: map[string]fingerprintCellResult{}, FamilyContributions: map[string]map[string]float64{}}
 	plan := fingerprintPlan(mode)
 	if len(plan) == 0 {
-		summary.UnclearReasons = []string{"builtin_fingerprint_not_enabled"}
+		summary.UnclearReasons = []string{"no_probability_probe_selected"}
 		return summary, nil
+	}
+	policyMatched := matchesOfficialFingerprintPolicy(mode, manifests)
+	if !policyMatched {
+		summary.UnclearReasons = append(summary.UnclearReasons, "no_exact_runtime_policy")
 	}
 	counts := map[string]map[string]int{}
 	for jobID, result := range results {
@@ -607,12 +699,7 @@ func scoreFingerprint(mode string, manifests map[string]verificationJobManifest,
 	ordered := append([]string(nil), verificationTargetModels...)
 	sort.Slice(ordered, func(i, j int) bool { return summary.Match[ordered[i]] > summary.Match[ordered[j]] })
 	summary.Winner, summary.RunnerUp = ordered[0], ordered[1]
-	if mode == VerificationModeMedium {
-		summary.Thresholds = map[string]float64{"gpt-5.6-sol": .70, "gpt-5.6-terra": .75, "gpt-5.6-luna": .90}
-	} else {
-		summary.Thresholds = map[string]float64{"gpt-5.6-sol": .95, "gpt-5.6-terra": .90, "gpt-5.6-luna": .90}
-	}
-	summary.OfficialEligible = !incomplete && len(families) > 0
+	summary.OfficialEligible = policyMatched && !incomplete && len(families) > 0
 	winners := fingerprintThresholdWinners(summary.Match, summary.Thresholds, summary.OfficialEligible)
 	if len(winners) == 1 {
 		summary.Status, summary.Model = "strong_match", winners[0]
