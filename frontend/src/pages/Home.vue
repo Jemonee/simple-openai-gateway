@@ -718,20 +718,29 @@ onMounted(loadDashboard)
 .usage-panel { min-height: 300px; }
 .historical-cost-note { margin: -8px 0 0; color: var(--hongfen-text-subtle); font-size: 11px; }
 .metric-cell-tooltip { cursor: help; }
-:global(.dashboard-metric-popper) { max-width: min(440px, 90vw); }
+:global(.dashboard-metric-popper.el-popper) {
+  max-width: min(440px, 90vw);
+  border: 1px solid var(--hongfen-border) !important;
+  color: var(--hongfen-text) !important;
+  background: var(--hongfen-surface-muted) !important;
+}
+:global(.dashboard-metric-popper.el-popper .el-popper__arrow::before) {
+  border-color: var(--hongfen-border) !important;
+  background: var(--hongfen-surface-muted) !important;
+}
 .metric-tooltip { width: min(360px, 82vw); }
-.metric-tooltip > header { display: grid; gap: 2px; padding: 3px 4px 8px; border-bottom: 1px solid rgb(255 255 255 / 16%); }
+.metric-tooltip > header { display: grid; gap: 2px; padding: 3px 4px 8px; border-bottom: 1px solid var(--hongfen-border); }
 .metric-tooltip > header strong { font-size: 12px; }
-.metric-tooltip > header span { color: rgb(255 255 255 / 70%); font-size: 10px; }
+.metric-tooltip > header span { color: var(--hongfen-text-muted); font-size: 10px; }
 .metric-tooltip ol { display: grid; max-height: 244px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
-.metric-tooltip li { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 8px 4px; border-bottom: 1px solid rgb(255 255 255 / 16%); }
+.metric-tooltip li { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 8px 4px; border-bottom: 1px solid var(--hongfen-border); }
 .metric-tooltip li:last-child { border-bottom: 0; }
-.metric-tooltip-rank { display: grid; width: 18px; height: 18px; place-items: center; border: 1px solid rgb(255 255 255 / 24%); border-radius: 3px; font: 600 10px/1 var(--hongfen-font-mono); }
+.metric-tooltip-rank { display: grid; width: 18px; height: 18px; place-items: center; border: 1px solid var(--hongfen-border-strong); border-radius: 3px; font: 600 10px/1 var(--hongfen-font-mono); }
 .metric-tooltip code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .metric-tooltip li > div { display: grid; justify-items: end; gap: 1px; font-variant-numeric: tabular-nums; }
-.metric-tooltip li small { color: rgb(255 255 255 / 70%); font-size: 9px; white-space: nowrap; }
+.metric-tooltip li small { color: var(--hongfen-text-muted); font-size: 9px; white-space: nowrap; }
 .cost-tooltip-list { display: grid; min-width: 260px; max-height: 220px; overflow-y: auto; }
-.cost-tooltip-list > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; padding: 8px 4px; border-bottom: 1px solid rgb(255 255 255 / 16%); }
+.cost-tooltip-list > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; padding: 8px 4px; border-bottom: 1px solid var(--hongfen-border); }
 .cost-tooltip-list > div:last-child { border-bottom: 0; }
 .cost-tooltip-list code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cost-tooltip-list strong { font-variant-numeric: tabular-nums; }
