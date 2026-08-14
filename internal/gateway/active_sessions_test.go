@@ -18,6 +18,8 @@ func TestActiveSessionsDefaultsToRecentUserAndSubagentSessions(t *testing.T) {
 		{ID: "inactive-user", TokenID: 7, TokenName: "user-token", TokenKeyPrefix: "sk-user", Endpoint: "responses", RequestedModel: "gpt-active", CodexSessionID: "inactive-user", CodexSessionSource: "prompt_cache_key", SessionName: "Inactive user", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, CreatedAt: now.Add(-31 * time.Minute)},
 		{ID: "active-subagent", TokenID: 7, TokenName: "user-token", TokenKeyPrefix: "sk-user", Endpoint: "responses", RequestedModel: "gpt-active", CodexSessionID: "active-subagent", CodexSessionSource: "prompt_cache_key", SessionName: "Active subagent", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, AttemptCount: 1, CreatedAt: now.Add(-10 * time.Minute)},
 		{ID: "active-ambient", TokenID: 7, TokenName: "user-token", TokenKeyPrefix: "sk-user", Endpoint: "responses", RequestedModel: "gpt-active", CodexSessionID: "active-ambient", CodexSessionSource: "prompt_cache_key", SessionName: "Active ambient", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, CreatedAt: now.Add(-time.Minute)},
+		{ID: "active-custom", TokenID: 7, TokenName: "user-token", TokenKeyPrefix: "sk-user", Endpoint: "responses", RequestedModel: "gpt-active", CodexSessionID: "active-custom", CodexSessionSource: "prompt_cache_key", SessionName: "Active custom", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, CreatedAt: now.Add(-2 * time.Minute)},
+		{ID: "active-unavailable", TokenID: 7, TokenName: "user-token", TokenKeyPrefix: "sk-user", Endpoint: "responses", RequestedModel: "gpt-active", CodexSessionID: "active-unavailable", CodexSessionSource: "prompt_cache_key", SessionName: "Active unavailable", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, CreatedAt: now.Add(-3 * time.Minute)},
 	}
 	if err := store.db.Create(&logs).Error; err != nil {
 		t.Fatal(err)
@@ -35,6 +37,8 @@ func TestActiveSessionsDefaultsToRecentUserAndSubagentSessions(t *testing.T) {
 		{TokenID: 7, SessionID: "inactive-user", Title: "Inactive user", ThreadSource: codexThreadSourceUser, LatestRequestID: "inactive-user", LastActivityAt: timePointer(now.Add(-31 * time.Minute)), CreatedAt: now.Add(-31 * time.Minute), UpdatedAt: now.Add(-31 * time.Minute)},
 		{TokenID: 7, SessionID: "active-subagent", Title: "Active subagent", ThreadSource: codexThreadSourceSubagent, ParentSessionID: "active-user", LatestRequestID: "active-subagent", LastActivityAt: timePointer(now.Add(-10 * time.Minute)), CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now.Add(-10 * time.Minute)},
 		{TokenID: 7, SessionID: "active-ambient", Title: "Active ambient", ThreadSource: codexThreadSourceAmbient, LatestRequestID: "active-ambient", LastActivityAt: timePointer(now.Add(-time.Minute)), CreatedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute)},
+		{TokenID: 7, SessionID: "active-custom", Title: "Active custom", ThreadSource: "custom_automation", LatestRequestID: "active-custom", LastActivityAt: timePointer(now.Add(-2 * time.Minute)), CreatedAt: now.Add(-2 * time.Minute), UpdatedAt: now.Add(-2 * time.Minute)},
+		{TokenID: 7, SessionID: "active-unavailable", Title: "Active unavailable", ThreadSource: codexThreadSourceUnknown, LatestRequestID: "active-unavailable", LastActivityAt: timePointer(now.Add(-3 * time.Minute)), CreatedAt: now.Add(-3 * time.Minute), UpdatedAt: now.Add(-3 * time.Minute)},
 	}
 	if err := store.db.Create(&states).Error; err != nil {
 		t.Fatal(err)
@@ -110,6 +114,32 @@ func TestActiveSessionsDefaultsToRecentUserAndSubagentSessions(t *testing.T) {
 	}
 	if ambientPage.Total != 1 || len(ambientPage.Items) != 1 || ambientPage.Items[0].SessionID != "active-ambient" {
 		t.Fatalf("explicit ambient source sessions = %+v", ambientPage)
+	}
+
+	otherPage, err := NewManagementService(store).ActiveSessions(context.Background(), ActiveSessionQuery{
+		Sources:     []string{activeSessionOtherSource},
+		ActiveSince: now.Add(-30 * time.Minute),
+		Page:        1,
+		PageSize:    25,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherPage.Total != 2 || len(otherPage.Items) != 2 || otherPage.Items[0].SessionID != "active-custom" || otherPage.Items[1].SessionID != "active-unavailable" {
+		t.Fatalf("other source sessions = %+v", otherPage)
+	}
+
+	combinedPage, err := NewManagementService(store).ActiveSessions(context.Background(), ActiveSessionQuery{
+		Sources:     []string{codexThreadSourceUser, codexThreadSourceSubagent, activeSessionOtherSource},
+		ActiveSince: now.Add(-30 * time.Minute),
+		Page:        1,
+		PageSize:    25,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if combinedPage.Total != 5 || len(combinedPage.Items) != 5 {
+		t.Fatalf("combined explicit and other source sessions = %+v", combinedPage)
 	}
 }
 

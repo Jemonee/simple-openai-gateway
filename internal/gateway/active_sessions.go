@@ -8,7 +8,19 @@ import (
 	"gorm.io/gorm"
 )
 
-var defaultActiveSessionSources = []string{codexThreadSourceUser, codexThreadSourceSubagent}
+const activeSessionOtherSource = "other"
+
+var (
+	defaultActiveSessionSources = []string{codexThreadSourceUser, codexThreadSourceSubagent}
+	knownActiveSessionSources   = []string{
+		codexThreadSourceUser,
+		codexThreadSourceSubagent,
+		"system",
+		codexThreadSourceAmbient,
+		"assistant",
+		"developer",
+	}
+)
 
 type ActiveSessionQuery struct {
 	Session     string
@@ -42,9 +54,29 @@ type activeSessionAggregate struct {
 func activeSessionRows(db *gorm.DB, query ActiveSessionQuery) *gorm.DB {
 	db = db.Table("relay_session_states AS session_state").
 		Joins("JOIN relay_request_logs AS latest_request ON latest_request.id = session_state.latest_request_id").
-		Joins("LEFT JOIN client_tokens AS client_token ON client_token.id = session_state.token_id").
-		Where("session_state.thread_source IN ?", query.Sources).
-		Where("session_state.last_activity_at >= ?", utcQueryTime(query.ActiveSince))
+		Joins("LEFT JOIN client_tokens AS client_token ON client_token.id = session_state.token_id")
+	explicitSources := make([]string, 0, len(query.Sources))
+	includeOther := false
+	for _, source := range query.Sources {
+		if source == activeSessionOtherSource {
+			includeOther = true
+			continue
+		}
+		explicitSources = append(explicitSources, source)
+	}
+	switch {
+	case includeOther && len(explicitSources) > 0:
+		db = db.Where(
+			"(session_state.thread_source IN ? OR COALESCE(session_state.thread_source, '') NOT IN ?)",
+			explicitSources,
+			knownActiveSessionSources,
+		)
+	case includeOther:
+		db = db.Where("COALESCE(session_state.thread_source, '') NOT IN ?", knownActiveSessionSources)
+	default:
+		db = db.Where("session_state.thread_source IN ?", explicitSources)
+	}
+	db = db.Where("session_state.last_activity_at >= ?", utcQueryTime(query.ActiveSince))
 	if value := strings.TrimSpace(query.Session); value != "" {
 		pattern := "%" + value + "%"
 		db = db.Where(

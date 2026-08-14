@@ -17,6 +17,7 @@ const ACTIVE_SESSION_SOURCE_OPTIONS = [
   { value: 'ambient_suggestions', label: '环境建议' },
   { value: 'assistant', label: 'Assistant' },
   { value: 'developer', label: 'Developer' },
+  { value: 'other', label: '其他' },
 ] as const
 
 type ActiveSessionSource = typeof ACTIVE_SESSION_SOURCE_OPTIONS[number]['value']
@@ -26,7 +27,7 @@ const errorMessage = ref('')
 const sessions = ref<CodexSessionSummary[]>([])
 const total = ref(0)
 const searchText = ref('')
-const selectedSources = ref<ActiveSessionSource[]>(['user', 'subagent'])
+const selectedSources = ref<ActiveSessionSource[]>(['user', 'subagent', 'other'])
 const pagination = reactive({ page: 1, pageSize: 25 })
 const drawerOpen = ref(false)
 const selectedSession = ref<CodexSessionSummary | null>(null)
