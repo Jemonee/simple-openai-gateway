@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { CSSProperties } from 'vue'
 
 interface RequestTrendPoint {
@@ -31,6 +31,8 @@ const plotLeft = 46
 const plotRightPadding = 20
 const chartWidth = computed(() => Math.max(960, plotLeft + plotRightPadding + Math.max(1, points.length - 1) * 14))
 const plotRight = computed(() => chartWidth.value - plotRightPadding)
+const chartElement = ref<SVGSVGElement | null>(null)
+const selectedPointIndex = ref<number | null>(null)
 
 function niceCeiling(value: number): number {
   if (value <= 1) return 1
@@ -79,19 +81,67 @@ function seriesPoints(series: SeriesKey) {
 function seriesPath(series: SeriesKey): string {
   return seriesPoints(series).map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ')
 }
+
+const selectedPoint = computed(() => selectedPointIndex.value === null ? null : points[selectedPointIndex.value])
+const selectedPointStyle = computed<CSSProperties | undefined>(() => {
+  if (selectedPointIndex.value === null) return undefined
+  const x = xPosition(selectedPointIndex.value)
+  const y = yPosition(Math.max(points[selectedPointIndex.value].requests, points[selectedPointIndex.value].successes))
+  const horizontalOffset = x / chartWidth.value < 0.18 ? '0%' : x / chartWidth.value > 0.82 ? '-100%' : '-50%'
+  const aboveMidpoint = y < (plotTop + plotBottom) / 2
+  return {
+    left: `${x / chartWidth.value * 100}%`,
+    top: `${y / chartHeight * 100}%`,
+    transform: `translate(${horizontalOffset}, ${aboveMidpoint ? '14px' : 'calc(-100% - 14px)'})`,
+  }
+})
+
+function selectPointAt(clientX: number): void {
+  const chart = chartElement.value
+  if (!chart || !points.length) return
+  const bounds = chart.getBoundingClientRect()
+  if (!bounds.width) return
+  const targetX = (clientX - bounds.left) / bounds.width * chartWidth.value
+  selectedPointIndex.value = points.reduce((closestIndex, _, index) => (
+    Math.abs(xPosition(index) - targetX) < Math.abs(xPosition(closestIndex) - targetX) ? index : closestIndex
+  ), 0)
+}
+
+function handlePointerMove(event: PointerEvent): void {
+  selectPointAt(event.clientX)
+}
+
+function handleKeyboardNavigation(event: KeyboardEvent): void {
+  if (!points.length) return
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+  event.preventDefault()
+  const currentIndex = selectedPointIndex.value ?? 0
+  selectedPointIndex.value = Math.min(points.length - 1, Math.max(0, currentIndex + (event.key === 'ArrowRight' ? 1 : -1)))
+}
+
+function successRate(point: RequestTrendPoint): string {
+  return point.requests ? `${(point.successes / point.requests * 100).toFixed(1)}%` : '--'
+}
 </script>
 
 <template>
   <div class="trend-chart-scroller" :style="chartStyle">
-    <svg
-      class="trend-chart"
-      :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
-      :width="chartWidth"
-      :height="chartHeight"
-      role="img"
-      :aria-label="ariaLabel"
-      preserveAspectRatio="xMinYMin meet"
-    >
+    <div class="trend-chart-stage">
+      <svg
+        ref="chartElement"
+        class="trend-chart"
+        :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
+        :width="chartWidth"
+        :height="chartHeight"
+        role="img"
+        :aria-label="ariaLabel"
+        tabindex="0"
+        preserveAspectRatio="xMinYMin meet"
+        @focus="selectedPointIndex = points.length ? 0 : null"
+        @keydown="handleKeyboardNavigation"
+        @pointermove="handlePointerMove"
+        @pointerleave="selectedPointIndex = null"
+      >
       <g class="trend-grid" aria-hidden="true">
         <g v-for="tick in gridTicks" :key="tick.y">
           <line :x1="plotLeft" :x2="plotRight" :y1="tick.y" :y2="tick.y" />
@@ -118,7 +168,14 @@ function seriesPath(series: SeriesKey): string {
           <text v-if="labelIndexes.has(index)" :x="xPosition(index)" y="210" text-anchor="middle">{{ point.label }}</text>
         </template>
       </g>
-    </svg>
+      </svg>
+      <div v-if="selectedPoint" class="trend-point-tooltip" :style="selectedPointStyle" role="status">
+        <strong>{{ selectedPoint.label }}</strong>
+        <span>请求 <b>{{ selectedPoint.requests }}</b></span>
+        <span>成功 <b>{{ selectedPoint.successes }}</b></span>
+        <span>成功率 <b>{{ successRate(selectedPoint) }}</b></span>
+      </div>
+    </div>
 
     <table class="trend-data-table">
       <caption>{{ ariaLabel }}</caption>
@@ -130,7 +187,9 @@ function seriesPath(series: SeriesKey): string {
 
 <style scoped>
 .trend-chart-scroller { width: 100%; overflow-x: auto; scrollbar-gutter: stable; }
-.trend-chart { display: block; width: max(100%, var(--trend-chart-width)); height: auto; }
+.trend-chart-stage { position: relative; width: max(100%, var(--trend-chart-width)); }
+.trend-chart { display: block; width: 100%; height: auto; cursor: crosshair; }
+.trend-chart:focus-visible { outline: 2px solid var(--hongfen-primary); outline-offset: -2px; }
 .trend-grid line { stroke: var(--hongfen-border); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .trend-grid text, .trend-labels text { fill: var(--hongfen-text-muted); font: 10px var(--hongfen-font-mono); }
 .trend-labels line { stroke: var(--hongfen-border-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
@@ -140,5 +199,9 @@ function seriesPath(series: SeriesKey): string {
 .trend-series-requests circle { fill: var(--hongfen-primary); }
 .trend-series-successes path { stroke: var(--hongfen-success); }
 .trend-series-successes circle { fill: var(--hongfen-success); }
+.trend-point-tooltip { position: absolute; z-index: 1; display: grid; min-width: 142px; gap: 3px; padding: 8px 10px; border: 1px solid var(--hongfen-border-strong); border-radius: var(--hongfen-radius-control); color: var(--hongfen-text); background: var(--hongfen-surface); box-shadow: var(--el-box-shadow-light); font-size: 11px; line-height: 1.35; pointer-events: none; }
+.trend-point-tooltip strong { color: var(--hongfen-text); font-family: var(--hongfen-font-mono); font-size: 11px; }
+.trend-point-tooltip span { display: flex; justify-content: space-between; gap: 18px; color: var(--hongfen-text-muted); }
+.trend-point-tooltip b { color: var(--hongfen-text); font-family: var(--hongfen-font-mono); font-weight: 650; font-variant-numeric: tabular-nums; }
 .trend-data-table { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 </style>
