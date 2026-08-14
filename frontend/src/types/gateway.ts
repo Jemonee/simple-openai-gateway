@@ -64,6 +64,24 @@ export interface ResourceDetail {
   requests: ResourceRequestRef[]
 }
 
+export type ResourceCleanupKind = '' | 'image' | 'file' | 'code' | 'skill' | 'url' | 'data' | 'reference'
+
+export interface ResourceCleanupInput {
+  /** Minimum age in whole days for resources eligible for deletion. */
+  days: number
+  /** Resource kind to delete, or an empty string to include every kind. */
+  kind: ResourceCleanupKind
+}
+
+export interface ResourceCleanupResult {
+  /** Exclusive UTC cutoff applied to each resource's last reference time. */
+  cutoffAt: string
+  /** Number of resource catalog rows deleted by the cleanup. */
+  resourcesDeleted: number
+  /** Number of request-resource reference rows deleted with those resources. */
+  referencesDeleted: number
+}
+
 export interface AdminSession {
   /** Persistent administrator identifier. */
   id: number

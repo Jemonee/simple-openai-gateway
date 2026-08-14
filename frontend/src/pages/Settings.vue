@@ -4,7 +4,7 @@ import { Check, Delete, Link, Refresh, RefreshLeft } from '@element-plus/icons-v
 import { ElMessage, ElMessageBox } from 'element-plus'
 import projectMeta from '@/config/project.generated.js'
 import RoutingWeightEditor from '@/components/RoutingWeightEditor.vue'
-import type { ApplicationSettings, LogDeleteResult, LogPayloadCleanupResult, LogStorageUsage, PayloadLogDetail } from '@/types/gateway'
+import type { ApplicationSettings, LogDeleteResult, LogPayloadCleanupResult, LogStorageUsage, PayloadLogDetail, ResourceCleanupInput, ResourceCleanupKind, ResourceCleanupResult } from '@/types/gateway'
 import type { RoutingWeightValues } from '@/types/routing'
 import { request } from '@/utils/api'
 
@@ -17,9 +17,23 @@ const logStorage = ref<LogStorageUsage | null>(null)
 const logStorageLoading = ref(false)
 const clearingPayloads = ref(false)
 const deletingLogs = ref(false)
+const cleaningResources = ref(false)
 const cleanupDays = ref(7)
 const cleanupDaysMode = ref('7')
+const resourceCleanupDays = ref(30)
+const resourceCleanupDaysMode = ref('30')
+const resourceCleanupKind = ref<ResourceCleanupKind>('')
 const cleanupDayOptions = [1, 3, 5, 7, 15, 30, 90]
+const resourceCleanupKindOptions: Array<{ label: string; value: ResourceCleanupKind }> = [
+  { label: '全部类型', value: '' },
+  { label: '图片', value: 'image' },
+  { label: '文件', value: 'file' },
+  { label: '代码', value: 'code' },
+  { label: 'Skill', value: 'skill' },
+  { label: '链接', value: 'url' },
+  { label: '内嵌资源', value: 'data' },
+  { label: '其他', value: 'reference' },
+]
 let storageTimer: ReturnType<typeof setInterval> | undefined
 const payloadLogDetailOptions: Array<{ label: string; value: PayloadLogDetail }> = [
   { label: '默认', value: 'default' },
@@ -204,6 +218,39 @@ async function deleteHistoricalLogs() {
   } finally { deletingLogs.value = false }
 }
 
+function selectedResourceCleanupDays(): number | null {
+  const value = resourceCleanupDaysMode.value === 'custom' ? resourceCleanupDays.value : Number(resourceCleanupDaysMode.value)
+  if (!Number.isInteger(value) || value <= 0) {
+    ElMessage.error('资源清理天数必须为正整数')
+    return null
+  }
+  return value
+}
+
+async function cleanupHistoricalResources() {
+  const days = selectedResourceCleanupDays()
+  if (!days) return
+  const cutoff = formatCutoff(new Date(Date.now() - days * 86400000).toISOString())
+  const kindLabel = resourceCleanupKindOptions.find((option) => option.value === resourceCleanupKind.value)?.label ?? '全部类型'
+  try {
+    await ElMessageBox.confirm(
+      `将永久删除最后引用时间早于 ${cutoff} 的资源中心数据及其引用记录。类型范围：${kindLabel}。调用日志本身不会删除。`,
+      '清理资源中心数据',
+      { type: 'error', confirmButtonText: '确认清理', cancelButtonText: '取消' },
+    )
+  } catch { return }
+  cleaningResources.value = true
+  try {
+    const input: ResourceCleanupInput = { days, kind: resourceCleanupKind.value }
+    const result = await request<ResourceCleanupResult>('/admin/gateway/resources/cleanup', { method: 'POST', body: JSON.stringify(input) })
+    ElMessage.success(`已按${kindLabel}清理 ${result.resourcesDeleted} 条资源和 ${result.referencesDeleted} 条引用记录`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '资源中心数据清理失败')
+  } finally {
+    cleaningResources.value = false
+  }
+}
+
 async function saveSettings() {
   const routingWeightTotal = routingWeightKeys.reduce((total, key) => total + form.gatewayConfig[key], 0)
   if (routingWeightTotal !== 100 || form.gatewayConfig.routingQualityWeightPercent < minimumRoutingQualityWeightPercent) {
@@ -315,6 +362,20 @@ onUnmounted(() => {
               <small v-if="logStorage">{{ logStorage.cutoffAt ? `自动保留窗口：${formatCutoff(logStorage.cutoffAt)} 之后；` : '自动保留窗口：永不清理；' }}手动清理每 10 秒刷新存储占用。</small>
             </div>
           </el-form-item>
+          <el-form-item label="资源中心数据清理" class="payload-detail-field">
+            <div class="resource-cleanup-control">
+              <div class="resource-cleanup-row">
+                <span>按资源的最后引用时间清理资源目录和关联引用记录</span>
+                <div class="payload-actions">
+                  <el-select v-model="resourceCleanupKind" size="small" class="cleanup-type-select" aria-label="待清理资源类型"><el-option v-for="option in resourceCleanupKindOptions" :key="option.value" :label="option.label" :value="option.value" /></el-select>
+                  <el-select v-model="resourceCleanupDaysMode" size="small" class="cleanup-days-select"><el-option v-for="days in cleanupDayOptions" :key="days" :label="`${days} 天之前`" :value="String(days)" /><el-option label="自定义天数" value="custom" /></el-select>
+                  <el-input-number v-if="resourceCleanupDaysMode === 'custom'" v-model="resourceCleanupDays" size="small" :min="1" :max="36500" controls-position="right" />
+                  <el-button type="danger" size="small" :icon="Delete" :loading="cleaningResources" @click="cleanupHistoricalResources">清理资源数据</el-button>
+                </div>
+              </div>
+              <small>截止时间及之后仍有引用的资源会保留，清理不会删除调用日志。</small>
+            </div>
+          </el-form-item>
           <el-form-item label="首次渠道配置自动启用模型" class="payload-detail-field">
             <div class="common-model-control">
               <el-select v-model="form.gatewayConfig.commonModelNames" multiple filterable allow-create default-first-option placeholder="输入模型名称后回车" aria-label="首次配置自动启用的常用模型">
@@ -364,10 +425,14 @@ onUnmounted(() => {
 .payload-detail-control small { color: var(--hongfen-text-muted); font-size: 11px; line-height: 1.6; }
 .payload-storage-row { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 12px; border: 1px solid var(--hongfen-border); background: var(--hongfen-surface-muted); }
 .payload-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.cleanup-type-select { width: 120px; }
 .cleanup-days-select { width: 140px; }
 .payload-storage-metric { display: flex; align-items: baseline; gap: 10px; color: var(--hongfen-text-muted); font-size: 11px; }
 .payload-storage-metric b { color: var(--hongfen-text); font-family: var(--hongfen-font-mono); font-size: 16px; }
 .payload-storage-metric :deep(.el-skeleton) { width: 70px; }
+.resource-cleanup-control { display: grid; gap: 8px; width: 100%; }
+.resource-cleanup-control small { color: var(--hongfen-text-muted); font-size: 11px; line-height: 1.6; }
+.resource-cleanup-row { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 12px; border: 1px solid var(--hongfen-border); background: var(--hongfen-surface-muted); color: var(--hongfen-text-muted); font-size: 11px; }
 .common-model-control { display: grid; gap: 8px; width: 100%; }
 .common-model-control .el-select { width: 100%; }
 .common-model-control small { color: var(--hongfen-text-muted); font-size: 11px; line-height: 1.6; }
@@ -392,5 +457,7 @@ onUnmounted(() => {
   .repository-row { grid-column: auto; }
   .project-metadata { gap: 14px; padding: 18px; }
   .disclaimer { margin: 0 18px 18px; }
+  .resource-cleanup-row { align-items: stretch; flex-direction: column; }
+  .resource-cleanup-row .payload-actions { justify-content: flex-start; }
 }
 </style>

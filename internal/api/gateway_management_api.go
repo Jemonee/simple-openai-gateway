@@ -58,6 +58,7 @@ func (a *GatewayManagementApi) Register(router *gin.RouterGroup) {
 	admin.GET("/sessions/detail", a.sessionDetail)
 	admin.PUT("/sessions/title", a.renameSession)
 	admin.GET("/resources", a.resources)
+	admin.POST("/resources/cleanup", a.cleanupResources)
 	admin.GET("/resources/:id", a.resourceDetail)
 	admin.PUT("/resources/:id/sensitive", a.setResourceSensitive)
 	admin.GET("/codex-config", a.codexConfiguration)
@@ -688,6 +689,19 @@ func (a *GatewayManagementApi) resources(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, common.S(item))
+}
+
+func (a *GatewayManagementApi) cleanupResources(c *gin.Context) {
+	var input gateway.ResourceCleanupInput
+	if !bindManagementJSON(c, &input) {
+		return
+	}
+	result, err := a.management.CleanupResourcesBefore(c.Request.Context(), input.Days, input.Kind)
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, common.S(result))
 }
 
 func (a *GatewayManagementApi) resourceDetail(c *gin.Context) {
