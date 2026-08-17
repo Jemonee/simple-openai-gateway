@@ -22,7 +22,7 @@ import (
 type GatewayResource struct {
 	ID          uint64    `gorm:"primaryKey;autoIncrement" json:"id"`
 	Fingerprint string    `gorm:"size:64;uniqueIndex;not null" json:"fingerprint"`
-	Kind        string    `gorm:"size:24;index;not null" json:"kind"`
+	Kind        string    `gorm:"size:24;index;index:idx_gateway_resource_kind_last_seen,priority:1;not null" json:"kind"`
 	Name        string    `gorm:"size:255" json:"name"`
 	MIMEType    string    `gorm:"size:120" json:"mimeType"`
 	URI         string    `gorm:"size:2048" json:"uri"`
@@ -32,14 +32,14 @@ type GatewayResource struct {
 	PreviewData string    `gorm:"type:text" json:"previewData"`
 	Sensitive   bool      `gorm:"not null;default:false;index" json:"sensitive"`
 	FirstSeenAt time.Time `json:"firstSeenAt"`
-	LastSeenAt  time.Time `json:"lastSeenAt"`
+	LastSeenAt  time.Time `gorm:"index:idx_gateway_resource_last_seen,sort:desc;index:idx_gateway_resource_kind_last_seen,priority:2,sort:desc" json:"lastSeenAt"`
 }
 
 type RequestResource struct {
 	ID         uint64 `gorm:"primaryKey;autoIncrement" json:"id"`
-	RequestID  string `gorm:"size:36;index;not null" json:"requestId"`
-	ResourceID uint64 `gorm:"index;not null" json:"resourceId"`
-	Location   string `gorm:"size:512;not null" json:"location"`
+	RequestID  string `gorm:"size:36;index;index:idx_request_resource_resource_request,priority:2;uniqueIndex:uidx_request_resource_identity,priority:1;not null" json:"requestId"`
+	ResourceID uint64 `gorm:"index:idx_request_resource_resource_request,priority:1;uniqueIndex:uidx_request_resource_identity,priority:2;not null" json:"resourceId"`
+	Location   string `gorm:"size:512;uniqueIndex:uidx_request_resource_identity,priority:3;not null" json:"location"`
 	Role       string `gorm:"size:32;not null" json:"role"`
 	Occurrence int    `gorm:"not null;default:1" json:"occurrence"`
 }

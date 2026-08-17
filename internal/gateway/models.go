@@ -91,7 +91,7 @@ type GatewayModel struct {
 type ChannelModel struct {
 	ID                         uint64    `gorm:"primaryKey;autoIncrement" json:"id"`
 	ChannelID                  uint64    `gorm:"uniqueIndex:idx_channel_model;not null" json:"channelId"`
-	ModelID                    uint64    `gorm:"uniqueIndex:idx_channel_model;index;not null" json:"modelId"`
+	ModelID                    uint64    `gorm:"uniqueIndex:idx_channel_model;index;index:idx_channel_model_routable,priority:1;not null" json:"modelId"`
 	UpstreamModel              string    `gorm:"size:200;not null" json:"upstreamModel"`
 	Priority                   int       `gorm:"not null;default:0" json:"priority"`
 	Weight                     int       `gorm:"not null;default:100" json:"weight"`
@@ -100,7 +100,7 @@ type ChannelModel struct {
 	CachedInputPriceMicros     *int64    `json:"cachedInputPriceMicros"`
 	CacheWritePriceMicros      *int64    `json:"cacheWritePriceMicros"`
 	PriceMultiplierBasisPoints int64     `gorm:"not null;default:10000" json:"priceMultiplierBasisPoints"`
-	Enabled                    bool      `gorm:"not null" json:"enabled"`
+	Enabled                    bool      `gorm:"not null;index:idx_channel_model_routable,priority:2" json:"enabled"`
 	CircuitDisabled            bool      `gorm:"not null;default:false;index" json:"circuitDisabled"`
 	CreatedAt                  time.Time `json:"createdAt"`
 	UpdatedAt                  time.Time `json:"updatedAt"`
@@ -148,13 +148,13 @@ type ClientTokenModel struct {
 
 type RelayRequestLog struct {
 	ID                    string    `gorm:"size:36;primaryKey" json:"id"`
-	TokenID               uint64    `gorm:"index;not null" json:"tokenId"`
+	TokenID               uint64    `gorm:"index;index:idx_relay_request_token_created,priority:1;index:idx_relay_request_session_created,priority:1;not null" json:"tokenId"`
 	TokenName             string    `gorm:"size:120" json:"tokenName"`
 	TokenKeyPrefix        string    `gorm:"size:24" json:"tokenKeyPrefix"`
 	Endpoint              string    `gorm:"size:40;not null" json:"endpoint"`
 	RequestedModel        string    `gorm:"size:200;index;not null" json:"requestedModel"`
 	ClientKind            string    `gorm:"size:32;index" json:"clientKind"`
-	CodexSessionID        string    `gorm:"size:512;index" json:"codexSessionId"`
+	CodexSessionID        string    `gorm:"size:512;index;index:idx_relay_request_session_created,priority:2" json:"codexSessionId"`
 	CodexSessionSource    string    `gorm:"size:48;index" json:"codexSessionSource"`
 	SessionName           string    `gorm:"size:80;index" json:"sessionName"`
 	CodexPromptHash       string    `gorm:"size:64;index" json:"-"`
@@ -188,7 +188,7 @@ type RelayRequestLog struct {
 	DurationMS            int64     `gorm:"not null;default:0" json:"durationMs"`
 	Stream                bool      `gorm:"not null;default:false" json:"stream"`
 	ErrorCode             string    `gorm:"size:80" json:"errorCode"`
-	CreatedAt             time.Time `gorm:"index" json:"createdAt"`
+	CreatedAt             time.Time `gorm:"index;index:idx_relay_request_token_created,priority:2,sort:desc;index:idx_relay_request_session_created,priority:3,sort:desc" json:"createdAt"`
 }
 
 // VerificationReport stores detector evidence without retaining probe prompts,
@@ -369,11 +369,11 @@ type RelayChatSessionClaim struct {
 
 type RelayAttemptLog struct {
 	ID             uint64 `gorm:"primaryKey;autoIncrement" json:"id"`
-	RequestID      string `gorm:"size:36;index;not null" json:"requestId"`
-	ChannelID      uint64 `gorm:"index;not null" json:"channelId"`
+	RequestID      string `gorm:"size:36;index;index:idx_relay_attempt_request_created,priority:1;not null" json:"requestId"`
+	ChannelID      uint64 `gorm:"index;index:idx_relay_attempt_channel_created,priority:1;not null" json:"channelId"`
 	ChannelName    string `gorm:"size:120" json:"channelName"`
 	ChannelBaseURL string `gorm:"size:1024" json:"channelBaseUrl"`
-	ChannelModelID uint64 `gorm:"not null" json:"channelModelId"`
+	ChannelModelID uint64 `gorm:"index:idx_relay_attempt_model_created,priority:1;not null" json:"channelModelId"`
 	UpstreamModel  string `gorm:"size:200;not null" json:"upstreamModel"`
 	APIPath        string `gorm:"-" json:"apiPath"`
 	// PreviousChannelID identifies the channel used immediately before this selection, or zero for an initial route.
@@ -410,7 +410,7 @@ type RelayAttemptLog struct {
 	Success               bool           `gorm:"not null;default:false" json:"success"`
 	Outcome               string         `gorm:"size:16;index;not null;default:failed" json:"outcome"`
 	ErrorMessage          string         `gorm:"type:text" json:"errorMessage"`
-	CreatedAt             time.Time      `gorm:"index" json:"createdAt"`
+	CreatedAt             time.Time      `gorm:"index;index:idx_relay_attempt_request_created,priority:2;index:idx_relay_attempt_channel_created,priority:2,sort:desc;index:idx_relay_attempt_model_created,priority:2,sort:desc" json:"createdAt"`
 }
 
 // RelayStepLog is one measured stage in a relayed API request. Durations use
@@ -467,8 +467,8 @@ type TokenDailyStat struct {
 }
 
 type ChannelModelDailyStat struct {
-	Date                string `gorm:"size:10;primaryKey"`
-	ChannelID           uint64 `gorm:"primaryKey;autoIncrement:false;index"`
+	Date                string `gorm:"size:10;primaryKey;index:idx_channel_model_daily_channel_date,priority:2"`
+	ChannelID           uint64 `gorm:"primaryKey;autoIncrement:false;index;index:idx_channel_model_daily_channel_date,priority:1"`
 	ChannelModelID      uint64 `gorm:"primaryKey;autoIncrement:false;index"`
 	RequestCount        int64  `gorm:"not null;default:0"`
 	AttemptCount        int64  `gorm:"not null;default:0"`
