@@ -99,6 +99,19 @@ function outcomeType(log: RelayRequestLog): 'success' | 'warning' | 'danger' | '
   return statusType(log.statusCode)
 }
 
+function rateLimitMigrationDetail(log: RelayRequestLog): string {
+  for (let index = 0; index < log.attempts.length - 1; index += 1) {
+    const source = log.attempts[index]
+    if (source.statusCode !== 429) continue
+    const target = log.attempts.slice(index + 1).find((attempt) => attempt.channelId !== source.channelId)
+    if (!target) continue
+    const sourceName = source.channelName || `渠道 #${source.channelId}`
+    const targetName = target.channelName || `渠道 #${target.channelId}`
+    return `${sourceName} 返回 HTTP 429，网关已自动迁移至 ${targetName}`
+  }
+  return ''
+}
+
 async function showPayloads(log: RelayRequestLog) {
   payloadLoadingId.value = log.id
   try {
@@ -238,7 +251,16 @@ onMounted(async () => {
         <el-table-column label="会话 / 调用令牌" min-width="210"><template #default="scope"><div class="primary-cell"><strong>{{ scope.row.sessionName || scope.row.codexSessionId || '未命名会话' }}</strong><small>{{ tokenName(scope.row) }} · <code>{{ scope.row.tokenKeyPrefix || '无历史前缀' }}</code></small></div></template></el-table-column>
         <el-table-column label="接口 / 模型" min-width="200"><template #default="scope"><div class="primary-cell"><strong><code>{{ scope.row.apiPath }}</code></strong><small>{{ scope.row.endpoint === 'chat' ? 'Chat Completions' : 'Responses' }} · <code>{{ scope.row.requestedModel }}</code></small></div></template></el-table-column>
         <el-table-column label="渠道" min-width="160"><template #default="scope"><div v-if="finalAttempt(scope.row)" class="primary-cell"><strong>{{ finalChannelName(scope.row) }}</strong><small><code>{{ finalChannelModel(scope.row) }}</code></small></div><span v-else class="muted-text">未进入上游渠道</span></template></el-table-column>
-        <el-table-column label="状态" width="108"><template #default="scope"><el-tag :type="outcomeType(scope.row)" effect="plain">{{ outcomeLabel(scope.row) }}</el-tag></template></el-table-column>
+        <el-table-column label="状态" width="132">
+          <template #default="scope">
+            <div class="status-cell">
+              <el-tag :type="outcomeType(scope.row)" effect="plain">{{ outcomeLabel(scope.row) }}</el-tag>
+              <el-tooltip v-if="rateLimitMigrationDetail(scope.row)" :content="rateLimitMigrationDetail(scope.row)" placement="top">
+                <el-tag type="warning" effect="plain" size="small">429 自动迁移</el-tag>
+              </el-tooltip>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="Token / 费用" min-width="310">
           <template #default="scope">
             <div class="usage-cost-cell">
@@ -268,7 +290,8 @@ onMounted(async () => {
 .attempt-list { display: grid; gap: 7px; padding: 12px 20px 14px 48px; background: var(--hongfen-surface-muted); }
 .attempt-list > header { display: flex; justify-content: space-between; color: var(--hongfen-text-muted); font-size: 12px; }
 .attempt-list > header strong { color: var(--hongfen-text); }
-.usage-cost-cell, .performance-cell, .source-breakdown { display: grid; min-width: 0; gap: 3px; font-variant-numeric: tabular-nums; }
+.status-cell, .usage-cost-cell, .performance-cell, .source-breakdown { display: grid; min-width: 0; gap: 3px; font-variant-numeric: tabular-nums; }
+.status-cell { justify-items: start; }
 .usage-cost-cell > div { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 3px 12px; }
 .usage-cost-cell > div strong, .performance-cell strong { color: var(--hongfen-text); font-size: 11px; line-height: 1.35; }
 .performance-cell .relay-first-response { margin-left: 6px; color: var(--hongfen-text-subtle); font-size: 9px; font-weight: 500; white-space: nowrap; }
