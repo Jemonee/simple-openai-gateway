@@ -20,6 +20,7 @@ type WebChatApi struct {
 	pkgApi.BaseApi
 	relay      *gateway.RelayService
 	management *gateway.ManagementService
+	access     *gateway.ClientAccessService
 	security   *AdminSecurity
 }
 
@@ -48,20 +49,20 @@ type webChatResponse struct {
 	EstimatedCostMicros int64  `json:"estimatedCostMicros"`
 }
 
-func NewWebChatApi(relay *gateway.RelayService, management *gateway.ManagementService, security *AdminSecurity) *WebChatApi {
-	return &WebChatApi{relay: relay, management: management, security: security}
+func NewWebChatApi(relay *gateway.RelayService, management *gateway.ManagementService, access *gateway.ClientAccessService, security *AdminSecurity) *WebChatApi {
+	return &WebChatApi{relay: relay, management: management, access: access, security: security}
 }
 
 func (a *WebChatApi) Register(router *gin.RouterGroup) {
 	admin := router.Group("/admin/gateway/web-chat")
-	admin.Use(a.security.RequireAdmin, a.security.VerifyOrigin)
+	admin.Use(a.security.RequireConsole, a.security.VerifyOrigin)
 	admin.POST("/completions", a.complete)
 }
 
 func (a *WebChatApi) complete(c *gin.Context) {
-	admin, ok := currentAdmin(c)
+	principal, ok := currentConsole(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, common.F[any](http.StatusUnauthorized, "管理员会话无效或已过期"))
+		c.JSON(http.StatusUnauthorized, common.F[any](http.StatusUnauthorized, "控制台会话无效或已过期"))
 		return
 	}
 	var input webChatRequest
@@ -93,14 +94,36 @@ func (a *WebChatApi) complete(c *gin.Context) {
 	recorder := httptest.NewRecorder()
 	headers := make(http.Header)
 	headers.Set("X-Client-Name", "simple-openai-gateway-web-chat")
-	token := &gateway.ClientToken{
-		ID:             webChatTokenIDBase + admin.ID,
-		Name:           "网页聊天 / " + admin.Username,
-		KeyPrefix:      "web-chat",
-		Enabled:        true,
-		AllowAllModels: true,
-		RPM:            0,
-		MaxConcurrency: 0,
+	var token *gateway.ClientToken
+	var release func()
+	if principal.AccessToken != nil {
+		input.ChannelID = 0
+		payload.PinnedChannelID = 0
+		token = principal.AccessToken
+		var acquireErr error
+		release, acquireErr = a.access.Acquire(token)
+		if acquireErr != nil {
+			status := http.StatusTooManyRequests
+			message := "访问令牌已达到调用限制"
+			if errors.Is(acquireErr, gateway.ErrInvalidClientToken) {
+				status = http.StatusUnauthorized
+				message = "访问令牌无效或已停用"
+			}
+			c.JSON(status, common.F[any](status, message))
+			return
+		}
+		defer release()
+	} else {
+		admin := principal.Admin
+		token = &gateway.ClientToken{
+			ID:             webChatTokenIDBase + admin.ID,
+			Name:           "网页聊天 / " + admin.Username,
+			KeyPrefix:      "web-chat",
+			Enabled:        true,
+			AllowAllModels: true,
+			RPM:            0,
+			MaxConcurrency: 0,
+		}
 	}
 	publicErr := a.relay.Relay(c.Request.Context(), recorder, headers, "", "chat", token, payload, body)
 	if publicErr != nil {
@@ -126,7 +149,10 @@ func (a *WebChatApi) complete(c *gin.Context) {
 		Content:   content,
 		Model:     strings.TrimSpace(input.Model),
 	}
-	if detail, detailErr := a.management.LogDetail(c.Request.Context(), result.RequestID); detailErr == nil {
+	if principal.AccessToken != nil {
+		a.access.Touch(contextWithoutCancel(c), principal.AccessToken.ID)
+	}
+	if detail, detailErr := a.management.LogDetail(c.Request.Context(), result.RequestID, consoleTokenID(c)); detailErr == nil {
 		result.InputTokens = detail.InputTokens
 		result.OutputTokens = detail.OutputTokens
 		result.CachedTokens = detail.CachedTokens

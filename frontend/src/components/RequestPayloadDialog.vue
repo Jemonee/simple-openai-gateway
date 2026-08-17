@@ -4,6 +4,7 @@ import ChatTranscript from '@/components/ChatTranscript.vue'
 import JsonCodeViewer from '@/components/JsonCodeViewer.vue'
 import RelayStepTimeline from '@/components/RelayStepTimeline.vue'
 import ResourceList from '@/components/ResourceList.vue'
+import { useAdminAuth } from '@/composables/useAdminAuth'
 import type { PayloadLogDetail, RelayAttemptLog, RelayRequestLog } from '@/types/gateway'
 import { conversation, deltaDescription, requestConversation } from '@/utils/conversation'
 
@@ -23,6 +24,8 @@ function defaultActiveTab(): string {
 }
 
 const open = defineModel<boolean>({ required: true })
+const { user } = useAdminAuth()
+const isAccessTokenLogin = computed(() => user.value?.loginType === 'access_token')
 const activeTab = ref(defaultActiveTab())
 const detailMode = ref<DetailMode>('chat')
 const detailModeOptions: Array<{ label: string; value: DetailMode }> = [
@@ -90,11 +93,11 @@ watch(
       <div class="payload-toolbar">
         <div class="payload-meta">
           <span><strong>端点</strong>{{ request.endpoint === 'chat' ? 'Chat Completions' : 'Responses' }}</span>
-          <span><strong>接口路径</strong><code>{{ request.apiPath }}</code></span>
+          <span v-if="!isAccessTokenLogin"><strong>接口路径</strong><code>{{ request.apiPath }}</code></span>
           <span><strong>模型</strong><code>{{ request.requestedModel }}</code></span>
           <span><strong>思考等级</strong><code>{{ request.reasoningEffort || '默认' }}</code></span>
           <span><strong>结果</strong>{{ outcomeLabel(request.outcome) }}</span>
-          <el-tag v-if="request.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag>
+          <el-tag v-if="!isAccessTokenLogin && request.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag>
           <span><strong>HTTP</strong>{{ request.statusCode }}</span>
           <span><strong>尝试</strong>{{ request.attemptCount }}</span>
           <span><strong>记录细节</strong><el-tag :type="payloadLogDetailType(request.payloadLogDetail)" effect="plain" size="small">{{ payloadLogDetailLabel(request.payloadLogDetail) }}</el-tag></span>
@@ -102,10 +105,10 @@ watch(
         <el-segmented v-if="requestPayloadLogDetail !== 'none'" v-model="detailMode" :options="detailModeOptions" size="small" aria-label="详情展示方式" />
       </div>
       <el-alert v-if="retentionNotice(request.payloadLogDetail)" :title="retentionNotice(request.payloadLogDetail)" :type="request.payloadLogDetail === 'summary' ? 'warning' : 'info'" :closable="false" show-icon />
-      <section v-if="request.resources?.length" class="resource-section"><h3>识别到的资源</h3><ResourceList :resources="request.resources" /></section>
+      <section v-if="!isAccessTokenLogin && request.resources?.length" class="resource-section"><h3>识别到的资源</h3><ResourceList :resources="request.resources" /></section>
 
       <el-tabs v-model="activeTab" class="payload-tabs">
-        <el-tab-pane label="阶段耗时" name="timings" lazy>
+        <el-tab-pane v-if="!isAccessTokenLogin" label="阶段耗时" name="timings" lazy>
           <RelayStepTimeline :steps="request.steps ?? []" default-expanded />
           <div v-if="!(request.steps?.length ?? 0)" class="payload-empty">该请求没有阶段耗时记录</div>
         </el-tab-pane>
@@ -120,7 +123,7 @@ watch(
         <el-tab-pane v-for="(attempt, index) in request.attempts" :key="attempt.id" :label="`尝试 ${index + 1}`" :name="`attempt-${attempt.id}`" lazy>
           <div class="attempt-meta">
             <span><strong>渠道</strong>{{ attempt.channelName || `渠道 #${attempt.channelId}` }}</span>
-            <span><strong>接口路径</strong><code>{{ attempt.apiPath || request.apiPath }}</code></span>
+            <span v-if="!isAccessTokenLogin"><strong>接口路径</strong><code>{{ attempt.apiPath || request.apiPath }}</code></span>
             <span><strong>上游模型</strong><code>{{ attempt.upstreamModel }}</code></span>
             <span><strong>HTTP</strong>{{ attempt.statusCode || '网络错误' }}</span>
             <span><strong>结果</strong>{{ outcomeLabel(attempt.outcome) }}</span>

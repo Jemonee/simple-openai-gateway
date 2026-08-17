@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { WarningFilled } from '@element-plus/icons-vue'
+import { useAdminAuth } from '@/composables/useAdminAuth'
 import type { RelayAttemptLog } from '@/types/gateway'
 import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
 
@@ -15,6 +17,8 @@ interface SessionAttemptCardProps {
 }
 
 const { attempt, attemptNumber, apiPath, reasoningEffort } = defineProps<SessionAttemptCardProps>()
+const { user } = useAdminAuth()
+const isAccessTokenLogin = computed(() => user.value?.loginType === 'access_token')
 
 function formatTiming(value: number): string {
   return value > 0 ? formatDuration(value) : '--'
@@ -61,10 +65,10 @@ function costSourceType(): 'success' | 'warning' | 'info' {
       <div class="attempt-identity">
         <div class="attempt-title"><span>尝试 {{ attemptNumber }}</span><strong>{{ channelLabel() }}</strong></div>
         <div class="attempt-route">
-          <span><small>接口路径</small><code>{{ apiPath }}</code></span>
+          <span v-if="!isAccessTokenLogin"><small>接口路径</small><code>{{ apiPath }}</code></span>
           <span><small>上游模型</small><code>{{ attempt.upstreamModel }}</code></span>
           <span><small>思考等级</small><code>{{ reasoningEffort || '默认' }}</code></span>
-          <span v-if="attempt.channelBaseUrl"><small>Base URL</small><code class="attempt-url">{{ attempt.channelBaseUrl }}</code></span>
+          <span v-if="!isAccessTokenLogin && attempt.channelBaseUrl"><small>Base URL</small><code class="attempt-url">{{ attempt.channelBaseUrl }}</code></span>
         </div>
       </div>
       <div class="attempt-badges">

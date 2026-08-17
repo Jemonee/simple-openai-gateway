@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ArrowDown, Clock, Coin, Connection, CopyDocument, DataLine, Key, List, MagicStick, Odometer, PieChart, Refresh, Tickets, Timer } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import ChannelDistributionChart from '@/pages/home/ChannelDistributionChart.vue'
@@ -17,10 +17,15 @@ import type {
   GatewayModel,
 } from '@/types/gateway'
 import { request } from '@/utils/api'
+import { useAdminAuth } from '@/composables/useAdminAuth'
 import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
+import { preserveHeadlessQuery } from '@/utils/headlessMode'
 import { isLocalBrowserAccess } from '@/utils/localAccess'
 
+const route = useRoute()
 const router = useRouter()
+const { user } = useAdminAuth()
+const isAccessTokenLogin = computed(() => user.value?.loginType === 'access_token')
 const loading = ref(true)
 const errorMessage = ref('')
 const dashboard = ref<DashboardSummary | null>(null)
@@ -158,19 +163,24 @@ function formatHour(value: string): string {
   return `${Number(value.slice(5, 7))}/${Number(value.slice(8, 10))} ${hour}:00`
 }
 
+function openChannels() {
+  void router.push({ path: '/channels', query: preserveHeadlessQuery(route.query.headless) })
+}
+
 async function loadDashboard() {
   loading.value = true
   errorMessage.value = ''
   channelDistributionPage.value = 1
   modelDistributionPage.value = 1
   try {
-    const [summary, channelItems, modelItems, tokenItems] = await Promise.all([
-      request<DashboardSummary>(`/admin/gateway/dashboard?days=${selectedRangeDays.value}`),
+    const summary = await request<DashboardSummary>(`/admin/gateway/dashboard?days=${selectedRangeDays.value}`)
+    dashboard.value = summary
+    if (isAccessTokenLogin.value) return
+    const [channelItems, modelItems, tokenItems] = await Promise.all([
       request<Channel[]>('/admin/gateway/channels'),
       request<GatewayModel[]>('/admin/gateway/models'),
       request<ClientToken[]>('/admin/gateway/tokens'),
     ])
-    dashboard.value = summary
     channels.value = channelItems
     models.value = modelItems
     tokens.value = tokenItems
@@ -452,7 +462,7 @@ onMounted(loadDashboard)
           <el-skeleton v-else :rows="1" animated />
           <small>{{ formatCompactNumber(dashboard?.durationSampleCount ?? 0) }} 个完整请求</small>
         </article>
-        <article class="metric-cell">
+        <article v-if="!isAccessTokenLogin" class="metric-cell">
           <span><Connection />可用渠道</span>
           <strong v-if="!loading">{{ availableChannels }} / {{ channels.length }}</strong>
           <el-skeleton v-else :rows="1" animated />
@@ -461,7 +471,7 @@ onMounted(loadDashboard)
       </section>
       <p class="historical-cost-note">{{ selectedRangeLabel }}按东八区自然日和请求级记录统计；重试不会重复累计 Token 与费用，费用优先采用最终上游返回值。</p>
 
-      <section class="surface-panel quick-start-panel">
+      <section v-if="!isAccessTokenLogin" class="surface-panel quick-start-panel">
         <header class="panel-heading quick-start-heading">
           <button
             class="quick-start-toggle"
@@ -499,6 +509,7 @@ onMounted(loadDashboard)
       </section>
 
       <el-dialog
+        v-if="!isAccessTokenLogin"
         v-model="codexDialogOpen"
         class="codex-config-dialog"
         width="min(760px, calc(100vw - 28px))"
@@ -607,7 +618,7 @@ onMounted(loadDashboard)
         <Connection />
         <strong>还没有网关调用</strong>
         <span>配置渠道、公开模型和访问令牌后，请求统计会显示在这里。</span>
-        <el-button type="primary" @click="router.push('/channels')">配置渠道</el-button>
+        <el-button v-if="!isAccessTokenLogin" type="primary" @click="openChannels">配置渠道</el-button>
       </div>
 
       <template v-else>

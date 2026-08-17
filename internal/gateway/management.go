@@ -985,7 +985,13 @@ func (s *ManagementService) issueToken(ctx context.Context, input ClientTokenInp
 		} else if err := db.Save(&token).Error; err != nil {
 			return err
 		}
-		return replaceTokenModels(db, token.ID, input)
+		if err := replaceTokenModels(db, token.ID, input); err != nil {
+			return err
+		}
+		if existing != nil {
+			return revokeClientTokenConsoleSessions(db, token.ID)
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -1033,7 +1039,13 @@ func (s *ManagementService) UpdateToken(ctx context.Context, id uint64, input Cl
 		if err := db.Save(&token).Error; err != nil {
 			return err
 		}
-		return replaceTokenModels(db, token.ID, input)
+		if err := replaceTokenModels(db, token.ID, input); err != nil {
+			return err
+		}
+		if !token.Enabled {
+			return revokeClientTokenConsoleSessions(db, token.ID)
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -1076,6 +1088,9 @@ func (s *ManagementService) tokenView(ctx context.Context, token ClientToken) (*
 func (s *ManagementService) DeleteToken(ctx context.Context, id uint64) error {
 	return s.store.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		if err := db.Where("token_id = ?", id).Delete(&ClientTokenModel{}).Error; err != nil {
+			return err
+		}
+		if err := revokeClientTokenConsoleSessions(db, id); err != nil {
 			return err
 		}
 		result := db.Delete(&ClientToken{}, id)
@@ -1292,9 +1307,15 @@ func officialUsageCost(model string, inputTokens, normalInputTokens, outputToken
 		tokenPrice(outputTokens, price.OutputPriceMicros)
 }
 
-func (s *ManagementService) Dashboard(ctx context.Context, days int) (*DashboardSummary, error) {
+// Dashboard optionally scopes every aggregate to one client token. The variadic
+// argument preserves the administrator-facing call shape for internal callers.
+func (s *ManagementService) Dashboard(ctx context.Context, days int, tokenIDs ...uint64) (*DashboardSummary, error) {
 	if days != 1 && days != 2 && days != 3 && days != 5 {
 		return nil, errors.New("统计时间范围仅支持 1、2、3 或 5 天")
+	}
+	tokenID := uint64(0)
+	if len(tokenIDs) > 0 {
+		tokenID = tokenIDs[0]
 	}
 	now := time.Now()
 	today := eastEightStartOfDay(now)
@@ -1325,7 +1346,7 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int) (*Dashboard
 		DurationMS            int64
 	}
 	var total totals
-	err := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).Where("created_at >= ? AND created_at < ?", startTime, endTime).Select(
+	err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenID).Where("created_at >= ? AND created_at < ?", startTime, endTime).Select(
 		"COUNT(*) AS requests, COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),0) AS successes, COALESCE(SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END),0) AS canceled_count, " +
 			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN normal_input_tokens ELSE 0 END),0) AS normal_input_tokens, " +
 			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END),0) AS output_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cached_tokens ELSE 0 END),0) AS cached_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cache_write_tokens ELSE 0 END),0) AS cache_write_tokens, " +
@@ -1361,7 +1382,7 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int) (*Dashboard
 		UpstreamCost      int64
 	}
 	var officialUsage []officialUsageRow
-	if err := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).
+	if err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenID).
 		Select("requested_model, input_tokens, normal_input_tokens, output_tokens, cached_tokens, cache_write_tokens, upstream_cost").
 		Where("created_at >= ? AND created_at < ? AND outcome IN ?", startTime, endTime, []string{RelayOutcomeSuccess, RelayOutcomeCanceled}).Find(&officialUsage).Error; err != nil {
 		return nil, err
@@ -1409,7 +1430,7 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int) (*Dashboard
 	if total.Requests > 0 {
 		summary.AverageDurationMS = float64(total.DurationMS) / float64(total.Requests)
 	}
-	if err := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).
+	if err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenID).
 		Select(sqliteEastEightCreatedDate+" AS date, COUNT(*) AS requests, COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),0) AS successes, COALESCE(SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END),0) AS canceled_count, "+
 			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END),0) AS output_tokens, "+
 			"COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(upstream_cost),0) AS upstream_cost, "+
@@ -1434,7 +1455,7 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int) (*Dashboard
 		}
 		summary.Daily = append(summary.Daily, daily)
 	}
-	if err := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).
+	if err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenID).
 		Select(sqliteEastEightCreatedHour+" AS hour, COUNT(*) AS requests, COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),0) AS successes").
 		Where("created_at >= ? AND created_at < ?", startTime, endTime).Group(sqliteEastEightCreatedHour).Order("hour asc").Scan(&summary.Hourly).Error; err != nil {
 		return nil, err
@@ -1455,7 +1476,11 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int) (*Dashboard
 		}
 		summary.Hourly = append(summary.Hourly, hourly)
 	}
-	if err := s.store.db.WithContext(ctx).Table("relay_request_logs AS request").
+	channelBreakdownDB := s.store.db.WithContext(ctx).Table("relay_request_logs AS request")
+	if tokenID > 0 {
+		channelBreakdownDB = channelBreakdownDB.Where("request.token_id = ?", tokenID)
+	}
+	if err := channelBreakdownDB.
 		Select("COALESCE(NULLIF(final_attempt.channel_name, ''), c.name, '未归属渠道') AS name, COUNT(*) AS requests, "+
 			"COALESCE(SUM(CASE WHEN request.outcome = 'success' THEN 1 ELSE 0 END),0) AS successes, COALESCE(SUM(CASE WHEN request.outcome = 'canceled' THEN 1 ELSE 0 END),0) AS canceled_count, "+
 			"COALESCE(1.0 * SUM(CASE WHEN request.outcome = 'success' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN request.outcome <> 'canceled' THEN 1 ELSE 0 END),0),0) AS success_rate, "+
@@ -1472,7 +1497,7 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int) (*Dashboard
 			summary.Channels[index].CacheHitRate = float64(summary.Channels[index].CachedTokens) / float64(summary.Channels[index].InputTokens)
 		}
 	}
-	if err := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).
+	if err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenID).
 		Select("requested_model AS name, COUNT(*) AS requests, "+
 			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),0) AS successes, COALESCE(SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END),0) AS canceled_count, "+
 			"COALESCE(1.0 * SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN outcome <> 'canceled' THEN 1 ELSE 0 END),0),0) AS success_rate, "+
@@ -1487,6 +1512,13 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int) (*Dashboard
 		}
 	}
 	return summary, nil
+}
+
+func dashboardRequestLogs(db *gorm.DB, tokenID uint64) *gorm.DB {
+	if tokenID > 0 {
+		return db.Where("token_id = ?", tokenID)
+	}
+	return db
 }
 
 func (s *ManagementService) Logs(ctx context.Context, query LogQuery) (*LogPage, error) {
@@ -1617,7 +1649,7 @@ func aggregateLogSummary(db *gorm.DB) (LogAggregateSummary, error) {
 	return summary, nil
 }
 
-func (s *ManagementService) LogDetail(ctx context.Context, requestID string) (*RelayRequestView, error) {
+func (s *ManagementService) LogDetail(ctx context.Context, requestID string, tokenIDs ...uint64) (*RelayRequestView, error) {
 	requestID = strings.TrimSpace(requestID)
 	if requestID == "" {
 		return nil, errors.New("request id is required")
@@ -1625,6 +1657,9 @@ func (s *ManagementService) LogDetail(ctx context.Context, requestID string) (*R
 	cutoff, hasCutoff := s.detailedLogCutoff(time.Now())
 	var log RelayRequestLog
 	query := s.store.db.WithContext(ctx).Where("id = ?", requestID)
+	if len(tokenIDs) > 0 && tokenIDs[0] > 0 {
+		query = query.Where("token_id = ?", tokenIDs[0])
+	}
 	if hasCutoff {
 		query = query.Where("created_at >= ?", cutoff)
 	}

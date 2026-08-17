@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Jemonee/simple-openai-gateway/internal/config"
+	"github.com/Jemonee/simple-openai-gateway/internal/gateway"
 
 	"github.com/gin-gonic/gin"
 )
@@ -52,5 +53,34 @@ func TestSessionCookieSecurityAttributes(t *testing.T) {
 		if !strings.Contains(cookie, attribute) {
 			t.Errorf("Set-Cookie %q does not contain %q", cookie, attribute)
 		}
+	}
+	parsed := recorder.Result().Cookies()
+	if len(parsed) != 1 || parsed[0].MaxAge < 10*365*24*60*60 {
+		t.Fatalf("permanent session cookie max age = %+v", parsed)
+	}
+}
+
+func TestRequireAdminRejectsAccessTokenPrincipal(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Set("gatewayConsole", &gateway.ConsolePrincipal{
+		LoginType:   gateway.ConsoleLoginAccessToken,
+		AccessToken: &gateway.ClientToken{ID: 7, Name: "limited", Enabled: true},
+	})
+	security := &AdminSecurity{}
+	security.RequireAdmin(context)
+	if recorder.Code != http.StatusForbidden || !context.IsAborted() {
+		t.Fatalf("status = %d, aborted = %v", recorder.Code, context.IsAborted())
+	}
+}
+
+func TestAdminSessionViewIncludesLoginType(t *testing.T) {
+	admin := adminView(&gateway.ConsolePrincipal{LoginType: gateway.ConsoleLoginAdmin, Admin: &gateway.AdminUser{ID: 3, Username: "admin"}})
+	if admin.LoginType != gateway.ConsoleLoginAdmin || admin.TokenID != 0 || admin.Username != "admin" {
+		t.Fatalf("admin view = %+v", admin)
+	}
+	token := adminView(&gateway.ConsolePrincipal{LoginType: gateway.ConsoleLoginAccessToken, AccessToken: &gateway.ClientToken{ID: 9, Name: "reader"}})
+	if token.LoginType != gateway.ConsoleLoginAccessToken || token.TokenID != 9 || token.Username != "reader" {
+		t.Fatalf("token view = %+v", token)
 	}
 }

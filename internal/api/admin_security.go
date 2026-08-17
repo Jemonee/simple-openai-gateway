@@ -37,19 +37,50 @@ func NewAdminSecurity(auth *gateway.AdminAuthService, configManager *config.Appl
 	}
 }
 
-func (s *AdminSecurity) RequireAdmin(c *gin.Context) {
+func (s *AdminSecurity) RequireConsole(c *gin.Context) {
 	rawToken, err := c.Cookie(adminSessionCookie)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, common.F[any](http.StatusUnauthorized, "管理员会话无效或已过期"))
+		c.AbortWithStatusJSON(http.StatusUnauthorized, common.F[any](http.StatusUnauthorized, "控制台会话无效或已过期"))
 		return
 	}
-	user, err := s.auth.Authenticate(rawToken)
+	principal, err := s.auth.AuthenticateConsole(rawToken)
 	if err != nil {
 		s.clearSessionCookie(c)
-		c.AbortWithStatusJSON(http.StatusUnauthorized, common.F[any](http.StatusUnauthorized, "管理员会话无效或已过期"))
+		c.AbortWithStatusJSON(http.StatusUnauthorized, common.F[any](http.StatusUnauthorized, "控制台会话无效或已过期"))
 		return
 	}
-	c.Set("gatewayAdmin", user)
+	c.Set("gatewayConsole", principal)
+	if principal.IsAdmin() {
+		c.Set("gatewayAdmin", principal.Admin)
+	}
+	s.refreshSessionCookie(c, rawToken)
+	c.Next()
+}
+
+func (s *AdminSecurity) RequireAdmin(c *gin.Context) {
+	principal, ok := currentConsole(c)
+	if !ok {
+		rawToken, err := c.Cookie(adminSessionCookie)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, common.F[any](http.StatusUnauthorized, "控制台会话无效或已过期"))
+			return
+		}
+		principal, err = s.auth.AuthenticateConsole(rawToken)
+		if err != nil {
+			s.clearSessionCookie(c)
+			c.AbortWithStatusJSON(http.StatusUnauthorized, common.F[any](http.StatusUnauthorized, "控制台会话无效或已过期"))
+			return
+		}
+		c.Set("gatewayConsole", principal)
+	}
+	if !principal.IsAdmin() {
+		c.AbortWithStatusJSON(http.StatusForbidden, common.F[any](http.StatusForbidden, "访问令牌登录无权访问此功能"))
+		return
+	}
+	c.Set("gatewayAdmin", principal.Admin)
+	if rawToken, err := c.Cookie(adminSessionCookie); err == nil {
+		s.refreshSessionCookie(c, rawToken)
+	}
 	c.Next()
 }
 
@@ -123,13 +154,15 @@ func (s *AdminSecurity) clearLoginFailures(clientIP string) {
 }
 
 func (s *AdminSecurity) setSessionCookie(c *gin.Context, rawToken string) {
-	maxAge := 12 * time.Hour
+	maxAge := 10 * 365 * 24 * time.Hour
 	secure := false
-	if cfg := s.configManager.GetConfig(); cfg != nil {
-		if cfg.GatewayConfig.SessionTTLHours > 0 {
-			maxAge = time.Duration(cfg.GatewayConfig.SessionTTLHours) * time.Hour
+	if s.configManager != nil {
+		if cfg := s.configManager.GetConfig(); cfg != nil {
+			if hours := config.EffectiveSessionTTLHours(cfg); hours > 0 {
+				maxAge = time.Duration(hours) * time.Hour
+			}
+			secure = cfg.GatewayConfig.SecureCookie
 		}
-		secure = cfg.GatewayConfig.SecureCookie
 	}
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     adminSessionCookie,
@@ -142,10 +175,18 @@ func (s *AdminSecurity) setSessionCookie(c *gin.Context, rawToken string) {
 	})
 }
 
+func (s *AdminSecurity) refreshSessionCookie(c *gin.Context, rawToken string) {
+	if strings.TrimSpace(rawToken) != "" {
+		s.setSessionCookie(c, rawToken)
+	}
+}
+
 func (s *AdminSecurity) clearSessionCookie(c *gin.Context) {
 	secure := false
-	if cfg := s.configManager.GetConfig(); cfg != nil {
-		secure = cfg.GatewayConfig.SecureCookie
+	if s.configManager != nil {
+		if cfg := s.configManager.GetConfig(); cfg != nil {
+			secure = cfg.GatewayConfig.SecureCookie
+		}
 	}
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     adminSessionCookie,
@@ -164,4 +205,21 @@ func currentAdmin(c *gin.Context) (*gateway.AdminUser, bool) {
 	}
 	user, ok := value.(*gateway.AdminUser)
 	return user, ok
+}
+
+func currentConsole(c *gin.Context) (*gateway.ConsolePrincipal, bool) {
+	value, ok := c.Get("gatewayConsole")
+	if !ok {
+		return nil, false
+	}
+	principal, ok := value.(*gateway.ConsolePrincipal)
+	return principal, ok
+}
+
+func currentAccessToken(c *gin.Context) (*gateway.ClientToken, bool) {
+	principal, ok := currentConsole(c)
+	if !ok || principal.AccessToken == nil {
+		return nil, false
+	}
+	return principal.AccessToken, true
 }

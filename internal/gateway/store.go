@@ -97,6 +97,9 @@ func (s *Store) migrate() error {
 	if err := s.ensureSessionCandidateIndexes(); err != nil {
 		return err
 	}
+	if err := s.db.Model(&AdminSession{}).Where("login_type = ''").Update("login_type", ConsoleLoginAdmin).Error; err != nil {
+		return err
+	}
 	if err := s.backfillTokenDailyStats(); err != nil {
 		return err
 	}
@@ -553,7 +556,17 @@ func errorsForBootstrap() error {
 
 func (s *Store) cleanupExpired() {
 	now := time.Now()
-	_ = s.db.Where("expires_at < ?", now).Delete(&AdminSession{}).Error
+	var sessionTTLHours int
+	if s.configManager != nil {
+		sessionTTLHours = config.EffectiveSessionTTLHours(s.configManager.GetConfig())
+	}
+	if sessionTTLHours > 0 {
+		// Use the current setting so switching between permanent and finite
+		// sessions takes effect without restarting or rewriting every row.
+		cutoff := now.Add(-time.Duration(sessionTTLHours) * time.Hour)
+		_ = s.db.Where("created_at > ? AND created_at < ?", time.Time{}, cutoff).Delete(&AdminSession{}).Error
+		_ = s.db.Where("expires_at > ? AND expires_at < ?", time.Time{}, now).Delete(&AdminSession{}).Error
+	}
 	_ = s.db.Where("expires_at < ?", now).Delete(&ResponseAffinity{}).Error
 	_ = s.db.Where("expires_at < ?", now).Delete(&SessionAffinity{}).Error
 	if detailCutoff, ok := s.detailedLogCutoff(now); ok {

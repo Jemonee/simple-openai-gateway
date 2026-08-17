@@ -67,7 +67,7 @@ function defaultApplicationSettings(sharedToken = ''): ApplicationSettings {
       routingEfficiencyWeightPercent: defaultRoutingEfficiencyWeightPercent,
       routingQualityWeightPercent: defaultRoutingQualityWeightPercent,
       routingBalanceWeightPercent: defaultRoutingBalanceWeightPercent,
-      sessionTTLHours: 12,
+      sessionTTLHours: 0,
       secureCookie: false,
       detailedLogRetentionDays: 0,
       payloadLogDetail: 'default',
@@ -343,7 +343,7 @@ onUnmounted(() => {
       <section class="surface-panel settings-section">
         <header class="panel-heading"><div><h2>会话与数据</h2><p>调用明细默认永不清理，可设置 7 天、15 天或 1 个月；每日汇总长期保留</p></div></header>
         <div class="settings-fields settings-grid">
-          <el-form-item label="管理会话时长（小时）"><el-input-number v-model="form.gatewayConfig.sessionTTLHours" :min="1" :max="168" controls-position="right" /></el-form-item>
+          <el-form-item label="管理会话时长（小时，0 为永久）"><el-input-number v-model="form.gatewayConfig.sessionTTLHours" :min="0" :max="87600" controls-position="right" /><small class="field-hint">保存后立即作用于现有会话和新登录；永久模式会保留登录状态。</small></el-form-item>
           <el-form-item label="调用明细保留"><el-select v-model="form.gatewayConfig.detailedLogRetentionDays"><el-option label="永不清理" :value="0" /><el-option label="7 天" :value="7" /><el-option label="15 天" :value="15" /><el-option label="1 个月（30 天）" :value="30" /></el-select></el-form-item>
           <el-form-item label="Cookie 安全属性"><el-switch v-model="form.gatewayConfig.secureCookie" active-text="仅 HTTPS 发送" inactive-text="允许本地 HTTP" /></el-form-item>
           <el-form-item label="调用日志参数 / 返回记录细节" class="payload-detail-field">
@@ -414,6 +414,7 @@ onUnmounted(() => {
 <style scoped>
 .settings-form { display: grid; gap: 16px; }
 .settings-fields { padding: 20px 22px 8px; }
+.settings-fields .field-hint { display: block; margin-top: 6px; color: var(--hongfen-text-muted); font-size: 11px; line-height: 1.5; }
 .settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 18px; }
 .settings-actions { display: flex; justify-content: flex-end; gap: 8px; position: sticky; bottom: 12px; padding: 10px; border: 1px solid var(--hongfen-border); background: var(--hongfen-surface); }
 .routing-formula { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; padding: 4px 22px 20px; }

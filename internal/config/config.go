@@ -29,6 +29,8 @@ const (
 	DefaultRoutingQualityWeightPercent    = 15
 	DefaultRoutingBalanceWeightPercent    = 10
 	MinimumRoutingQualityWeightPercent    = 5
+	DefaultSessionTTLHours                = 0
+	MaxSessionTTLHours                    = 87600
 	DefaultDetailedLogRetentionDays       = 0
 	PayloadLogDetailDefault               = "default"
 	PayloadLogDetailSummary               = "summary"
@@ -90,6 +92,9 @@ func (acm *ApplicationConfigManager) Load() {
 	}
 	cfg.GatewayConfig.PayloadLogDetail = payloadLogDetail
 	if err := normalizeDetailedLogRetentionDays(cfg.GatewayConfig.DetailedLogRetentionDays); err != nil {
+		panic(err)
+	}
+	if err := normalizeSessionTTLHours(cfg.GatewayConfig.SessionTTLHours); err != nil {
 		panic(err)
 	}
 	cfg.GatewayConfig.CommonModelNames = normalizeCommonModelNames(cfg.GatewayConfig.CommonModelNames)
@@ -157,7 +162,7 @@ type GatewayConfig struct {
 	RoutingEfficiencyWeightPercent int      `toml:"routing_efficiency_weight_percent" json:"routingEfficiencyWeightPercent" default:"35"`
 	RoutingQualityWeightPercent    int      `toml:"routing_quality_weight_percent" json:"routingQualityWeightPercent" default:"15"`
 	RoutingBalanceWeightPercent    int      `toml:"routing_balance_weight_percent" json:"routingBalanceWeightPercent" default:"10"`
-	SessionTTLHours                int      `toml:"session_ttl_hours" json:"sessionTTLHours" default:"12"`
+	SessionTTLHours                int      `toml:"session_ttl_hours" json:"sessionTTLHours" default:"0"`
 	DetailedLogRetentionDays       int      `toml:"detailed_log_retention_days" json:"detailedLogRetentionDays" default:"0"`
 	SecureCookie                   bool     `toml:"secure_cookie" json:"secureCookie" default:"false"`
 	PayloadLogDetail               string   `toml:"payload_log_detail" json:"payloadLogDetail" default:"default"`
@@ -178,6 +183,9 @@ func (acm *ApplicationConfigManager) Save(cfg *ApplicationConfig) error {
 	}
 	configCopy.GatewayConfig.PayloadLogDetail = payloadLogDetail
 	if err := normalizeDetailedLogRetentionDays(configCopy.GatewayConfig.DetailedLogRetentionDays); err != nil {
+		return err
+	}
+	if err := normalizeSessionTTLHours(configCopy.GatewayConfig.SessionTTLHours); err != nil {
 		return err
 	}
 	configCopy.GatewayConfig.CommonModelNames = normalizeCommonModelNames(configCopy.GatewayConfig.CommonModelNames)
@@ -316,6 +324,21 @@ func normalizeDetailedLogRetentionDays(value int) error {
 	default:
 		return fmt.Errorf("调用明细保留天数仅支持 0、7、15 或 30 天")
 	}
+}
+
+// normalizeSessionTTLHours treats zero as a permanent console session.
+func normalizeSessionTTLHours(value int) error {
+	if value < 0 || value > MaxSessionTTLHours {
+		return fmt.Errorf("管理会话时长必须为 0 至 %d 小时，0 表示永久", MaxSessionTTLHours)
+	}
+	return nil
+}
+
+func EffectiveSessionTTLHours(cfg *ApplicationConfig) int {
+	if cfg == nil || normalizeSessionTTLHours(cfg.GatewayConfig.SessionTTLHours) != nil {
+		return DefaultSessionTTLHours
+	}
+	return cfg.GatewayConfig.SessionTTLHours
 }
 
 func EffectiveDetailedLogRetentionDays(cfg *ApplicationConfig) int {

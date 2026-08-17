@@ -1,21 +1,24 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import type { CSSProperties } from 'vue'
 import { Coin, Connection, DataLine, EditPen, Refresh, RefreshLeft, Search, Tickets, Timer, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import SessionLogDrawer from '@/components/SessionLogDrawer.vue'
 import SessionRelationBadge from '@/components/SessionRelationBadge.vue'
-import type { Channel, ClientToken, CodexSessionDetail, CodexSessionPage, CodexSessionSummary, GatewayModel, LogAggregateSummary } from '@/types/gateway'
+import { useAdminAuth } from '@/composables/useAdminAuth'
+import type { AvailableGatewayModel, Channel, ClientToken, CodexSessionDetail, CodexSessionPage, CodexSessionSummary, LogAggregateSummary } from '@/types/gateway'
 import { request } from '@/utils/api'
 import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
 import { logDateDefaultTimes, logDateRangeShortcuts, toEastEightISOString, todayLogRange } from '@/utils/logDateRanges'
 
 const loading = ref(true)
+const { user } = useAdminAuth()
+const isAccessTokenLogin = computed(() => user.value?.loginType === 'access_token')
 const errorMessage = ref('')
 const sessions = ref<CodexSessionSummary[]>([])
 const summary = ref<LogAggregateSummary | null>(null)
 const total = ref(0)
-const models = ref<GatewayModel[]>([])
+const models = ref<AvailableGatewayModel[]>([])
 const channels = ref<Channel[]>([])
 const tokens = ref<ClientToken[]>([])
 const filters = reactive({ session: '', model: '', channelId: '', tokenId: '', range: todayLogRange() as Date[] | null })
@@ -133,8 +136,14 @@ function channelState(session: CodexSessionSummary): { label: string; type: 'suc
 }
 
 async function loadOptions() {
+  if (isAccessTokenLogin.value) {
+    models.value = await request<AvailableGatewayModel[]>('/admin/gateway/models/available')
+    channels.value = []
+    tokens.value = []
+    return
+  }
   [models.value, channels.value, tokens.value] = await Promise.all([
-    request<GatewayModel[]>('/admin/gateway/models'),
+    request<AvailableGatewayModel[]>('/admin/gateway/models'),
     request<Channel[]>('/admin/gateway/channels'),
     request<ClientToken[]>('/admin/gateway/tokens'),
   ])
@@ -253,8 +262,8 @@ onMounted(async () => {
     <section class="filter-bar" aria-label="会话日志筛选">
       <el-input v-model="filters.session" clearable placeholder="会话名称、会话 ID 或请求 ID" @keyup.enter="searchSessions" />
       <el-select v-model="filters.model" clearable placeholder="全部模型"><el-option v-for="model in models" :key="model.id" :label="model.name" :value="model.name" /></el-select>
-      <el-select v-model="filters.channelId" clearable placeholder="全部渠道"><el-option v-for="channel in channels" :key="channel.id" :label="channel.name" :value="String(channel.id)" /></el-select>
-      <el-select v-model="filters.tokenId" clearable placeholder="全部令牌"><el-option v-for="token in tokens" :key="token.id" :label="token.name" :value="String(token.id)" /></el-select>
+      <el-select v-if="!isAccessTokenLogin" v-model="filters.channelId" clearable placeholder="全部渠道"><el-option v-for="channel in channels" :key="channel.id" :label="channel.name" :value="String(channel.id)" /></el-select>
+      <el-select v-if="!isAccessTokenLogin" v-model="filters.tokenId" clearable placeholder="全部令牌"><el-option v-for="token in tokens" :key="token.id" :label="token.name" :value="String(token.id)" /></el-select>
       <el-date-picker v-model="filters.range" type="datetimerange" format="YYYY-MM-DD HH:mm:ss" :default-time="logDateDefaultTimes" :shortcuts="logDateRangeShortcuts" range-separator="至" start-placeholder="开始时间" end-placeholder="结束时间" />
       <div class="filter-actions"><el-button :icon="RefreshLeft" :disabled="loading" @click="resetSessions">重置</el-button><el-button type="primary" :icon="Search" :loading="loading" @click="searchSessions">查询</el-button></div>
     </section>
@@ -299,7 +308,7 @@ onMounted(async () => {
           <template #default="scope">
             <div class="session-identity" :class="`is-${sessionClientSource(scope.row).kind}`" :aria-label="`来源 ${sessionClientSource(scope.row).label}`">
               <div class="session-title-line">
-                <strong class="session-name" :title="scope.row.sessionName || '未命名会话'">{{ scope.row.sessionName || '未命名会话' }}</strong><el-tag v-if="scope.row.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag>
+                <strong class="session-name" :title="scope.row.sessionName || '未命名会话'">{{ scope.row.sessionName || '未命名会话' }}</strong><el-tag v-if="!isAccessTokenLogin && scope.row.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag>
                 <span class="session-client"><i aria-hidden="true" />{{ sessionClientSource(scope.row).label }}</span>
               </div>
               <div class="session-meta">
@@ -313,7 +322,7 @@ onMounted(async () => {
         <el-table-column label="路由 / 调用身份" min-width="270">
           <template #default="scope">
             <div class="route-cell">
-              <div v-if="scope.row.currentChannel" class="channel-title"><strong>{{ scope.row.currentChannel.channelName }}</strong><el-tag :type="channelState(scope.row).type" effect="plain">{{ channelState(scope.row).label }}</el-tag></div>
+              <div v-if="scope.row.currentChannel" class="channel-title"><strong>{{ scope.row.currentChannel.channelName }}</strong><el-tag v-if="!isAccessTokenLogin" :type="channelState(scope.row).type" effect="plain">{{ channelState(scope.row).label }}</el-tag></div>
               <div v-else class="channel-title"><strong class="muted-text">未进入上游渠道</strong><el-tag type="info" effect="plain">未分配</el-tag></div>
               <small><span>主模型</span><code>{{ scope.row.primaryModel || scope.row.latestModel }}</code><span v-if="scope.row.latestModel && scope.row.latestModel !== scope.row.primaryModel">最近</span><code v-if="scope.row.latestModel && scope.row.latestModel !== scope.row.primaryModel">{{ scope.row.latestModel }}</code></small>
               <small v-if="scope.row.currentChannel"><span>上游</span><code>{{ scope.row.currentChannel.upstreamModel }}</code></small>

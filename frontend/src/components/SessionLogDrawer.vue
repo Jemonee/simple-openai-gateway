@@ -7,6 +7,7 @@ import RouteDecisionPanel from '@/components/RouteDecisionPanel.vue'
 import SessionAttemptCard from '@/components/SessionAttemptCard.vue'
 import RelayStepTimeline from '@/components/RelayStepTimeline.vue'
 import ResourceList from '@/components/ResourceList.vue'
+import { useAdminAuth } from '@/composables/useAdminAuth'
 import type { CodexSessionDetail, CodexSessionSummary, RelayAttemptLog, RelayRequestLog } from '@/types/gateway'
 import { request } from '@/utils/api'
 import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
@@ -37,6 +38,8 @@ const emit = defineEmits<{
   closed: []
 }>()
 const open = defineModel<boolean>({ required: true })
+const { user } = useAdminAuth()
+const isAccessTokenLogin = computed(() => user.value?.loginType === 'access_token')
 const loading = ref(false)
 const timelineLoading = ref(false)
 const loadingMore = ref(false)
@@ -538,7 +541,7 @@ watch(
             </dl>
           </section>
         </div>
-        <section v-if="detail.resources?.length" class="session-resources" aria-label="会话资源汇总">
+        <section v-if="!isAccessTokenLogin && detail.resources?.length" class="session-resources" aria-label="会话资源汇总">
           <header><h3>会话资源</h3><span>{{ detail.resources.length }} 个去重资源</span></header>
           <ResourceList :resources="detail.resources" compact />
         </section>
@@ -549,17 +552,18 @@ watch(
           <button
             type="button"
             class="current-channel-toggle"
-            :aria-expanded="currentChannelExpanded"
+            :aria-expanded="!isAccessTokenLogin && currentChannelExpanded"
+            :disabled="isAccessTokenLogin"
             @click="currentChannelExpanded = !currentChannelExpanded"
           >
-            <el-icon class="section-expand-icon" :class="{ 'is-expanded': currentChannelExpanded }"><Right /></el-icon>
+            <el-icon v-if="!isAccessTokenLogin" class="section-expand-icon" :class="{ 'is-expanded': currentChannelExpanded }"><Right /></el-icon>
             <div>
               <h3>当前渠道</h3>
               <p v-if="detail.summary.currentChannel">
                 <strong>{{ detail.summary.currentChannel.channelName }}</strong>
                 <span>·</span>
                 <code>{{ detail.summary.currentChannel.upstreamModel }}</code>
-                <span>· {{ assignmentLabel(detail.summary.currentChannel.assignmentSource) }}</span>
+                <span v-if="!isAccessTokenLogin">· {{ assignmentLabel(detail.summary.currentChannel.assignmentSource) }}</span>
               </p>
               <p v-else>{{ detail.summary.latestModel }} · 尚未进入上游渠道</p>
               <el-tooltip v-if="channelUsageText" :content="channelUsageText" placement="bottom-start" :show-after="300" :disabled="!channelUsageOverflowing">
@@ -570,17 +574,17 @@ watch(
               </el-tooltip>
             </div>
           </button>
-          <el-tag :type="currentChannelState().type" effect="plain">{{ currentChannelState().label }}</el-tag>
+          <el-tag v-if="!isAccessTokenLogin" :type="currentChannelState().type" effect="plain">{{ currentChannelState().label }}</el-tag>
         </header>
-        <div v-if="currentChannelExpanded && detail.summary.currentChannel" class="current-channel-grid">
+        <div v-if="!isAccessTokenLogin && currentChannelExpanded && detail.summary.currentChannel" class="current-channel-grid">
           <div><span>渠道</span><strong>{{ detail.summary.currentChannel.channelName }}</strong></div>
           <div><span>上游模型</span><code>{{ detail.summary.currentChannel.upstreamModel }}</code></div>
           <div><span>分配依据</span><strong>{{ assignmentLabel(detail.summary.currentChannel.assignmentSource) }}</strong></div>
           <div><span>最近使用</span><strong>{{ formatDate(detail.summary.currentChannel.lastUsedAt) }}</strong></div>
           <div class="channel-url"><span>Base URL</span><code>{{ detail.summary.currentChannel.channelBaseUrl }}</code></div>
         </div>
-        <div v-else-if="currentChannelExpanded" class="muted-text">该会话尚未进入上游渠道</div>
-        <div v-if="currentChannelExpanded && detail.summary.currentChannel?.migrationHistory?.length" class="channel-migration-history">
+        <div v-else-if="!isAccessTokenLogin && currentChannelExpanded" class="muted-text">该会话尚未进入上游渠道</div>
+        <div v-if="!isAccessTokenLogin && currentChannelExpanded && detail.summary.currentChannel?.migrationHistory?.length" class="channel-migration-history">
           <div class="migration-heading"><strong>渠道迁移历史</strong><span>迁移后由接班渠道继续处理，直到接班渠道不可用</span></div>
           <ol>
             <li v-for="migration in detail.summary.currentChannel.migrationHistory" :key="`${migration.requestId}-${migration.occurredAt}-${migration.toChannelId}`">
@@ -646,9 +650,9 @@ watch(
                   <time :datetime="entry.request.createdAt">{{ formatDate(entry.request.createdAt) }}</time>
                   <span>{{ entry.request.endpoint === 'chat' ? 'Chat Completions' : 'Responses' }}</span>
                   <el-tag v-if="entry.request.isCompaction" class="compaction-request-tag" type="warning" effect="plain" size="small">压缩请求</el-tag>
-                  <el-tag v-if="entry.request.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag>
-                  <ResourceList v-if="entry.request.resources?.length" :resources="entry.request.resources" compact />
-                  <code>{{ entry.request.apiPath }}</code>
+                  <el-tag v-if="!isAccessTokenLogin && entry.request.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag>
+                  <ResourceList v-if="!isAccessTokenLogin && entry.request.resources?.length" :resources="entry.request.resources" compact />
+                  <code v-if="!isAccessTokenLogin">{{ entry.request.apiPath }}</code>
                   <code>{{ entry.request.requestedModel }}</code>
                   <span>思考等级 {{ entry.request.reasoningEffort || '默认' }}</span>
                 </div>
@@ -661,7 +665,7 @@ watch(
                 </div>
               </header>
               <div v-if="!isRequestExpanded(entry.request.id)" class="request-brief" aria-label="路由和耗时摘要">
-                <span>
+                <span v-if="!isAccessTokenLogin">
                   <strong>路由策略</strong>{{ entry.routeSummary.strategy }} ·
                   <em class="route-result" :class="`is-${entry.routeSummary.kind}`">{{ entry.routeSummary.result }}</em>
                 </span>
@@ -679,7 +683,7 @@ watch(
               <div v-if="isRequestExpanded(entry.request.id)" class="request-expanded">
               <div class="request-id"><code>{{ entry.request.id }}</code></div>
 
-              <RelayStepTimeline :steps="entry.request.steps ?? []" />
+              <RelayStepTimeline v-if="!isAccessTokenLogin" :steps="entry.request.steps ?? []" />
 
               <div v-if="entry.attempts.length === 0" class="route-stage-failure">
                 <strong>请求未进入上游渠道</strong>
@@ -687,8 +691,8 @@ watch(
               </div>
 
               <div v-for="(attemptEntry, attemptIndex) in entry.attempts" :key="attemptEntry.attempt.id" class="attempt-sequence">
-                <RouteDecisionPanel v-if="attemptEntry.attempt.routeDecision" :decision="attemptEntry.attempt.routeDecision" />
-                <div v-if="attemptEntry.channelSwitch" class="channel-switch-event">
+                <RouteDecisionPanel v-if="!isAccessTokenLogin && attemptEntry.attempt.routeDecision" :decision="attemptEntry.attempt.routeDecision" />
+                <div v-if="!isAccessTokenLogin && attemptEntry.channelSwitch" class="channel-switch-event">
                   <div class="switch-route">
                     <strong>{{ attemptEntry.channelSwitch.from }}</strong>
                     <el-icon><Right /></el-icon>

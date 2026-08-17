@@ -34,8 +34,55 @@ func TestGatewayConfigDefaults(t *testing.T) {
 	if gatewayConfig.DetailedLogRetentionDays != DefaultDetailedLogRetentionDays {
 		t.Fatalf("detailed log retention = %d, want %d", gatewayConfig.DetailedLogRetentionDays, DefaultDetailedLogRetentionDays)
 	}
+	if gatewayConfig.SessionTTLHours != DefaultSessionTTLHours {
+		t.Fatalf("session ttl = %d, want %d", gatewayConfig.SessionTTLHours, DefaultSessionTTLHours)
+	}
 	if gatewayConfig.RoutingPriceWeightPercent != DefaultRoutingPriceWeightPercent || gatewayConfig.RoutingEfficiencyWeightPercent != DefaultRoutingEfficiencyWeightPercent || gatewayConfig.RoutingQualityWeightPercent != DefaultRoutingQualityWeightPercent || gatewayConfig.RoutingBalanceWeightPercent != DefaultRoutingBalanceWeightPercent {
 		t.Fatalf("routing weights = %d/%d/%d/%d", gatewayConfig.RoutingPriceWeightPercent, gatewayConfig.RoutingEfficiencyWeightPercent, gatewayConfig.RoutingQualityWeightPercent, gatewayConfig.RoutingBalanceWeightPercent)
+	}
+}
+
+func TestSessionTTLHoursValidation(t *testing.T) {
+	for _, value := range []int{0, 1, 24, MaxSessionTTLHours} {
+		if err := normalizeSessionTTLHours(value); err != nil {
+			t.Fatalf("value %d rejected: %v", value, err)
+		}
+	}
+	for _, value := range []int{-1, MaxSessionTTLHours + 1} {
+		if err := normalizeSessionTTLHours(value); err == nil {
+			t.Fatalf("invalid session ttl %d was accepted", value)
+		}
+	}
+}
+
+func TestApplicationConfigManagerSaveUpdatesSessionTTLAtRuntime(t *testing.T) {
+	originalConfigPath := configPath
+	configPath = filepath.Join(t.TempDir(), "config.toml")
+	t.Cleanup(func() { configPath = originalConfigPath })
+
+	manager := &ApplicationConfigManager{}
+	cfg := &ApplicationConfig{GatewayConfig: GatewayConfig{SessionTTLHours: 24}}
+	if err := manager.Save(cfg); err != nil {
+		t.Fatalf("Save(24) error = %v", err)
+	}
+	if got := EffectiveSessionTTLHours(manager.GetConfig()); got != 24 {
+		t.Fatalf("runtime session ttl = %d, want 24", got)
+	}
+
+	cfg.GatewayConfig.SessionTTLHours = 0
+	if err := manager.Save(cfg); err != nil {
+		t.Fatalf("Save(permanent) error = %v", err)
+	}
+	if got := EffectiveSessionTTLHours(manager.GetConfig()); got != DefaultSessionTTLHours {
+		t.Fatalf("runtime permanent session ttl = %d, want %d", got, DefaultSessionTTLHours)
+	}
+
+	cfg.GatewayConfig.SessionTTLHours = -1
+	if err := manager.Save(cfg); err == nil {
+		t.Fatal("Save(negative session ttl) error = nil")
+	}
+	if got := EffectiveSessionTTLHours(manager.GetConfig()); got != DefaultSessionTTLHours {
+		t.Fatalf("invalid save changed runtime session ttl to %d", got)
 	}
 }
 

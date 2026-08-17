@@ -11,6 +11,7 @@ import { useAdminAuth } from '@/composables/useAdminAuth'
 import { useRequestActivity } from '@/composables/useRequestActivity'
 import projectMeta from '@/config/project.generated.js'
 import { navigationGroups, type NavigationItem } from '@/navigation'
+import { isHeadlessMode } from '@/utils/headlessMode'
 
 const route = useRoute()
 const auth = useAdminAuth()
@@ -28,6 +29,9 @@ const firstLoginGuideStorageKey = `${projectMeta.appName}:first-login-guide-comp
 let firstLoginGuideChecked = false
 let mobileMediaQuery: MediaQueryList | null = null
 
+const isAccessTokenLogin = computed(() => user.value?.loginType === 'access_token')
+const headlessMode = computed(() => isHeadlessMode(route.query.headless))
+
 function filterNavigationItems(items: NavigationItem[], query: string): NavigationItem[] {
   return items.flatMap((item) => {
     if (item.label.toLowerCase().includes(query)) return [{ ...item }]
@@ -38,8 +42,14 @@ function filterNavigationItems(items: NavigationItem[], query: string): Navigati
 
 const filteredGroups = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
-  if (!query) return navigationGroups
-  return navigationGroups
+  const visibleGroups = navigationGroups
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => !isAccessTokenLogin.value || !item.adminOnly),
+    }))
+    .filter((group) => group.items.length > 0)
+  if (!query) return visibleGroups
+  return visibleGroups
     .map((group) => ({ ...group, items: filterNavigationItems(group.items, query) }))
     .filter((group) => group.items.length > 0)
 })
@@ -66,9 +76,9 @@ const defaultOpenMenuKeys = computed(() => {
 const menuCollapsed = computed(() => sidebarCollapsed.value && !isMobileViewport.value)
 const breadcrumbs = computed(() => route.meta.breadcrumbs ?? ['网关控制台'])
 const workspaceContained = computed(() => route.meta.workspaceMode === 'contained')
-const quickNavigationItems = navigationGroups
+const quickNavigationItems = computed(() => navigationGroups
   .flatMap((group) => group.items)
-  .filter((item) => item.key === 'active-sessions' || item.key === 'sessions')
+  .filter((item) => (item.key === 'active-sessions' || item.key === 'sessions') && (!isAccessTokenLogin.value || !item.adminOnly)))
 
 function syncMobileViewport(event: MediaQueryList | MediaQueryListEvent) {
   isMobileViewport.value = event.matches
@@ -122,9 +132,20 @@ watch(() => route.path, async () => {
   workspaceScroll.value?.scrollTo({ top: 0 })
 })
 
-watch(authenticated, (isAuthenticated) => {
+watch(headlessMode, (enabled) => {
+  if (!enabled) return
+  mobileOpen.value = false
+  passwordDialogOpen.value = false
+  firstLoginGuideOpen.value = false
+})
+
+watch([authenticated, isAccessTokenLogin, headlessMode], ([isAuthenticated, tokenLogin, headless]) => {
   if (!isAuthenticated || firstLoginGuideChecked) return
   firstLoginGuideChecked = true
+  if (tokenLogin || headless) {
+    firstLoginGuideOpen.value = false
+    return
+  }
   try {
     firstLoginGuideOpen.value = window.localStorage.getItem(firstLoginGuideStorageKey) !== '1'
   } catch {
@@ -144,11 +165,11 @@ watch(authenticated, (isAuthenticated) => {
 	<div
     v-else
     class="app-shell"
-    :class="{ 'is-sidebar-collapsed': sidebarCollapsed, 'is-mobile-open': mobileOpen }"
+    :class="{ 'is-sidebar-collapsed': sidebarCollapsed, 'is-mobile-open': mobileOpen, 'is-headless': headlessMode }"
 	>
-		<div v-show="isRequestActive" class="request-progress" role="progressbar" aria-label="接口请求处理中"><span></span></div>
-    <a class="skip-link" href="#workspace-content">跳到主内容</a>
-    <header class="app-header">
+		<div v-show="!headlessMode && isRequestActive" class="request-progress" role="progressbar" aria-label="接口请求处理中"><span></span></div>
+    <a v-if="!headlessMode" class="skip-link" href="#workspace-content">跳到主内容</a>
+    <header v-if="!headlessMode" class="app-header">
       <div class="header-brand">
         <button class="icon-button header-menu-button" type="button" title="切换导航" @click="toggleSidebar">
           <Menu />
@@ -170,7 +191,7 @@ watch(authenticated, (isAuthenticated) => {
           </button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="password">修改密码</el-dropdown-item>
+              <el-dropdown-item v-if="!isAccessTokenLogin" command="password">修改密码</el-dropdown-item>
 				<el-dropdown-item command="logout" divided :disabled="logoutLoading">{{ logoutLoading ? '正在退出' : '退出登录' }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
@@ -178,7 +199,7 @@ watch(authenticated, (isAuthenticated) => {
       </div>
     </header>
 
-    <aside class="app-sidebar">
+    <aside v-if="!headlessMode" class="app-sidebar">
       <div class="sidebar-toolbar">
         <label class="sidebar-search">
           <Search />
@@ -220,7 +241,7 @@ watch(authenticated, (isAuthenticated) => {
     </aside>
 
     <main class="app-main">
-      <div class="workspace-toolbar">
+      <div v-if="!headlessMode" class="workspace-toolbar">
         <div class="breadcrumbs">
           <template v-for="(item, index) in breadcrumbs" :key="`${item}-${index}`">
             <b v-if="index > 0">/</b>
@@ -251,9 +272,10 @@ watch(authenticated, (isAuthenticated) => {
       </section>
     </main>
 
-    <button v-if="mobileOpen" class="mobile-scrim" type="button" aria-label="关闭导航" @click="mobileOpen = false"></button>
-    <ChangePasswordDialog v-model="passwordDialogOpen" />
+    <button v-if="!headlessMode && mobileOpen" class="mobile-scrim" type="button" aria-label="关闭导航" @click="mobileOpen = false"></button>
+    <ChangePasswordDialog v-if="!headlessMode" v-model="passwordDialogOpen" />
     <FirstLoginGuide
+      v-if="!headlessMode"
       v-model="firstLoginGuideOpen"
       @complete="completeFirstLoginGuide"
       @skip="completeFirstLoginGuide"
@@ -265,6 +287,7 @@ watch(authenticated, (isAuthenticated) => {
 .request-progress { position: fixed; z-index: 3000; top: 0; right: 0; left: 0; height: 2px; overflow: hidden; pointer-events: none; }
 .request-progress span { display: block; width: 38%; height: 100%; background: var(--hongfen-primary); animation: request-progress-slide 1s ease-in-out infinite; }
 .account-button:disabled { cursor: wait; opacity: 0.72; }
+.app-shell.is-headless .app-main { grid-template-rows: minmax(0, 1fr); padding-top: 0; padding-left: 0; transition: none; }
 @keyframes request-progress-slide { from { transform: translateX(-110%); } to { transform: translateX(360%); } }
 @media (prefers-reduced-motion: reduce) { .request-progress span { width: 100%; animation: none; } }
 </style>

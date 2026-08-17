@@ -69,6 +69,10 @@ type ApplicationHolder struct {
 	AppConfigManager *config.ApplicationConfigManager
 }
 
+type StartupOptions struct {
+	DisableIFrame bool
+}
+
 func NewApplicationHolder(appConfigManager *config.ApplicationConfigManager, appWebManager *AppWebManager) *ApplicationHolder {
 	return &ApplicationHolder{
 		AppConfigManager: appConfigManager,
@@ -76,8 +80,8 @@ func NewApplicationHolder(appConfigManager *config.ApplicationConfigManager, app
 	}
 }
 
-func (applicationHolder *ApplicationHolder) Start(staticFS embed.FS) {
-	applicationHolder.AppWebManager.Run(staticFS)
+func (applicationHolder *ApplicationHolder) Start(staticFS embed.FS, options StartupOptions) {
+	applicationHolder.AppWebManager.Run(staticFS, options)
 }
 
 type AppWebManager struct {
@@ -136,9 +140,10 @@ func getGin() *gin.Engine {
 	return engine
 }
 
-func (awm *AppWebManager) Run(assertFs embed.FS) {
+func (awm *AppWebManager) Run(assertFs embed.FS, options StartupOptions) {
 	awm.assertFs = assertFs
 	webConfig := awm.WebConfig
+	configureIFrameEmbedding(awm.WebServer, options.DisableIFrame)
 	awm.RegisterRouter()
 	if webConfig == nil {
 		webConfig = &config.WebConfig{
@@ -164,6 +169,16 @@ func (awm *AppWebManager) Run(assertFs embed.FS) {
 	} else {
 		log.Infof("automatic browser opening is disabled by %s", config.OpenBrowserOnStartEnvKey)
 	}
+}
+
+func configureIFrameEmbedding(engine *gin.Engine, disabled bool) {
+	if !disabled {
+		return
+	}
+	engine.Use(func(c *gin.Context) {
+		c.Header("X-Frame-Options", "DENY")
+		c.Next()
+	})
 }
 
 func (awm *AppWebManager) RegisterRouter() {

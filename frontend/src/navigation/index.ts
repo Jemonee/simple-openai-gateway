@@ -30,6 +30,8 @@ export interface NavigationItem {
   component?: RouteRecordRaw['component']
   /** Workspace scrolling strategy used after the fixed breadcrumb toolbar. */
   workspaceMode?: 'scroll' | 'contained'
+  /** Whether the page is only available to an administrator console session. */
+  adminOnly?: boolean
   /** Nested functional menus; nesting may continue to any practical depth. */
   children?: NavigationItem[]
 }
@@ -60,6 +62,7 @@ export const navigationGroups: NavigationGroup[] = [
         label: '渠道管理',
         icon: Connection,
         component: () => import('@/pages/Channels.vue'),
+        adminOnly: true,
       },
       {
         key: 'channel-verification',
@@ -68,6 +71,7 @@ export const navigationGroups: NavigationGroup[] = [
         label: '渠道验证',
         icon: Aim,
         component: () => import('@/pages/ChannelVerification.vue'),
+        adminOnly: true,
       },
       {
         key: 'active-sessions',
@@ -93,6 +97,7 @@ export const navigationGroups: NavigationGroup[] = [
         label: '熔断记录',
         icon: WarningFilled,
         component: () => import('@/pages/CircuitRecords.vue'),
+        adminOnly: true,
       },
       {
         key: 'models',
@@ -101,6 +106,7 @@ export const navigationGroups: NavigationGroup[] = [
         label: '模型路由',
         icon: Grid,
         component: () => import('@/pages/ModelRoutes.vue'),
+        adminOnly: true,
       },
       {
         key: 'tokens',
@@ -109,6 +115,7 @@ export const navigationGroups: NavigationGroup[] = [
         label: '访问令牌',
         icon: Key,
         component: () => import('@/pages/Tokens.vue'),
+        adminOnly: true,
       },
       {
         key: 'logs',
@@ -133,6 +140,7 @@ export const navigationGroups: NavigationGroup[] = [
         label: '资源中心',
         icon: Collection,
         component: () => import('@/pages/Resources.vue'),
+        adminOnly: true,
       },
     ],
   },
@@ -155,6 +163,7 @@ export const navigationGroups: NavigationGroup[] = [
         label: '系统设置',
         icon: Setting,
         component: () => import('@/pages/Settings.vue'),
+        adminOnly: true,
       },
     ],
   },
@@ -187,6 +196,7 @@ function collectRoutes(
         breadcrumbs: [groupLabel, ...itemLabels],
         menuKey: item.key,
         workspaceMode: item.workspaceMode ?? 'scroll',
+        adminOnly: item.adminOnly ?? false,
       },
     }
     return [currentRoute, ...childRoutes]

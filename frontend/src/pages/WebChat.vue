@@ -3,7 +3,9 @@ import { computed, nextTick, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { ChatDotRound, CirclePlus, Connection, Delete, Grid, Promotion, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import MarkdownIt from 'markdown-it'
+import { useAdminAuth } from '@/composables/useAdminAuth'
 import type {
+  AvailableGatewayModel,
   Channel,
   GatewayModel,
   WebChatCompletionMessage,
@@ -13,7 +15,6 @@ import type {
 import { request } from '@/utils/api'
 import { formatCompactNumber, formatUSD } from '@/utils/formatters'
 
-const storageKey = 'simple-openai-gateway.web-chat.v1'
 const markdown = new MarkdownIt({ html: false, breaks: true, linkify: true })
 
 interface WebChatMessage extends WebChatCompletionMessage {
@@ -57,8 +58,14 @@ interface WebChatConversation {
 }
 
 const loadingOptions = ref(true)
+const { user } = useAdminAuth()
+const isAccessTokenLogin = computed(() => user.value?.loginType === 'access_token')
+const storageKey = computed(() => isAccessTokenLogin.value
+  ? `simple-openai-gateway.web-chat.v1.token-${user.value?.tokenId ?? 0}`
+  : 'simple-openai-gateway.web-chat.v1')
 const optionsError = ref('')
 const models = ref<GatewayModel[]>([])
+const tokenModels = ref<AvailableGatewayModel[]>([])
 const channels = ref<Channel[]>([])
 const conversations = ref<WebChatConversation[]>([])
 const activeConversationId = ref('')
@@ -69,9 +76,11 @@ const messageViewport = useTemplateRef<HTMLElement>('messageViewport')
 const readyChannels = computed(() => channels.value.filter(channel => (
   channel.enabled && (!channel.circuitOpenUntil || Date.parse(channel.circuitOpenUntil) <= Date.now())
 )))
-const readyModels = computed(() => models.value.filter(model => (
-  model.enabled && readyChannels.value.some(channel => channel.models.some(mapping => mapping.enabled && mapping.modelId === model.id))
-)))
+const readyModels = computed<AvailableGatewayModel[]>(() => isAccessTokenLogin.value
+  ? tokenModels.value
+  : models.value.filter(model => (
+      model.enabled && readyChannels.value.some(channel => channel.models.some(mapping => mapping.enabled && mapping.modelId === model.id))
+    )))
 const activeConversation = computed(() => conversations.value.find(item => item.id === activeConversationId.value) ?? null)
 const channelsForActiveModel = computed(() => {
   const model = readyModels.value.find(item => item.name === activeConversation.value?.model)
@@ -120,7 +129,7 @@ function isStoredConversation(value: unknown): value is WebChatConversation {
 function loadStoredConversations() {
   if (typeof window === 'undefined') return
   try {
-    const stored = JSON.parse(window.localStorage.getItem(storageKey) ?? '[]') as unknown
+    const stored = JSON.parse(window.localStorage.getItem(storageKey.value) ?? '[]') as unknown
     if (Array.isArray(stored)) conversations.value = stored.filter(isStoredConversation)
   } catch {
     conversations.value = []
@@ -131,7 +140,7 @@ function loadStoredConversations() {
 
 function persistConversations() {
   if (typeof window === 'undefined') return
-  window.localStorage.setItem(storageKey, JSON.stringify(conversations.value))
+  window.localStorage.setItem(storageKey.value, JSON.stringify(conversations.value))
 }
 
 function reconcileConversationRoutes() {
@@ -151,6 +160,13 @@ async function loadOptions() {
   loadingOptions.value = true
   optionsError.value = ''
   try {
+    if (isAccessTokenLogin.value) {
+      tokenModels.value = await request<AvailableGatewayModel[]>('/admin/gateway/models/available')
+      models.value = []
+      channels.value = []
+      reconcileConversationRoutes()
+      return
+    }
     const [modelItems, channelItems] = await Promise.all([
       request<GatewayModel[]>('/admin/gateway/models'),
       request<Channel[]>('/admin/gateway/channels'),
@@ -260,7 +276,7 @@ async function sendMessage() {
   const payload: WebChatCompletionRequest = {
     sessionId: conversation.id,
     model: conversation.model,
-    channelId: conversation.channelId,
+    channelId: isAccessTokenLogin.value ? 0 : conversation.channelId,
     messages: conversation.messages
       .filter(message => !message.error)
       .map(message => ({ role: message.role, content: message.content })),
@@ -336,7 +352,7 @@ onMounted(() => {
           </span>
           <span class="conversation-item-meta">
             <span>{{ conversation.model || '未选择模型' }}</span>
-            <span>{{ conversationRouteLabel(conversation) }}</span>
+            <span v-if="!isAccessTokenLogin">{{ conversationRouteLabel(conversation) }}</span>
             <time>{{ conversationTime(conversation.updatedAt) }}</time>
           </span>
           <el-button
@@ -353,7 +369,7 @@ onMounted(() => {
 
     <main class="chat-workspace">
       <div v-if="optionsError" class="chat-state state-error" role="alert">
-        <strong>模型和渠道加载失败</strong><span>{{ optionsError }}</span><el-button :icon="Refresh" @click="loadOptions">重试</el-button>
+        <strong>{{ isAccessTokenLogin ? '模型加载失败' : '模型和渠道加载失败' }}</strong><span>{{ optionsError }}</span><el-button :icon="Refresh" @click="loadOptions">重试</el-button>
       </div>
 
       <template v-else-if="activeConversation">
@@ -375,14 +391,14 @@ onMounted(() => {
                 <el-option v-for="model in readyModels" :key="model.id" :label="model.name" :value="model.name" />
               </el-select>
             </label>
-            <label>
+            <label v-if="!isAccessTokenLogin">
               <span><el-icon><Connection /></el-icon>渠道</span>
               <el-select v-model="activeConversation.channelId" :disabled="!activeConversation.model" placeholder="自动路由" @change="touchActiveConversation">
                 <el-option label="自动路由选择" :value="0" />
                 <el-option v-for="channel in channelsForActiveModel" :key="channel.id" :label="`置顶 · ${channel.name}`" :value="channel.id" />
               </el-select>
             </label>
-            <el-tag v-if="activeConversation.channelId" type="warning" effect="plain">置顶渠道</el-tag>
+            <el-tag v-if="!isAccessTokenLogin && activeConversation.channelId" type="warning" effect="plain">置顶渠道</el-tag>
             <el-tag v-else type="success" effect="plain">自动路由</el-tag>
           </div>
         </header>
@@ -391,7 +407,7 @@ onMounted(() => {
           <div v-if="activeConversation.messages.length === 0" class="empty-conversation">
             <el-icon><ChatDotRound /></el-icon>
             <strong>开始一个网页内对话</strong>
-            <p>选择模型后可交给网关自动路由，或置顶一个支持该模型的渠道。每次回复都会进入调用日志、会话日志和活跃会话。</p>
+            <p>{{ isAccessTokenLogin ? '选择授权模型后由网关自动路由。每次回复都会进入当前令牌的调用日志、会话日志和活跃会话。' : '选择模型后可交给网关自动路由，或置顶一个支持该模型的渠道。每次回复都会进入调用日志、会话日志和活跃会话。' }}</p>
           </div>
 
           <article

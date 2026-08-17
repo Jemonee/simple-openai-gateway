@@ -51,12 +51,14 @@ type AdminUser struct {
 }
 
 type AdminSession struct {
-	ID        uint64 `gorm:"primaryKey;autoIncrement"`
-	TokenHash string `gorm:"size:64;uniqueIndex;not null"`
-	UserID    uint64 `gorm:"index;not null"`
-	ExpiresAt time.Time
-	CreatedAt time.Time
-	LastSeen  time.Time
+	ID            uint64    `gorm:"primaryKey;autoIncrement"`
+	TokenHash     string    `gorm:"size:64;uniqueIndex;not null"`
+	LoginType     string    `gorm:"size:24;not null;default:admin;index:idx_admin_session_login_client,priority:1"`
+	UserID        uint64    `gorm:"index;not null"`
+	ClientTokenID uint64    `gorm:"index;index:idx_admin_session_login_client,priority:2"`
+	ExpiresAt     time.Time `gorm:"index:idx_admin_session_expires"`
+	CreatedAt     time.Time
+	LastSeen      time.Time
 }
 
 type Channel struct {

@@ -480,6 +480,9 @@ func applySessionIdentity(db *gorm.DB, query SessionDetailQuery) *gorm.DB {
 	if query.SessionID != "" {
 		return db.Where("token_id = ? AND codex_session_id = ?", query.TokenID, query.SessionID)
 	}
+	if query.TokenID > 0 {
+		return db.Where("token_id = ? AND id = ? AND codex_session_id = ''", query.TokenID, query.RequestID)
+	}
 	return db.Where("id = ? AND codex_session_id = ''", query.RequestID)
 }
 
@@ -653,6 +656,9 @@ func (s *ManagementService) RenameSession(ctx context.Context, input SessionTitl
 		if input.SessionID == "" {
 			result := db.Model(&RelayRequestLog{}).
 				Where("id = ? AND codex_session_id = ''", input.RequestID)
+			if input.TokenID > 0 {
+				result = result.Where("token_id = ?", input.TokenID)
+			}
 			if hasCutoff {
 				result = result.Where("created_at >= ?", cutoff)
 			}
@@ -921,6 +927,93 @@ func (s *ManagementService) relayRequestView(ctx context.Context, log RelayReque
 		Resources:             resources,
 		SensitiveResourceLeak: sensitive,
 	}, nil
+}
+
+// RedactTokenScopedLogView removes operational configuration that is unrelated
+// to the access token's own request result.
+func RedactTokenScopedLogView(view *RelayRequestView) {
+	if view == nil {
+		return
+	}
+	view.APIPath = ""
+	view.Resources = []ResourceView{}
+	view.SensitiveResourceLeak = false
+	view.Steps = []RelayStepLog{}
+	for index := range view.Attempts {
+		attempt := &view.Attempts[index]
+		attempt.ChannelID = 0
+		attempt.ChannelModelID = 0
+		attempt.ChannelBaseURL = ""
+		attempt.APIPath = ""
+		attempt.PreviousChannelID = 0
+		attempt.PreviousChannelName = ""
+		attempt.SelectionReason = ""
+		attempt.SelectionDetail = ""
+		attempt.RouteDecisionJSON = ""
+		attempt.RouteDecision = nil
+	}
+}
+
+func RedactTokenScopedLogPage(page *LogPage) {
+	if page == nil {
+		return
+	}
+	for index := range page.Items {
+		RedactTokenScopedLogView(&page.Items[index])
+	}
+}
+
+// RedactTokenScopedSessionSummary removes global resource and live routing state
+// while retaining the actual model, channel name, usage, and result for the session.
+func RedactTokenScopedSessionSummary(summary *SessionLogSummary) {
+	if summary == nil {
+		return
+	}
+	summary.Resources = []ResourceSummary{}
+	summary.SensitiveResourceLeak = false
+	if summary.CurrentChannel != nil {
+		channel := summary.CurrentChannel
+		channel.ChannelID = 0
+		channel.ChannelBaseURL = ""
+		channel.ChannelModelID = 0
+		channel.AssignmentSource = ""
+		channel.Enabled = false
+		channel.MappingEnabled = false
+		channel.CircuitOpenUntil = nil
+		channel.MigrationHistory = []SessionChannelMigration{}
+	}
+}
+
+func RedactTokenScopedSessionPage(page *SessionLogPage) {
+	if page == nil {
+		return
+	}
+	for index := range page.Items {
+		RedactTokenScopedSessionSummary(&page.Items[index])
+	}
+}
+
+func RedactTokenScopedActiveSessionPage(page *ActiveSessionPage) {
+	if page == nil {
+		return
+	}
+	for index := range page.Items {
+		RedactTokenScopedSessionSummary(&page.Items[index])
+	}
+}
+
+func RedactTokenScopedSessionDetail(detail *SessionLogDetail) {
+	if detail == nil {
+		return
+	}
+	RedactTokenScopedSessionSummary(&detail.Summary)
+	detail.Resources = []ResourceSummary{}
+	for index := range detail.Channels {
+		detail.Channels[index].ChannelID = 0
+	}
+	for index := range detail.Requests {
+		RedactTokenScopedLogView(&detail.Requests[index])
+	}
 }
 
 func relayAPIPath(baseURL string, endpoint string) string {

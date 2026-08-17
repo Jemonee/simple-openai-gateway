@@ -1,21 +1,24 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { Coin, Connection, DataLine, Refresh, RefreshLeft, Search, Tickets, Timer, View } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import RequestPayloadDialog from '@/components/RequestPayloadDialog.vue'
 import SessionAttemptCard from '@/components/SessionAttemptCard.vue'
 import ResourceList from '@/components/ResourceList.vue'
-import type { Channel, ClientToken, GatewayModel, LogAggregateSummary, LogPage, RelayAttemptLog, RelayRequestLog } from '@/types/gateway'
+import { useAdminAuth } from '@/composables/useAdminAuth'
+import type { AvailableGatewayModel, Channel, ClientToken, LogAggregateSummary, LogPage, RelayAttemptLog, RelayRequestLog } from '@/types/gateway'
 import { request } from '@/utils/api'
 import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
 import { logDateDefaultTimes, logDateRangeShortcuts, toEastEightISOString, todayLogRange } from '@/utils/logDateRanges'
 
 const loading = ref(true)
+const { user } = useAdminAuth()
+const isAccessTokenLogin = computed(() => user.value?.loginType === 'access_token')
 const errorMessage = ref('')
 const logs = ref<RelayRequestLog[]>([])
 const summary = ref<LogAggregateSummary | null>(null)
 const total = ref(0)
-const models = ref<GatewayModel[]>([])
+const models = ref<AvailableGatewayModel[]>([])
 const channels = ref<Channel[]>([])
 const tokens = ref<ClientToken[]>([])
 const filters = reactive({ model: '', channelId: '', tokenId: '', outcome: '', range: todayLogRange() as Date[] | null })
@@ -125,8 +128,14 @@ async function showPayloads(log: RelayRequestLog) {
 }
 
 async function loadOptions() {
+  if (isAccessTokenLogin.value) {
+    models.value = await request<AvailableGatewayModel[]>('/admin/gateway/models/available')
+    channels.value = []
+    tokens.value = []
+    return
+  }
   [models.value, channels.value, tokens.value] = await Promise.all([
-    request<GatewayModel[]>('/admin/gateway/models'),
+    request<AvailableGatewayModel[]>('/admin/gateway/models'),
     request<Channel[]>('/admin/gateway/channels'),
     request<ClientToken[]>('/admin/gateway/tokens'),
   ])
@@ -188,8 +197,8 @@ onMounted(async () => {
 
     <section class="filter-bar" aria-label="日志筛选">
       <el-select v-model="filters.model" clearable placeholder="全部模型"><el-option v-for="model in models" :key="model.id" :label="model.name" :value="model.name" /></el-select>
-      <el-select v-model="filters.channelId" clearable placeholder="全部渠道"><el-option v-for="channel in channels" :key="channel.id" :label="channel.name" :value="String(channel.id)" /></el-select>
-      <el-select v-model="filters.tokenId" clearable placeholder="全部令牌"><el-option v-for="token in tokens" :key="token.id" :label="token.name" :value="String(token.id)" /></el-select>
+      <el-select v-if="!isAccessTokenLogin" v-model="filters.channelId" clearable placeholder="全部渠道"><el-option v-for="channel in channels" :key="channel.id" :label="channel.name" :value="String(channel.id)" /></el-select>
+      <el-select v-if="!isAccessTokenLogin" v-model="filters.tokenId" clearable placeholder="全部令牌"><el-option v-for="token in tokens" :key="token.id" :label="token.name" :value="String(token.id)" /></el-select>
       <el-select v-model="filters.outcome" clearable placeholder="全部结果"><el-option label="成功" value="success" /><el-option label="客户端取消" value="canceled" /><el-option label="失败" value="failed" /></el-select>
       <el-date-picker v-model="filters.range" type="datetimerange" format="YYYY-MM-DD HH:mm:ss" :default-time="logDateDefaultTimes" :shortcuts="logDateRangeShortcuts" range-separator="至" start-placeholder="开始时间" end-placeholder="结束时间" />
       <div class="filter-actions"><el-button :icon="RefreshLeft" :disabled="loading" @click="resetLogs">重置</el-button><el-button type="primary" :icon="Search" :loading="loading" @click="searchLogs">查询</el-button></div>
@@ -272,7 +281,7 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="来源" width="142"><template #default="scope"><div class="source-breakdown"><el-tag :type="costSourceType(scope.row)" effect="plain" size="small">{{ costSource(scope.row) }}</el-tag><small>{{ usageSource(scope.row.usageSource) }}</small></div></template></el-table-column>
         <el-table-column label="性能 / 尝试" min-width="240"><template #default="scope"><div class="performance-cell"><strong>首 Token {{ formatTiming(scope.row.firstTokenMs) }} <small class="relay-first-response">中转首响 {{ formatTiming(scope.row.firstResponseMs) }}</small></strong><small>延迟 {{ formatTiming(scope.row.latencyMs) }} · 请求耗时 {{ formatTiming(scope.row.durationMs) }} · {{ scope.row.attemptCount }} 次尝试</small></div></template></el-table-column>
-        <el-table-column label="资源" min-width="150"><template #default="scope"><ResourceList v-if="scope.row.resources?.length" :resources="scope.row.resources" compact /><span v-else class="muted-text">--</span></template></el-table-column>
+        <el-table-column v-if="!isAccessTokenLogin" label="资源" min-width="150"><template #default="scope"><ResourceList v-if="scope.row.resources?.length" :resources="scope.row.resources" compact /><span v-else class="muted-text">--</span></template></el-table-column>
         <el-table-column label="详情" width="62" fixed="right" align="right"><template #default="scope"><el-tooltip content="查看调用记录" placement="top"><el-button class="table-action-button" text :icon="View" :loading="payloadLoadingId === scope.row.id" aria-label="查看调用记录" @click="showPayloads(scope.row)" /></el-tooltip></template></el-table-column>
       </el-table>
       <footer class="table-pagination"><el-pagination v-model:current-page="pagination.page" v-model:page-size="pagination.pageSize" :disabled="loading" :total="total" :page-sizes="[25, 50, 100]" layout="total, sizes, prev, pager, next" @change="loadLogs" /></footer>

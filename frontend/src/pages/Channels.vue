@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import type { CSSProperties } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { Aim, Connection, Delete, Edit, Plus, Refresh, RefreshLeft, RefreshRight, Search, Unlock } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import ChannelLatencySparkline from '@/components/ChannelLatencySparkline.vue'
@@ -16,6 +16,7 @@ import type {
 } from '@/types/gateway'
 import { request } from '@/utils/api'
 import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
+import { preserveHeadlessQuery } from '@/utils/headlessMode'
 
 interface MappingDraft {
   clientKey: string
@@ -52,6 +53,7 @@ const quickProgressMessages = [
   '渠道设置已完成，即将关闭…',
 ]
 const loading = ref(true)
+const route = useRoute()
 const router = useRouter()
 const saving = ref(false)
 const errorMessage = ref('')
@@ -707,7 +709,10 @@ async function testChannel(channel: Channel) {
 }
 
 function openChannelVerification(channel: Channel) {
-  void router.push({ name: 'channel-verification', query: { channelId: String(channel.id) } })
+  void router.push({
+    name: 'channel-verification',
+    query: preserveHeadlessQuery(route.query.headless, { channelId: String(channel.id) }),
+  })
 }
 
 async function resetChannelCircuit(channel: Channel) {

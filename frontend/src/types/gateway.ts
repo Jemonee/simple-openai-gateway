@@ -89,10 +89,21 @@ export interface ResourceCleanupResult {
 }
 
 export interface AdminSession {
-  /** Persistent administrator identifier. */
+  /** Persistent administrator or access-token subject identifier. */
   id: number
-  /** Administrator login name displayed in the console. */
+  /** Administrator username or access-token display name shown in the console. */
   username: string
+  /** Authentication method that determines the console feature set. */
+  loginType: 'admin' | 'access_token'
+  /** Client token owning this console session; omitted for administrator logins. */
+  tokenId?: number
+}
+
+export interface AvailableGatewayModel {
+  /** Persistent public model identifier permitted for the active console subject. */
+  id: number
+  /** Public model name accepted by the gateway. */
+  name: string
 }
 
 export interface ChannelModel {
@@ -1431,7 +1442,7 @@ export interface ApplicationSettings {
     routingQualityWeightPercent: number
     /** Recent traffic balance contribution percentage used for new routing decisions. */
     routingBalanceWeightPercent: number
-    /** Administrator login session lifetime in hours. */
+    /** Administrator login session lifetime in hours; zero means permanent. */
     sessionTTLHours: number
     /** Automatic detailed-log retention in days; zero means never delete automatically. */
     detailedLogRetentionDays: number

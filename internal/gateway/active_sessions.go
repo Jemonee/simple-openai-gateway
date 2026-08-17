@@ -25,6 +25,7 @@ var (
 type ActiveSessionQuery struct {
 	Session     string
 	Sources     []string
+	TokenID     uint64
 	ActiveSince time.Time
 	Page        int
 	PageSize    int
@@ -77,6 +78,9 @@ func activeSessionRows(db *gorm.DB, query ActiveSessionQuery) *gorm.DB {
 		db = db.Where("session_state.thread_source IN ?", explicitSources)
 	}
 	db = db.Where("session_state.last_activity_at >= ?", utcQueryTime(query.ActiveSince))
+	if query.TokenID > 0 {
+		db = db.Where("session_state.token_id = ?", query.TokenID)
+	}
 	if value := strings.TrimSpace(query.Session); value != "" {
 		pattern := "%" + value + "%"
 		db = db.Where(

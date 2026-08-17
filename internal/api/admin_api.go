@@ -23,14 +23,20 @@ type adminLoginRequest struct {
 	Password string `json:"password" binding:"required"`
 }
 
+type tokenLoginRequest struct {
+	AccessToken string `json:"accessToken" binding:"required"`
+}
+
 type adminPasswordRequest struct {
 	CurrentPassword string `json:"currentPassword" binding:"required"`
 	NewPassword     string `json:"newPassword" binding:"required"`
 }
 
 type adminSessionView struct {
-	ID       uint64 `json:"id"`
-	Username string `json:"username"`
+	ID        uint64 `json:"id"`
+	Username  string `json:"username"`
+	LoginType string `json:"loginType"`
+	TokenID   uint64 `json:"tokenId,omitempty"`
 }
 
 func NewAdminApi(auth *gateway.AdminAuthService, security *AdminSecurity) *AdminApi {
@@ -41,8 +47,9 @@ func (a *AdminApi) Register(router *gin.RouterGroup) {
 	auth := router.Group("/admin/auth")
 	auth.Use(a.security.VerifyOrigin)
 	auth.POST("/login", a.login)
-	auth.POST("/logout", a.security.RequireAdmin, a.logout)
-	auth.GET("/session", a.security.RequireAdmin, a.session)
+	auth.POST("/token-login", a.tokenLogin)
+	auth.POST("/logout", a.security.RequireConsole, a.logout)
+	auth.GET("/session", a.security.RequireConsole, a.session)
 	auth.PUT("/password", a.security.RequireAdmin, a.changePassword)
 }
 
@@ -68,8 +75,32 @@ func (a *AdminApi) login(c *gin.Context) {
 	}
 	a.security.clearLoginFailures(c.ClientIP())
 	a.security.setSessionCookie(c, rawToken)
-	view := adminSessionView{ID: user.ID, Username: user.Username}
-	c.JSON(http.StatusOK, common.S(&view))
+	c.JSON(http.StatusOK, common.S(adminView(&gateway.ConsolePrincipal{LoginType: gateway.ConsoleLoginAdmin, Admin: user})))
+}
+
+func (a *AdminApi) tokenLogin(c *gin.Context) {
+	if !a.security.allowLogin(c.ClientIP()) {
+		c.JSON(http.StatusTooManyRequests, common.F[any](http.StatusTooManyRequests, "登录尝试过多，请稍后再试"))
+		return
+	}
+	var request tokenLoginRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, common.F[any](http.StatusBadRequest, "访问令牌不能为空"))
+		return
+	}
+	rawToken, token, err := a.auth.LoginWithAccessToken(strings.TrimSpace(request.AccessToken))
+	if err != nil {
+		a.security.recordLoginFailure(c.ClientIP())
+		status := http.StatusUnauthorized
+		if !errors.Is(err, gateway.ErrInvalidCredentials) {
+			status = http.StatusInternalServerError
+		}
+		c.JSON(status, common.F[any](status, "访问令牌无效或已停用"))
+		return
+	}
+	a.security.clearLoginFailures(c.ClientIP())
+	a.security.setSessionCookie(c, rawToken)
+	c.JSON(http.StatusOK, common.S(adminView(&gateway.ConsolePrincipal{LoginType: gateway.ConsoleLoginAccessToken, AccessToken: token})))
 }
 
 func (a *AdminApi) logout(c *gin.Context) {
@@ -83,13 +114,27 @@ func (a *AdminApi) logout(c *gin.Context) {
 }
 
 func (a *AdminApi) session(c *gin.Context) {
-	user, ok := currentAdmin(c)
+	principal, ok := currentConsole(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, common.F[any](http.StatusUnauthorized, "管理员会话无效或已过期"))
+		c.JSON(http.StatusUnauthorized, common.F[any](http.StatusUnauthorized, "控制台会话无效或已过期"))
 		return
 	}
-	view := adminSessionView{ID: user.ID, Username: user.Username}
-	c.JSON(http.StatusOK, common.S(&view))
+	c.JSON(http.StatusOK, common.S(adminView(principal)))
+}
+
+func adminView(principal *gateway.ConsolePrincipal) *adminSessionView {
+	if principal != nil && principal.AccessToken != nil {
+		return &adminSessionView{
+			ID:        principal.AccessToken.ID,
+			Username:  principal.AccessToken.Name,
+			LoginType: gateway.ConsoleLoginAccessToken,
+			TokenID:   principal.AccessToken.ID,
+		}
+	}
+	if principal != nil && principal.Admin != nil {
+		return &adminSessionView{ID: principal.Admin.ID, Username: principal.Admin.Username, LoginType: gateway.ConsoleLoginAdmin}
+	}
+	return &adminSessionView{}
 }
 
 func (a *AdminApi) changePassword(c *gin.Context) {

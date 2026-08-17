@@ -45,6 +45,9 @@ func (a *SettingsApi) UpdateSettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, common.F[any](500, "保存配置失败: "+err.Error()))
 		return
 	}
+	if rawToken, err := c.Cookie(adminSessionCookie); err == nil {
+		a.security.refreshSessionCookie(c, rawToken)
+	}
 	var result any = a.configManager.GetConfig()
 	c.JSON(http.StatusOK, common.S(&result))
 }

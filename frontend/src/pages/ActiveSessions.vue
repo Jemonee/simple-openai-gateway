@@ -5,6 +5,7 @@ import { ChatDotRound, Refresh, Search, View } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import SessionLogDrawer from '@/components/SessionLogDrawer.vue'
 import SessionRelationBadge from '@/components/SessionRelationBadge.vue'
+import { useAdminAuth } from '@/composables/useAdminAuth'
 import type { ActiveSessionPage, CodexSessionDetail, CodexSessionSummary } from '@/types/gateway'
 import { request } from '@/utils/api'
 import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
@@ -23,6 +24,8 @@ const ACTIVE_SESSION_SOURCE_OPTIONS = [
 type ActiveSessionSource = typeof ACTIVE_SESSION_SOURCE_OPTIONS[number]['value']
 
 const loading = ref(true)
+const { user } = useAdminAuth()
+const isAccessTokenLogin = computed(() => user.value?.loginType === 'access_token')
 const errorMessage = ref('')
 const sessions = ref<CodexSessionSummary[]>([])
 const total = ref(0)
@@ -305,7 +308,7 @@ onMounted(() => {
           <template #default="scope">
             <div class="session-identity" :class="`is-${sessionClientSource(scope.row).kind}`" :aria-label="`来源 ${sessionClientSource(scope.row).label}`">
               <div class="session-title-line">
-                <strong class="session-name" :title="scope.row.sessionName || '未命名会话'">{{ scope.row.sessionName || '未命名会话' }}</strong><el-tag v-if="scope.row.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag>
+                <strong class="session-name" :title="scope.row.sessionName || '未命名会话'">{{ scope.row.sessionName || '未命名会话' }}</strong><el-tag v-if="!isAccessTokenLogin && scope.row.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag>
                 <span class="session-client"><i aria-hidden="true" />{{ sessionClientSource(scope.row).label }}</span>
               </div>
               <div class="session-meta">
@@ -319,7 +322,7 @@ onMounted(() => {
         <el-table-column label="路由 / 调用身份" min-width="290">
           <template #default="scope">
             <div class="route-cell">
-              <div v-if="scope.row.currentChannel" class="channel-title"><strong>{{ scope.row.currentChannel.channelName }}</strong><el-tag :type="channelState(scope.row).type" effect="plain">{{ channelState(scope.row).label }}</el-tag></div>
+              <div v-if="scope.row.currentChannel" class="channel-title"><strong>{{ scope.row.currentChannel.channelName }}</strong><el-tag v-if="!isAccessTokenLogin" :type="channelState(scope.row).type" effect="plain">{{ channelState(scope.row).label }}</el-tag></div>
               <div v-else class="channel-title"><strong class="muted-text">未进入上游渠道</strong><el-tag type="info" effect="plain">未分配</el-tag></div>
               <small><span>接口</span><code>{{ scope.row.latestEndpoint || '未知接口' }}</code><span>主模型</span><code>{{ scope.row.primaryModel || scope.row.latestModel || '未知模型' }}</code></small>
               <small v-if="(scope.row.latestModel && scope.row.latestModel !== scope.row.primaryModel) || scope.row.currentChannel"><span v-if="scope.row.latestModel && scope.row.latestModel !== scope.row.primaryModel">最近</span><code v-if="scope.row.latestModel && scope.row.latestModel !== scope.row.primaryModel">{{ scope.row.latestModel }}</code><span v-if="scope.row.currentChannel">上游</span><code v-if="scope.row.currentChannel">{{ scope.row.currentChannel.upstreamModel }}</code></small>

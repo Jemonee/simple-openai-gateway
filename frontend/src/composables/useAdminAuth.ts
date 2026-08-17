@@ -36,6 +36,15 @@ export function useAdminAuth() {
     checking.value = false
   }
 
+  async function loginWithAccessToken(accessToken: string): Promise<void> {
+    user.value = await request<AdminSession>('/admin/auth/token-login', {
+      method: 'POST',
+      body: JSON.stringify({ accessToken }),
+    })
+    authenticated.value = true
+    checking.value = false
+  }
+
   async function logout(): Promise<void> {
     try {
       await request<null>('/admin/auth/logout', { method: 'POST' })
@@ -60,6 +69,7 @@ export function useAdminAuth() {
     user: readonly(user),
     ensureSession,
     login,
+    loginWithAccessToken,
     logout,
     changePassword,
   }

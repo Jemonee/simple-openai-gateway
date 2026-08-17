@@ -20,6 +20,7 @@ type GatewayManagementApi struct {
 	management   *gateway.ManagementService
 	verification *gateway.VerificationService
 	security     *AdminSecurity
+	access       *gateway.ClientAccessService
 	estimator    *gateway.TokenEstimator
 }
 
@@ -36,27 +37,35 @@ type tokenCountView struct {
 	Counts []int64 `json:"counts"`
 }
 
-func NewGatewayManagementApi(management *gateway.ManagementService, verification *gateway.VerificationService, security *AdminSecurity, estimator *gateway.TokenEstimator) *GatewayManagementApi {
-	return &GatewayManagementApi{management: management, verification: verification, security: security, estimator: estimator}
+type availableModelView struct {
+	ID   uint64 `json:"id"`
+	Name string `json:"name"`
+}
+
+func NewGatewayManagementApi(management *gateway.ManagementService, verification *gateway.VerificationService, security *AdminSecurity, access *gateway.ClientAccessService, estimator *gateway.TokenEstimator) *GatewayManagementApi {
+	return &GatewayManagementApi{management: management, verification: verification, security: security, access: access, estimator: estimator}
 }
 
 func (a *GatewayManagementApi) Register(router *gin.RouterGroup) {
-	admin := router.Group("/admin/gateway")
-	admin.Use(a.security.RequireAdmin, a.security.VerifyOrigin)
+	console := router.Group("/admin/gateway")
+	console.Use(a.security.RequireConsole, a.security.VerifyOrigin)
+	console.GET("/dashboard", a.dashboard)
+	console.GET("/logs", a.logs)
+	console.GET("/logs/:requestId", a.logDetail)
+	console.GET("/sessions", a.sessions)
+	console.GET("/active-sessions", a.activeSessions)
+	console.GET("/sessions/detail", a.sessionDetail)
+	console.PUT("/sessions/title", a.renameSession)
+	console.GET("/models/available", a.availableModels)
 
-	admin.GET("/dashboard", a.dashboard)
-	admin.GET("/logs", a.logs)
+	admin := console.Group("")
+	admin.Use(a.security.RequireAdmin)
 	admin.GET("/logs/storage", a.logStorage)
 	admin.POST("/logs/clear-payloads", a.clearLogPayloads)
 	admin.POST("/logs/delete", a.deleteLogs)
-	admin.GET("/logs/:requestId", a.logDetail)
 	admin.POST("/token-counts", a.tokenCounts)
 	admin.GET("/circuit-records", a.circuitRecords)
 	admin.POST("/circuit-records/:id/reopen-mapping", a.reopenCircuitMapping)
-	admin.GET("/sessions", a.sessions)
-	admin.GET("/active-sessions", a.activeSessions)
-	admin.GET("/sessions/detail", a.sessionDetail)
-	admin.PUT("/sessions/title", a.renameSession)
 	admin.GET("/resources", a.resources)
 	admin.POST("/resources/cleanup", a.cleanupResources)
 	admin.GET("/resources/:id", a.resourceDetail)
@@ -90,6 +99,42 @@ func (a *GatewayManagementApi) Register(router *gin.RouterGroup) {
 	admin.PUT("/tokens/:id", a.updateToken)
 	admin.POST("/tokens/:id/rotate", a.rotateToken)
 	admin.DELETE("/tokens/:id", a.deleteToken)
+}
+
+func consoleTokenID(c *gin.Context) uint64 {
+	token, ok := currentAccessToken(c)
+	if !ok {
+		return 0
+	}
+	return token.ID
+}
+
+func (a *GatewayManagementApi) availableModels(c *gin.Context) {
+	principal, ok := currentConsole(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, common.F[any](http.StatusUnauthorized, "控制台会话无效或已过期"))
+		return
+	}
+	var models []gateway.GatewayModel
+	var err error
+	if principal.AccessToken != nil {
+		models, err = a.access.ListModels(c.Request.Context(), principal.AccessToken)
+	} else {
+		views, listErr := a.management.ListModels(c.Request.Context())
+		err = listErr
+		for _, view := range views {
+			models = append(models, view.GatewayModel)
+		}
+	}
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	items := make([]availableModelView, 0, len(models))
+	for _, model := range models {
+		items = append(items, availableModelView{ID: model.ID, Name: model.Name})
+	}
+	c.JSON(http.StatusOK, common.S(&items))
 }
 
 func (a *GatewayManagementApi) verifyChannel(c *gin.Context) {
@@ -518,7 +563,7 @@ func (a *GatewayManagementApi) dashboard(c *gin.Context) {
 		}
 		days = parsed
 	}
-	item, err := a.management.Dashboard(c.Request.Context(), days)
+	item, err := a.management.Dashboard(c.Request.Context(), days, consoleTokenID(c))
 	if err != nil {
 		managementError(c, err)
 		return
@@ -544,10 +589,17 @@ func (a *GatewayManagementApi) logs(c *gin.Context) {
 		query.To, _ = time.Parse(time.RFC3339, value)
 		query.To = query.To.UTC()
 	}
+	if tokenID := consoleTokenID(c); tokenID > 0 {
+		query.TokenID = tokenID
+		query.ChannelID = 0
+	}
 	item, err := a.management.Logs(c.Request.Context(), query)
 	if err != nil {
 		managementError(c, err)
 		return
+	}
+	if tokenID := consoleTokenID(c); tokenID > 0 {
+		gateway.RedactTokenScopedLogPage(item)
 	}
 	c.JSON(http.StatusOK, common.S(item))
 }
@@ -588,10 +640,13 @@ func (a *GatewayManagementApi) deleteLogs(c *gin.Context) {
 }
 
 func (a *GatewayManagementApi) logDetail(c *gin.Context) {
-	item, err := a.management.LogDetail(c.Request.Context(), c.Param("requestId"))
+	item, err := a.management.LogDetail(c.Request.Context(), c.Param("requestId"), consoleTokenID(c))
 	if err != nil {
 		managementError(c, err)
 		return
+	}
+	if consoleTokenID(c) > 0 {
+		gateway.RedactTokenScopedLogView(item)
 	}
 	c.JSON(http.StatusOK, common.S(item))
 }
@@ -613,10 +668,17 @@ func (a *GatewayManagementApi) sessions(c *gin.Context) {
 		query.To, _ = time.Parse(time.RFC3339, value)
 		query.To = query.To.UTC()
 	}
+	if tokenID := consoleTokenID(c); tokenID > 0 {
+		query.TokenID = tokenID
+		query.ChannelID = 0
+	}
 	item, err := a.management.SessionLogs(c.Request.Context(), query)
 	if err != nil {
 		managementError(c, err)
 		return
+	}
+	if consoleTokenID(c) > 0 {
+		gateway.RedactTokenScopedSessionPage(item)
 	}
 	c.JSON(http.StatusOK, common.S(item))
 }
@@ -629,10 +691,14 @@ func (a *GatewayManagementApi) activeSessions(c *gin.Context) {
 	}
 	query.Page, _ = strconv.Atoi(c.Query("page"))
 	query.PageSize, _ = strconv.Atoi(c.Query("pageSize"))
+	query.TokenID = consoleTokenID(c)
 	item, err := a.management.ActiveSessions(c.Request.Context(), query)
 	if err != nil {
 		managementError(c, err)
 		return
+	}
+	if consoleTokenID(c) > 0 {
+		gateway.RedactTokenScopedActiveSessionPage(item)
 	}
 	c.JSON(http.StatusOK, common.S(item))
 }
@@ -646,10 +712,16 @@ func (a *GatewayManagementApi) sessionDetail(c *gin.Context) {
 	query.TokenID, _ = strconv.ParseUint(c.Query("tokenId"), 10, 64)
 	query.Page, _ = strconv.Atoi(c.Query("page"))
 	query.PageSize, _ = strconv.Atoi(c.Query("pageSize"))
+	if tokenID := consoleTokenID(c); tokenID > 0 {
+		query.TokenID = tokenID
+	}
 	item, err := a.management.SessionLogDetail(c.Request.Context(), query)
 	if err != nil {
 		managementError(c, err)
 		return
+	}
+	if consoleTokenID(c) > 0 {
+		gateway.RedactTokenScopedSessionDetail(item)
 	}
 	c.JSON(http.StatusOK, common.S(item))
 }
@@ -658,6 +730,9 @@ func (a *GatewayManagementApi) renameSession(c *gin.Context) {
 	var input gateway.SessionTitleInput
 	if !bindManagementJSON(c, &input) {
 		return
+	}
+	if tokenID := consoleTokenID(c); tokenID > 0 {
+		input.TokenID = tokenID
 	}
 	if err := a.management.RenameSession(c.Request.Context(), input); err != nil {
 		managementError(c, err)
