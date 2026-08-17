@@ -52,6 +52,9 @@ func (a *OpenAIRelayApi) RegisterRoot(router *gin.Engine) {
 	v1.GET("/models", a.models)
 	v1.POST("/chat/completions", a.chatCompletions)
 	v1.POST("/responses", a.responses)
+	v1.POST("/images/generations", a.imageGenerations)
+	v1.POST("/images/edits", a.imageEdits)
+	v1.POST("/images/variations", a.imageVariations)
 }
 
 func (a *OpenAIRelayApi) models(c *gin.Context) {
@@ -84,6 +87,18 @@ func (a *OpenAIRelayApi) chatCompletions(c *gin.Context) {
 
 func (a *OpenAIRelayApi) responses(c *gin.Context) {
 	a.handleRelay(c, "responses")
+}
+
+func (a *OpenAIRelayApi) imageGenerations(c *gin.Context) {
+	a.handleRelay(c, "images/generations")
+}
+
+func (a *OpenAIRelayApi) imageEdits(c *gin.Context) {
+	a.handleRelay(c, "images/edits")
+}
+
+func (a *OpenAIRelayApi) imageVariations(c *gin.Context) {
+	a.handleRelay(c, "images/variations")
 }
 
 func (a *OpenAIRelayApi) handleRelay(c *gin.Context, endpoint string) {
@@ -123,7 +138,7 @@ func (a *OpenAIRelayApi) handleRelay(c *gin.Context, endpoint string) {
 	}
 	trace.Record(gateway.RelayStageRequestBodyRead, gateway.RelayStepCategoryGateway, 0, bodyReadStarted, nil, "bytes="+strconv.Itoa(len(body)))
 	payloadParseStarted := time.Now()
-	payload, err := gateway.ParseRelayPayload(body)
+	payload, err := gateway.ParseRelayPayloadWithContentType(body, c.GetHeader("Content-Type"))
 	if err != nil {
 		publicErr = &gateway.PublicError{Status: http.StatusBadRequest, Message: err.Error(), Type: "invalid_request_error", Code: "invalid_request"}
 		trace.Record(gateway.RelayStagePayloadParse, gateway.RelayStepCategoryGateway, 0, payloadParseStarted, err, "invalid_payload")

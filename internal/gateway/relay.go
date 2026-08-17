@@ -210,7 +210,7 @@ func (s *RelayService) RelayWithTrace(ctx context.Context, writer http.ResponseW
 	trace.Record(RelayStageSessionResolution, RelayStepCategoryGateway, 0, sessionStarted, resolutionErr, sessionDetail)
 	tokenEstimateStarted := time.Now()
 	execution.inputTokens = s.estimator.EstimateValue(payload.values)
-	if execution.inputTokens == 0 {
+	if execution.inputTokens == 0 && !payload.IsMultipart() {
 		execution.inputTokens = s.estimator.EstimateJSON(rawBody)
 	}
 	trace.Record(RelayStageTokenEstimation, RelayStepCategoryGateway, 0, tokenEstimateStarted, nil, fmt.Sprintf("input_tokens=%d", execution.inputTokens))
@@ -416,7 +416,7 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	execution.durationMS = 0
 	attempt := execution.attempts
 	payloadTransformStarted := time.Now()
-	body, err := execution.payload.UpstreamBody(candidate.Mapping.UpstreamModel, execution.endpoint, candidate.Channel.SupportsStreamUsage)
+	body, contentType, err := execution.payload.UpstreamRequestBody(candidate.Mapping.UpstreamModel, execution.endpoint, candidate.Channel.SupportsStreamUsage)
 	execution.trace.Record(RelayStagePayloadTransform, RelayStepCategoryGateway, attempt, payloadTransformStarted, err,
 		fmt.Sprintf("channel=%s model=%s", candidate.Channel.Name, candidate.Mapping.UpstreamModel))
 	if err != nil {
@@ -440,7 +440,7 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	}
 	copyUpstreamRequestHeaders(request.Header, incomingHeaders)
 	request.Header.Set("Authorization", "Bearer "+apiKey)
-	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Type", contentType)
 	request.Header.Set("X-Gateway-Request-Id", execution.requestID)
 	execution.trace.Record(RelayStageUpstreamRequestBuild, RelayStepCategoryGateway, attempt, requestBuildStarted, nil,
 		fmt.Sprintf("channel=%s bytes=%d", candidate.Channel.Name, len(body)))
@@ -581,7 +581,11 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 		return result, appErr
 	}
 	if !hasUsage && response.StatusCode >= 200 && response.StatusCode < 300 {
-		usage = Usage{InputTokens: execution.inputTokens, OutputTokens: s.estimator.EstimateJSON(responseBody), Source: "estimated_tiktoken"}
+		outputTokens := int64(0)
+		if !isImagesEndpoint(execution.endpoint) {
+			outputTokens = s.estimator.EstimateJSON(responseBody)
+		}
+		usage = Usage{InputTokens: execution.inputTokens, OutputTokens: outputTokens, Source: "estimated_tiktoken"}
 	}
 	success := response.StatusCode >= 200 && response.StatusCode < 300 && readErr == nil
 	estimatedCost, upstreamCost, costSource := attemptCosts(candidate.Mapping, usage, responseBody, success)
@@ -680,6 +684,10 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 			if execution.endpoint == "responses" && sseEventHasUsableResponseOutput(event) {
 				hasUsableOutput = true
 			}
+			if isImagesEndpoint(execution.endpoint) && sseEventHasUsableImageOutput(event) {
+				hasOutput = true
+				hasUsableOutput = true
+			}
 			appErr, hasApplicationError := sseApplicationError(event)
 			if terminalTracker.Observe(event) {
 				terminalSuccess = true
@@ -752,7 +760,7 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 	if !terminalSuccess && streamErr == nil && receivedEvent {
 		streamErr = io.ErrUnexpectedEOF
 	}
-	if terminalSuccess && streamErr == nil && execution.endpoint == "responses" && !hasUsableOutput {
+	if terminalSuccess && streamErr == nil && (execution.endpoint == "responses" || isImagesEndpoint(execution.endpoint)) && !hasUsableOutput {
 		streamErr = emptyUpstreamResponseFailure()
 	}
 	if !committed && streamErr != nil {
@@ -804,6 +812,9 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 
 func (s *RelayService) finishStream(ctx context.Context, execution *relayExecution, candidate RouteCandidate, selection RouteSelection, result attemptResult, usage Usage, upstreamSnapshot upstreamCostSnapshot, outputEstimate int64, responseID string, streamErr error, downstreamError bool, terminalSuccess bool) {
 	if usage.Source == "" {
+		if isImagesEndpoint(execution.endpoint) {
+			outputEstimate = 0
+		}
 		usage = Usage{InputTokens: execution.inputTokens, OutputTokens: outputEstimate, Source: "estimated_tiktoken"}
 	}
 	logCtx := context.WithoutCancel(ctx)
@@ -926,7 +937,19 @@ func endpointPath(endpoint string) string {
 	if endpoint == "responses" {
 		return "responses"
 	}
+	if isImagesEndpoint(endpoint) {
+		return endpoint
+	}
 	return "chat/completions"
+}
+
+func isImagesEndpoint(endpoint string) bool {
+	switch endpoint {
+	case "images/generations", "images/edits", "images/variations":
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldRetryStatus(status int) bool {
@@ -1180,6 +1203,12 @@ func validateBufferedApplicationResponse(endpoint string, data []byte) *upstream
 	if err := json.Unmarshal(data, &payload); err != nil || payload == nil {
 		return newApplicationFailure("upstream returned an invalid JSON response", "invalid_upstream_response")
 	}
+	if isImagesEndpoint(endpoint) {
+		if !imagesPayloadHasUsableOutput(payload) {
+			return emptyUpstreamResponseFailure()
+		}
+		return nil
+	}
 	switch endpoint {
 	case "responses":
 		status, _ := payload["status"].(string)
@@ -1200,6 +1229,19 @@ func validateBufferedApplicationResponse(endpoint string, data []byte) *upstream
 		}
 	}
 	return nil
+}
+
+func imagesPayloadHasUsableOutput(payload map[string]any) bool {
+	data, _ := payload["data"].([]any)
+	for _, value := range data {
+		item, _ := value.(map[string]any)
+		for _, key := range []string{"b64_json", "url"} {
+			if strings.TrimSpace(stringValue(item[key])) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func emptyUpstreamResponseFailure() *upstreamApplicationFailure {
@@ -1330,6 +1372,13 @@ func (t *sseTerminalTracker) Observe(event []byte) bool {
 		}
 		if t.endpoint == "responses" {
 			if payload["type"] == "response.completed" || payload["type"] == "response.done" {
+				return true
+			}
+			continue
+		}
+		if isImagesEndpoint(t.endpoint) {
+			typeName := strings.ToLower(strings.TrimSpace(stringValue(payload["type"])))
+			if typeName == "image_generation.completed" || typeName == "image_generation.done" {
 				return true
 			}
 			continue
@@ -1686,6 +1735,32 @@ func sseEventHasUsableResponseOutput(event []byte) bool {
 				if strings.TrimSpace(stringValue(payload[key])) != "" {
 					return true
 				}
+			}
+		}
+	}
+	return false
+}
+
+func sseEventHasUsableImageOutput(event []byte) bool {
+	for _, line := range bytes.Split(event, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+		var payload map[string]any
+		if json.Unmarshal(data, &payload) != nil {
+			continue
+		}
+		if imagesPayloadHasUsableOutput(payload) {
+			return true
+		}
+		for _, key := range []string{"b64_json", "url"} {
+			if strings.TrimSpace(stringValue(payload[key])) != "" {
+				return true
 			}
 		}
 	}

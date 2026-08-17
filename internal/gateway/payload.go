@@ -4,11 +4,28 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/textproto"
 	"strings"
 )
 
+type relayMultipartPart struct {
+	header   textproto.MIMEHeader
+	formName string
+	data     []byte
+}
+
+type relayMultipartPayload struct {
+	contentType string
+	boundary    string
+	parts       []relayMultipartPart
+}
+
 type RelayPayload struct {
 	values                map[string]any
+	multipart             *relayMultipartPayload
 	Model                 string
 	Stream                bool
 	PinnedChannelID       uint64
@@ -42,6 +59,18 @@ func (p *RelayPayload) ConfigureSession(sessionID string, sessionSource string, 
 }
 
 func ParseRelayPayload(data []byte) (*RelayPayload, error) {
+	return ParseRelayPayloadWithContentType(data, "application/json")
+}
+
+func ParseRelayPayloadWithContentType(data []byte, contentType string) (*RelayPayload, error) {
+	mediaType, parameters, mediaTypeErr := mime.ParseMediaType(contentType)
+	if mediaTypeErr == nil && strings.EqualFold(mediaType, "multipart/form-data") {
+		return parseMultipartRelayPayload(data, contentType, parameters["boundary"])
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/form-data") {
+		return nil, errors.New("request body must be valid multipart/form-data")
+	}
+
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	values := make(map[string]any)
@@ -53,8 +82,80 @@ func ParseRelayPayload(data []byte) (*RelayPayload, error) {
 	if model == "" {
 		return nil, errors.New("model is required")
 	}
+	return newRelayPayload(values, model), nil
+}
+
+func parseMultipartRelayPayload(data []byte, contentType string, boundary string) (*RelayPayload, error) {
+	if strings.TrimSpace(boundary) == "" {
+		return nil, errors.New("multipart boundary is required")
+	}
+	reader := multipart.NewReader(bytes.NewReader(data), boundary)
+	parts := make([]relayMultipartPart, 0)
+	values := make(map[string]any)
+	model := ""
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, errors.New("request body must be valid multipart/form-data")
+		}
+		partData, err := io.ReadAll(part)
+		_ = part.Close()
+		if err != nil {
+			return nil, errors.New("request body must be valid multipart/form-data")
+		}
+		formName := part.FormName()
+		parts = append(parts, relayMultipartPart{
+			header:   cloneMIMEHeader(part.Header),
+			formName: formName,
+			data:     partData,
+		})
+		if formName == "" || part.FileName() != "" {
+			continue
+		}
+		value := string(partData)
+		appendRelayFormValue(values, formName, value)
+		if formName == "model" && model == "" {
+			model = strings.TrimSpace(value)
+		}
+	}
+	if model == "" {
+		return nil, errors.New("model is required")
+	}
+	payload := newRelayPayload(values, model)
+	payload.multipart = &relayMultipartPayload{contentType: contentType, boundary: boundary, parts: parts}
+	return payload, nil
+}
+
+func appendRelayFormValue(values map[string]any, key string, value string) {
+	existing, exists := values[key]
+	if !exists {
+		values[key] = value
+		return
+	}
+	if items, ok := existing.([]any); ok {
+		values[key] = append(items, value)
+		return
+	}
+	values[key] = []any{existing, value}
+}
+
+func cloneMIMEHeader(source textproto.MIMEHeader) textproto.MIMEHeader {
+	cloned := make(textproto.MIMEHeader, len(source))
+	for key, values := range source {
+		cloned[key] = append([]string(nil), values...)
+	}
+	return cloned
+}
+
+func newRelayPayload(values map[string]any, model string) *RelayPayload {
 	payload := &RelayPayload{values: values, Model: model}
 	payload.Stream, _ = values["stream"].(bool)
+	if stream, ok := values["stream"].(string); ok {
+		payload.Stream = strings.EqualFold(strings.TrimSpace(stream), "true")
+	}
 	payload.PreviousResponseID, _ = values["previous_response_id"].(string)
 	applyCodexPayloadSession(payload, values)
 	payload.IsCompactionRequest, payload.CompactionTrigger = codexCompactionMetadataFromPayload(values)
@@ -68,7 +169,7 @@ func ParseRelayPayload(data []byte) (*RelayPayload, error) {
 		}
 	}
 	payload.RequestParametersJSON = loggableRequestParameters(values)
-	return payload, nil
+	return payload
 }
 
 func loggableRequestParameters(values map[string]any) string {
@@ -76,7 +177,8 @@ func loggableRequestParameters(values map[string]any) string {
 	for _, key := range []string{
 		"model", "stream", "max_output_tokens", "max_completion_tokens", "max_tokens", "temperature", "top_p",
 		"frequency_penalty", "presence_penalty", "seed", "n", "parallel_tool_calls", "store", "service_tier",
-		"truncation", "reasoning_effort", "verbosity", "max_tool_calls",
+		"truncation", "reasoning_effort", "verbosity", "max_tool_calls", "size", "quality", "background",
+		"output_format", "output_compression", "moderation", "response_format", "partial_images",
 	} {
 		if value, ok := loggableScalar(values[key]); ok {
 			parameters[key] = value
@@ -239,6 +341,36 @@ func stringValue(value any) string {
 }
 
 func (p *RelayPayload) UpstreamBody(upstreamModel string, endpoint string, includeStreamUsage bool) ([]byte, error) {
+	body, _, err := p.UpstreamRequestBody(upstreamModel, endpoint, includeStreamUsage)
+	return body, err
+}
+
+func (p *RelayPayload) UpstreamRequestBody(upstreamModel string, endpoint string, includeStreamUsage bool) ([]byte, string, error) {
+	if p.multipart != nil {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		if err := writer.SetBoundary(p.multipart.boundary); err != nil {
+			return nil, "", err
+		}
+		for _, item := range p.multipart.parts {
+			part, err := writer.CreatePart(cloneMIMEHeader(item.header))
+			if err != nil {
+				return nil, "", err
+			}
+			partData := item.data
+			if item.formName == "model" {
+				partData = []byte(upstreamModel)
+			}
+			if _, err := part.Write(partData); err != nil {
+				return nil, "", err
+			}
+		}
+		if err := writer.Close(); err != nil {
+			return nil, "", err
+		}
+		return body.Bytes(), p.multipart.contentType, nil
+	}
+
 	values := make(map[string]any, len(p.values)+1)
 	for key, value := range p.values {
 		values[key] = value
@@ -252,5 +384,10 @@ func (p *RelayPayload) UpstreamBody(upstreamModel string, endpoint string, inclu
 		streamOptions["include_usage"] = true
 		values["stream_options"] = streamOptions
 	}
-	return json.Marshal(values)
+	body, err := json.Marshal(values)
+	return body, "application/json", err
+}
+
+func (p *RelayPayload) IsMultipart() bool {
+	return p != nil && p.multipart != nil
 }
