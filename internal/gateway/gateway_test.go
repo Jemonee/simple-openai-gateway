@@ -3411,7 +3411,22 @@ func TestHighestCircuitLevelDisablesOnlyFailingMapping(t *testing.T) {
 
 func TestResetChannelCircuitClearsFailureState(t *testing.T) {
 	store := newTestStore(t)
-	_, _, channels, _ := createRouteFixture(t, store, RoutingPriorityWeighted, "http://one.invalid")
+	_, _, channels, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, "http://one.invalid")
+	manuallyDisabled := ChannelModel{ChannelID: channels[0].ID, ModelID: mappings[0].ModelID + 1, UpstreamModel: "manual-disabled-model", Priority: 10, Weight: 100, Enabled: false}
+	model := GatewayModel{Name: "manual-disabled-public-model", RoutingStrategy: RoutingPriorityWeighted, Enabled: true}
+	if err := store.db.Create(&model).Error; err != nil {
+		t.Fatal(err)
+	}
+	manuallyDisabled.ModelID = model.ID
+	if err := store.db.Create(&manuallyDisabled).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Model(&ChannelModel{}).Where("id = ?", mappings[0].ID).Updates(map[string]any{
+		"enabled":          false,
+		"circuit_disabled": true,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
 	openUntil := time.Now().Add(time.Minute)
 	if err := store.db.Model(&Channel{}).Where("id = ?", channels[0].ID).Updates(map[string]any{
 		"enabled":              false,
@@ -3432,6 +3447,20 @@ func TestResetChannelCircuitClearsFailureState(t *testing.T) {
 	}
 	if !channel.Enabled || channel.ConsecutiveFailures != 0 || channel.CircuitLevel != CircuitLevelClosed || channel.CircuitOpenUntil != nil || channel.LastError != "" {
 		t.Fatalf("reset channel = %+v", channel)
+	}
+	var restoredMapping ChannelModel
+	if err := store.db.First(&restoredMapping, mappings[0].ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !restoredMapping.Enabled || restoredMapping.CircuitDisabled {
+		t.Fatalf("circuit-disabled mapping was not restored = %+v", restoredMapping)
+	}
+	var retainedMapping ChannelModel
+	if err := store.db.First(&retainedMapping, manuallyDisabled.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if retainedMapping.Enabled || retainedMapping.CircuitDisabled {
+		t.Fatalf("manually disabled mapping changed = %+v", retainedMapping)
 	}
 	if err := management.ResetChannelCircuit(context.Background(), channel.ID+1000); !errors.Is(err, gorm.ErrRecordNotFound) {
 		t.Fatalf("missing channel error = %v", err)

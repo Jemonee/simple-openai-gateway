@@ -677,6 +677,12 @@ func (s *ManagementService) ResetChannelCircuit(ctx context.Context, id uint64) 
 		if result.RowsAffected == 0 {
 			return gorm.ErrRecordNotFound
 		}
+		if err := db.Model(&ChannelModel{}).Where("channel_id = ? AND circuit_disabled = ?", id, true).Updates(map[string]any{
+			"enabled":          true,
+			"circuit_disabled": false,
+		}).Error; err != nil {
+			return err
+		}
 		return resolveCircuitRecords(db, id, 0, 0, CircuitResolutionManualReset, time.Now())
 	})
 }
