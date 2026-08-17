@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -78,31 +77,32 @@ type VerificationReportView struct {
 }
 
 type VerificationSessionView struct {
-	ID                  string     `json:"id"`
-	ChannelID           uint64     `json:"channelId"`
-	ChannelName         string     `json:"channelName"`
-	ModelID             uint64     `json:"modelId"`
-	PublicModel         string     `json:"publicModel"`
-	UpstreamModel       string     `json:"upstreamModel"`
-	Mode                string     `json:"mode"`
-	Status              string     `json:"status"`
-	PlannedCount        int64      `json:"plannedCount"`
-	CompletedCount      int64      `json:"completedCount"`
-	Score               float64    `json:"score"`
-	Verdict             string     `json:"verdict"`
-	Summary             string     `json:"summary"`
-	RequestCount        int64      `json:"requestCount"`
-	SuccessCount        int64      `json:"successCount"`
-	InputTokens         int64      `json:"inputTokens"`
-	OutputTokens        int64      `json:"outputTokens"`
-	CachedTokens        int64      `json:"cachedTokens"`
-	CacheWriteTokens    int64      `json:"cacheWriteTokens"`
-	EstimatedCostMicros int64      `json:"estimatedCostMicros"`
-	UpstreamCostMicros  int64      `json:"upstreamCostMicros"`
-	ErrorMessage        string     `json:"errorMessage"`
-	StopRequestedAt     *time.Time `json:"stopRequestedAt"`
-	StartedAt           time.Time  `json:"startedAt"`
-	FinishedAt          time.Time  `json:"finishedAt"`
+	ID                     string     `json:"id"`
+	ChannelID              uint64     `json:"channelId"`
+	ChannelName            string     `json:"channelName"`
+	ModelID                uint64     `json:"modelId"`
+	PublicModel            string     `json:"publicModel"`
+	UpstreamModel          string     `json:"upstreamModel"`
+	Mode                   string     `json:"mode"`
+	NativeTransportBackend string     `json:"nativeTransportBackend"`
+	Status                 string     `json:"status"`
+	PlannedCount           int64      `json:"plannedCount"`
+	CompletedCount         int64      `json:"completedCount"`
+	Score                  float64    `json:"score"`
+	Verdict                string     `json:"verdict"`
+	Summary                string     `json:"summary"`
+	RequestCount           int64      `json:"requestCount"`
+	SuccessCount           int64      `json:"successCount"`
+	InputTokens            int64      `json:"inputTokens"`
+	OutputTokens           int64      `json:"outputTokens"`
+	CachedTokens           int64      `json:"cachedTokens"`
+	CacheWriteTokens       int64      `json:"cacheWriteTokens"`
+	EstimatedCostMicros    int64      `json:"estimatedCostMicros"`
+	UpstreamCostMicros     int64      `json:"upstreamCostMicros"`
+	ErrorMessage           string     `json:"errorMessage"`
+	StopRequestedAt        *time.Time `json:"stopRequestedAt"`
+	StartedAt              time.Time  `json:"startedAt"`
+	FinishedAt             time.Time  `json:"finishedAt"`
 }
 
 type VerificationSessionPage struct {
@@ -120,6 +120,7 @@ type VerificationAttemptView struct {
 	DetectorName          string    `json:"detectorName"`
 	ProbeID               string    `json:"probeId"`
 	RequestFormat         string    `json:"requestFormat"`
+	TransportBackend      string    `json:"transportBackend"`
 	ContextMode           string    `json:"contextMode"`
 	Effort                string    `json:"effort"`
 	Method                string    `json:"method"`
@@ -201,8 +202,12 @@ func (s *VerificationService) Start(ctx context.Context, input VerificationReque
 	if err != nil {
 		return nil, err
 	}
+	nativeTransportBackend, err := nativeTransportBackendForMode(mode, exec.LookPath)
+	if err != nil {
+		return nil, err
+	}
 	started := time.Now().UTC()
-	session := VerificationSession{ID: uuid.NewString(), ChannelID: channel.ID, ChannelName: channel.Name, ModelID: model.ID, PublicModel: model.Name, UpstreamModel: mapping.UpstreamModel, Mode: mode, Status: "running", PlannedCount: int64(len(jobs)), StartedAt: started, Summary: fmt.Sprintf("%s 指纹检测已启动，共 %d 个逻辑请求。", verificationModeLabel(mode), len(jobs))}
+	session := VerificationSession{ID: uuid.NewString(), ChannelID: channel.ID, ChannelName: channel.Name, ModelID: model.ID, PublicModel: model.Name, UpstreamModel: mapping.UpstreamModel, Mode: mode, NativeTransportBackend: nativeTransportBackend, Status: "running", PlannedCount: int64(len(jobs)), StartedAt: started, Summary: fmt.Sprintf("%s 指纹检测已启动，共 %d 个逻辑请求。", verificationModeLabel(mode), len(jobs))}
 	err = s.store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&session).Error; err != nil {
 			return err
@@ -225,6 +230,9 @@ func (s *VerificationService) Start(ctx context.Context, input VerificationReque
 	})
 	if err != nil {
 		return nil, err
+	}
+	if session.NativeTransportBackend == verificationTransportGoFallback {
+		logNativeGoFallback(session.ID, session.UpstreamModel, "node executable not found")
 	}
 	s.startRun(session.ID, claimedModel)
 	view := verificationSessionView(session)
@@ -420,7 +428,7 @@ func (s *VerificationService) runJob(ctx context.Context, session VerificationSe
 		if ctx.Err() != nil || s.stopRequested(session.ID) {
 			return s.cancelJob(job)
 		}
-		result, requestBody, responseBody, meta, err := s.performProbe(ctx, baseURL, apiKey, session.UpstreamModel, job.ID, manifest)
+		result, requestBody, responseBody, meta, err := s.performProbe(ctx, baseURL, apiKey, session.UpstreamModel, session.ID, session.NativeTransportBackend, manifest)
 		s.persistAttempt(session.ID, mapping, job, manifest, attemptNo, requestBody, responseBody, meta, err)
 		_ = s.store.db.Model(&VerificationJob{}).Where("id = ?", job.ID).Updates(map[string]any{"attempts_sent": attemptNo, "updated_at": time.Now().UTC()}).Error
 		if err == nil {
@@ -452,19 +460,20 @@ type verificationTransportResult struct {
 	UpstreamCostOK bool
 }
 type verificationTransportMeta struct {
-	Status        int
-	ContentType   string
-	LatencyMS     int64
-	Path          string
-	Stream        bool
-	RequestFormat string
+	Status           int
+	ContentType      string
+	LatencyMS        int64
+	Path             string
+	Stream           bool
+	RequestFormat    string
+	TransportBackend string
 }
 
-func (s *VerificationService) performProbe(ctx context.Context, baseURL, apiKey, model, jobID string, manifest verificationJobManifest) (verificationTransportResult, []byte, []byte, verificationTransportMeta, error) {
+func (s *VerificationService) performProbe(ctx context.Context, baseURL, apiKey, model, sessionID, nativeTransportBackend string, manifest verificationJobManifest) (verificationTransportResult, []byte, []byte, verificationTransportMeta, error) {
 	if manifest.RequestFormat == "native_codex" {
-		return s.performNativeProbe(ctx, baseURL, apiKey, model, jobID, manifest)
+		return s.performNativeProbe(ctx, baseURL, apiKey, model, sessionID, nativeTransportBackend, manifest)
 	}
-	return s.performNormalProbe(ctx, baseURL, apiKey, model, jobID, manifest)
+	return s.performNormalProbe(ctx, baseURL, apiKey, model, sessionID, manifest)
 }
 
 func (s *VerificationService) performNormalProbe(ctx context.Context, baseURL, apiKey, model, jobID string, manifest verificationJobManifest) (verificationTransportResult, []byte, []byte, verificationTransportMeta, error) {
@@ -501,7 +510,7 @@ func (s *VerificationService) performNormalProbe(ctx context.Context, baseURL, a
 	request.Header.Set("User-Agent", userAgent)
 	started := time.Now()
 	response, err := s.client.Do(request)
-	meta := verificationTransportMeta{Path: "/responses", Stream: true, RequestFormat: "normal", LatencyMS: time.Since(started).Milliseconds()}
+	meta := verificationTransportMeta{Path: "/responses", Stream: true, RequestFormat: "normal", TransportBackend: verificationTransportGoHTTP, LatencyMS: time.Since(started).Milliseconds()}
 	if err != nil {
 		return verificationTransportResult{}, body, nil, meta, err
 	}
@@ -687,89 +696,6 @@ func responsesUsage(response map[string]any) Usage {
 	return usage
 }
 
-func (s *VerificationService) materializeNativeAssets() (string, error) {
-	s.assetsOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "simple-openai-gateway-gpt56-")
-		if err != nil {
-			s.assetsErr = err
-			return
-		}
-		for _, name := range []string{"codex-native-transport.mjs", "fixed_32k_history.json", "native-0.147.0.raw"} {
-			data, err := verificationAssets.ReadFile("verification_assets/" + name)
-			if err != nil {
-				s.assetsErr = err
-				return
-			}
-			if name == "native-0.147.0.raw" && !bytes.Contains(data, []byte("\r\n\r\n")) {
-				data = bytes.ReplaceAll(data, []byte("\n"), []byte("\r\n"))
-			}
-			if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
-				s.assetsErr = err
-				return
-			}
-		}
-		s.assetsDir = dir
-	})
-	return s.assetsDir, s.assetsErr
-}
-
-func (s *VerificationService) performNativeProbe(ctx context.Context, baseURL, apiKey, model, jobID string, manifest verificationJobManifest) (verificationTransportResult, []byte, []byte, verificationTransportMeta, error) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		return verificationTransportResult{}, nil, nil, verificationTransportMeta{Path: "/responses", Stream: true, RequestFormat: "native_codex"}, errors.New("Node.js is required for Native Codex verification")
-	}
-	dir, err := s.materializeNativeAssets()
-	if err != nil {
-		return verificationTransportResult{}, nil, nil, verificationTransportMeta{}, err
-	}
-	messages, _ := json.Marshal(manifest.Messages)
-	args := []string{filepath.Join(dir, "codex-native-transport.mjs"), "send-native", "--profile", filepath.Join(dir, "native-0.147.0.raw"), "--url", baseURL + "/responses", "--model", model, "--timeout", "300000", "--input-json", "true", "--effort", manifest.Effort, "--capture-sanitized-request", "false"}
-	if manifest.ContextMode == "fixed_32k_history" {
-		args = append(args, "--history-file", filepath.Join(dir, "fixed_32k_history.json"))
-	}
-	cmd := exec.CommandContext(ctx, node, args...)
-	cmd.Stdin = bytes.NewReader(messages)
-	cmd.Env = verificationCommandEnv(apiKey)
-	started := time.Now()
-	output, err := cmd.Output()
-	meta := verificationTransportMeta{Path: "/responses", Stream: true, RequestFormat: "native_codex", LatencyMS: time.Since(started).Milliseconds()}
-	if err != nil {
-		return verificationTransportResult{}, messages, output, meta, fmt.Errorf("native Codex transport failed: %w", err)
-	}
-	var report struct {
-		Status  int                 `json:"status"`
-		Body    string              `json:"body"`
-		Headers map[string][]string `json:"headers"`
-	}
-	if err := json.Unmarshal(output, &report); err != nil {
-		return verificationTransportResult{}, messages, output, meta, err
-	}
-	meta.Status = report.Status
-	raw := []byte(report.Body)
-	if values := report.Headers["content-type"]; len(values) > 0 {
-		meta.ContentType = values[0]
-	}
-	if report.Status < 200 || report.Status >= 300 {
-		return verificationTransportResult{}, messages, raw, meta, fmt.Errorf("upstream returned HTTP %d", report.Status)
-	}
-	parsed, err := parseResponsesSSE(raw)
-	if err != nil {
-		return verificationTransportResult{}, messages, raw, meta, err
-	}
-	parsed.UpstreamCost, parsed.UpstreamCostOK = ParseUpstreamCostMicros(raw)
-	return parsed, messages, raw, meta, nil
-}
-
-func verificationCommandEnv(apiKey string) []string {
-	env := make([]string, 0, len(os.Environ())+1)
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "GPT56_NATIVE_AUTHORIZATION=") {
-			env = append(env, entry)
-		}
-	}
-	return append(env, "GPT56_NATIVE_AUTHORIZATION="+apiKey)
-}
-
 func retryableVerificationError(status int, err error) bool {
 	if err == nil {
 		return false
@@ -828,7 +754,7 @@ func (s *VerificationService) persistAttempt(sessionID string, mapping ChannelMo
 	reqText, reqTrunc := boundVerificationBody(requestBody)
 	respText, respTrunc := boundVerificationBody(responseBody)
 	now := time.Now().UTC()
-	attempt := VerificationAttempt{ID: uuid.NewString(), SessionID: sessionID, Sequence: job.Sequence, JobID: job.ID, AttemptNo: attemptNo, DetectorName: manifest.ProbeID, ProbeID: manifest.ProbeID, RequestFormat: manifest.RequestFormat, ContextMode: manifest.ContextMode, Effort: manifest.Effort, Method: http.MethodPost, Path: "/responses", Stream: true, RequestBody: reqText, RequestBodyTruncated: reqTrunc, ResponseBody: respText, ResponseBodyTruncated: respTrunc, ContentType: meta.ContentType, StatusCode: meta.Status, Outcome: outcome, ErrorMessage: truncateVerificationText(errorString(requestErr), 512), InputTokens: inputTokens, OutputTokens: outputTokens, CachedTokens: usage.CachedTokens, CacheWriteTokens: usage.CacheWriteTokens, EstimatedCostMicros: estimated, UpstreamCostMicros: upstreamCost, CostSource: costSource, UsageSource: usage.Source, LatencyMS: meta.LatencyMS, StartedAt: now.Add(-time.Duration(meta.LatencyMS) * time.Millisecond), FinishedAt: now}
+	attempt := VerificationAttempt{ID: uuid.NewString(), SessionID: sessionID, Sequence: job.Sequence, JobID: job.ID, AttemptNo: attemptNo, DetectorName: manifest.ProbeID, ProbeID: manifest.ProbeID, RequestFormat: manifest.RequestFormat, TransportBackend: meta.TransportBackend, ContextMode: manifest.ContextMode, Effort: manifest.Effort, Method: http.MethodPost, Path: "/responses", Stream: true, RequestBody: reqText, RequestBodyTruncated: reqTrunc, ResponseBody: respText, ResponseBodyTruncated: respTrunc, ContentType: meta.ContentType, StatusCode: meta.Status, Outcome: outcome, ErrorMessage: truncateVerificationText(errorString(requestErr), 512), InputTokens: inputTokens, OutputTokens: outputTokens, CachedTokens: usage.CachedTokens, CacheWriteTokens: usage.CacheWriteTokens, EstimatedCostMicros: estimated, UpstreamCostMicros: upstreamCost, CostSource: costSource, UsageSource: usage.Source, LatencyMS: meta.LatencyMS, StartedAt: now.Add(-time.Duration(meta.LatencyMS) * time.Millisecond), FinishedAt: now}
 	_ = s.store.db.Create(&attempt).Error
 }
 
@@ -1251,10 +1177,10 @@ func reportView(row VerificationReport) VerificationReportView {
 	return VerificationReportView{ID: row.ID, SessionID: row.SessionID, ChannelID: row.ChannelID, ChannelName: row.ChannelName, ModelID: row.ModelID, PublicModel: row.PublicModel, UpstreamModel: row.UpstreamModel, Mode: row.Mode, Score: row.Score, Verdict: row.Verdict, OutcomeCode: combined.OutcomeCode, Title: combined.Title, Summary: row.Summary, ClaimedModel: claimedModel, RequestModel: requestModel, FingerprintModel: combined.Fingerprint.Model, FingerprintMatch: combined.Fingerprint.Match, FingerprintClaimMismatch: combined.FingerprintClaimMismatch, Checks: checks, StartedAt: row.StartedAt, FinishedAt: row.FinishedAt, RequestCount: row.RequestCount, InputTokens: row.InputTokens, OutputTokens: row.OutputTokens, EstimatedCostMicros: row.EstimatedCostMicros, UpstreamCostMicros: row.UpstreamCostMicros}
 }
 func verificationSessionView(row VerificationSession) VerificationSessionView {
-	return VerificationSessionView{ID: row.ID, ChannelID: row.ChannelID, ChannelName: row.ChannelName, ModelID: row.ModelID, PublicModel: row.PublicModel, UpstreamModel: row.UpstreamModel, Mode: row.Mode, Status: row.Status, PlannedCount: row.PlannedCount, CompletedCount: row.CompletedCount, Score: row.Score, Verdict: row.Verdict, Summary: row.Summary, RequestCount: row.RequestCount, SuccessCount: row.SuccessCount, InputTokens: row.InputTokens, OutputTokens: row.OutputTokens, CachedTokens: row.CachedTokens, CacheWriteTokens: row.CacheWriteTokens, EstimatedCostMicros: row.EstimatedCostMicros, UpstreamCostMicros: row.UpstreamCostMicros, ErrorMessage: row.ErrorMessage, StopRequestedAt: row.StopRequestedAt, StartedAt: row.StartedAt, FinishedAt: row.FinishedAt}
+	return VerificationSessionView{ID: row.ID, ChannelID: row.ChannelID, ChannelName: row.ChannelName, ModelID: row.ModelID, PublicModel: row.PublicModel, UpstreamModel: row.UpstreamModel, Mode: row.Mode, NativeTransportBackend: row.NativeTransportBackend, Status: row.Status, PlannedCount: row.PlannedCount, CompletedCount: row.CompletedCount, Score: row.Score, Verdict: row.Verdict, Summary: row.Summary, RequestCount: row.RequestCount, SuccessCount: row.SuccessCount, InputTokens: row.InputTokens, OutputTokens: row.OutputTokens, CachedTokens: row.CachedTokens, CacheWriteTokens: row.CacheWriteTokens, EstimatedCostMicros: row.EstimatedCostMicros, UpstreamCostMicros: row.UpstreamCostMicros, ErrorMessage: row.ErrorMessage, StopRequestedAt: row.StopRequestedAt, StartedAt: row.StartedAt, FinishedAt: row.FinishedAt}
 }
 func verificationAttemptView(a VerificationAttempt) VerificationAttemptView {
-	return VerificationAttemptView{ID: a.ID, Sequence: a.Sequence, JobID: a.JobID, AttemptNo: a.AttemptNo, DetectorName: a.DetectorName, ProbeID: a.ProbeID, RequestFormat: a.RequestFormat, ContextMode: a.ContextMode, Effort: a.Effort, Method: a.Method, Path: a.Path, Stream: a.Stream, RequestBody: a.RequestBody, RequestBodyTruncated: a.RequestBodyTruncated, ResponseBody: a.ResponseBody, ResponseBodyTruncated: a.ResponseBodyTruncated, ContentType: a.ContentType, StatusCode: a.StatusCode, Outcome: a.Outcome, ErrorMessage: a.ErrorMessage, InputTokens: a.InputTokens, OutputTokens: a.OutputTokens, CachedTokens: a.CachedTokens, CacheWriteTokens: a.CacheWriteTokens, EstimatedCostMicros: a.EstimatedCostMicros, UpstreamCostMicros: a.UpstreamCostMicros, CostSource: a.CostSource, UsageSource: a.UsageSource, LatencyMS: a.LatencyMS, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt}
+	return VerificationAttemptView{ID: a.ID, Sequence: a.Sequence, JobID: a.JobID, AttemptNo: a.AttemptNo, DetectorName: a.DetectorName, ProbeID: a.ProbeID, RequestFormat: a.RequestFormat, TransportBackend: a.TransportBackend, ContextMode: a.ContextMode, Effort: a.Effort, Method: a.Method, Path: a.Path, Stream: a.Stream, RequestBody: a.RequestBody, RequestBodyTruncated: a.RequestBodyTruncated, ResponseBody: a.ResponseBody, ResponseBodyTruncated: a.ResponseBodyTruncated, ContentType: a.ContentType, StatusCode: a.StatusCode, Outcome: a.Outcome, ErrorMessage: a.ErrorMessage, InputTokens: a.InputTokens, OutputTokens: a.OutputTokens, CachedTokens: a.CachedTokens, CacheWriteTokens: a.CacheWriteTokens, EstimatedCostMicros: a.EstimatedCostMicros, UpstreamCostMicros: a.UpstreamCostMicros, CostSource: a.CostSource, UsageSource: a.UsageSource, LatencyMS: a.LatencyMS, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt}
 }
 
 func normalizeVerificationBaseURL(value string) (string, error) {

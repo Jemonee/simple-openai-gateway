@@ -374,6 +374,8 @@ export interface VerificationSession {
   upstreamModel: string
   /** Detector set used for the run. */
   mode: VerificationMode
+  /** Native Codex transport selected for this session; empty when the preset does not use Native probes. */
+  nativeTransportBackend: '' | 'node_mjs' | 'go_fallback'
   /** Session lifecycle state. */
   status: VerificationSessionStatus
   /** Frozen logical request count for the selected v4.1.1 preset. */
@@ -427,6 +429,8 @@ export interface VerificationAttempt {
   probeId: string
   /** Normal Responses or Native Codex request profile. */
   requestFormat: 'normal' | 'native_codex'
+  /** Concrete runtime transport that executed this HTTP attempt. */
+  transportBackend: '' | 'go_http' | 'node_mjs' | 'go_fallback'
   /** No history or frozen 32K history context. */
   contextMode: 'no_history' | 'fixed_32k_history'
   /** Reasoning effort sent to the upstream Responses endpoint. */

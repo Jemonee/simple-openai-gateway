@@ -76,6 +76,8 @@ const selectedSessionProgress = computed(() => {
   if (!session?.plannedCount) return 0
   return Math.min(100, Math.round(session.completedCount / session.plannedCount * 100))
 })
+const nativeGoFallbackActive = computed(() => selectedSession.value?.session.nativeTransportBackend === 'go_fallback'
+  || selectedSession.value?.attempts.some((attempt) => attempt.transportBackend === 'go_fallback') === true)
 const fingerprintRows = computed(() => {
   const values = selectedReport.value?.fingerprintMatch ?? {}
   return ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'].map((model) => ({ model, value: values[model] ?? 0 }))
@@ -169,7 +171,9 @@ function detectorLabel(name: string): string {
 }
 
 function requestProfile(attempt: VerificationAttempt): string {
-  const format = attempt.requestFormat === 'native_codex' ? 'Native Codex' : '普通 Responses'
+  const format = attempt.requestFormat === 'native_codex'
+    ? attempt.transportBackend === 'go_fallback' ? 'Native Codex（纯 Go 回退）' : 'Native Codex（Node.js）'
+    : '普通 Responses'
   const context = attempt.contextMode === 'fixed_32k_history' ? '32K 历史' : '短上下文'
   return `${format} · ${context} · ${attempt.effort}`
 }
@@ -270,7 +274,11 @@ async function runVerification() {
     selectedReport.value = null
     selectedSession.value = { session, attempts: [] }
     drawerOpen.value = true
-    ElMessage.success(`${modeLabel(filters.mode)}档检测已启动，共 ${session.plannedCount} 个逻辑请求`)
+    if (session.nativeTransportBackend === 'go_fallback') {
+      ElMessage.warning(`${modeLabel(filters.mode)}档检测已启动；未检测到 Node.js，Native Codex 探针将使用纯 Go 回退`)
+    } else {
+      ElMessage.success(`${modeLabel(filters.mode)}档检测已启动，共 ${session.plannedCount} 个逻辑请求`)
+    }
     await loadVerificationData()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '渠道验证启动失败')
@@ -362,7 +370,7 @@ onUnmounted(() => {
       <el-skeleton v-if="loading" :rows="6" animated />
       <el-table v-else-if="sessions.length" :data="sessions" row-key="id" table-layout="fixed">
         <el-table-column label="开始时间" min-width="168"><template #default="scope">{{ formatDate(scope.row.startedAt) }}</template></el-table-column>
-        <el-table-column label="渠道 / 模型" min-width="220"><template #default="scope"><div class="model-cell"><strong>{{ scope.row.channelName }} · {{ scope.row.publicModel }}</strong><small>{{ scope.row.upstreamModel }}</small></div></template></el-table-column>
+        <el-table-column label="渠道 / 模型" min-width="220"><template #default="scope"><div class="model-cell"><strong>{{ scope.row.channelName }} · {{ scope.row.publicModel }}</strong><small>{{ scope.row.upstreamModel }}</small><el-tag v-if="scope.row.nativeTransportBackend === 'go_fallback'" type="warning" effect="plain" size="small">纯 Go 回退</el-tag></div></template></el-table-column>
         <el-table-column label="档位" width="72"><template #default="scope">{{ modeLabel(scope.row.mode) }}</template></el-table-column>
         <el-table-column label="任务进度" width="130" align="right"><template #default="scope"><div class="progress-cell"><strong>{{ scope.row.completedCount }} / {{ scope.row.plannedCount }}</strong><small>{{ scope.row.requestCount }} 次 HTTP</small></div></template></el-table-column>
         <el-table-column label="费用" width="120" align="right"><template #default="scope">{{ formatUSD(scope.row.upstreamCostMicros) }}</template></el-table-column>
@@ -380,6 +388,16 @@ onUnmounted(() => {
           <div><span class="report-channel">{{ selectedSession.session.channelName }}</span><h2>{{ selectedSession.session.publicModel }}</h2><p>{{ selectedSession.session.upstreamModel }} · {{ modeLabel(selectedSession.session.mode) }}档 · {{ formatDate(selectedSession.session.startedAt) }}</p></div>
           <div class="report-state"><el-tag :type="selectedReport ? verdictType(selectedReport.verdict) : sessionStatusType(selectedSession.session.status)" effect="plain">{{ selectedReport ? verdictLabel(selectedReport.verdict) : sessionStatusLabel(selectedSession.session.status) }}</el-tag></div>
         </div>
+
+        <el-alert
+          v-if="nativeGoFallbackActive"
+          class="native-fallback-alert"
+          title="Native Codex 正在使用纯 Go 回退传输"
+          description="运行环境未检测到可用的 Node.js。TLS 传输指纹与默认 Node.js 路径存在差异；会话和每次 HTTP 尝试均已标记实际执行器。"
+          type="warning"
+          show-icon
+          :closable="false"
+        />
 
         <section v-if="['running', 'stopping'].includes(selectedSession.session.status)" class="run-progress-detail">
           <div><strong>{{ selectedSession.session.completedCount }} / {{ selectedSession.session.plannedCount }}</strong><span>逻辑任务</span></div>
@@ -413,7 +431,7 @@ onUnmounted(() => {
           <el-empty v-if="!selectedSession.attempts.length" description="尚无调用记录" />
           <el-collapse v-else accordion>
             <el-collapse-item v-for="attempt in selectedSession.attempts" :key="attempt.id" :name="attempt.id">
-              <template #title><div class="attempt-title-row"><span>#{{ attempt.sequence }}.{{ attempt.attemptNo }} · {{ detectorLabel(attempt.probeId) }}</span><el-tag :type="attemptStatusType(attempt)" effect="plain" size="small">{{ attemptStatusLabel(attempt) }}</el-tag><strong>{{ formatUSD(attempt.upstreamCostMicros) }}</strong></div></template>
+              <template #title><div class="attempt-title-row"><span class="attempt-name">#{{ attempt.sequence }}.{{ attempt.attemptNo }} · {{ detectorLabel(attempt.probeId) }}</span><el-tag v-if="attempt.transportBackend === 'go_fallback'" type="warning" effect="plain" size="small">纯 Go 回退</el-tag><el-tag :type="attemptStatusType(attempt)" effect="plain" size="small">{{ attemptStatusLabel(attempt) }}</el-tag><strong>{{ formatUSD(attempt.upstreamCostMicros) }}</strong></div></template>
               <div class="attempt-meta"><span>{{ requestProfile(attempt) }}</span><span>{{ formatDuration(attempt.latencyMs) }}</span><span>{{ attempt.jobId }}</span></div>
               <div class="attempt-metrics"><span>输入 {{ formatCompactNumber(attempt.inputTokens) }}</span><span>输出 {{ formatCompactNumber(attempt.outputTokens) }}</span><span>缓存读 {{ formatCompactNumber(attempt.cachedTokens) }}</span><span>估算 {{ formatUSD(attempt.estimatedCostMicros) }}</span></div>
               <p v-if="attempt.errorMessage" class="attempt-error-text">{{ attempt.errorMessage }}</p>
@@ -459,6 +477,7 @@ onUnmounted(() => {
 .report-channel { color: var(--hongfen-primary); font-size: 12px; font-weight: 700; }
 .report-header h2 { margin: 4px 0; color: var(--hongfen-text); font-size: 21px; }
 .report-header p { margin: 0; color: var(--hongfen-text-muted); font-size: 12px; }
+.native-fallback-alert { margin: 14px 0; }
 .run-progress-detail { display: grid; gap: 12px; margin: 16px 0; border-bottom: 1px solid var(--hongfen-border); padding-bottom: 16px; }
 .run-progress-detail > div:first-child { display: flex; align-items: baseline; gap: 8px; }
 .run-progress-detail > div:first-child strong { color: var(--hongfen-primary); font-size: 22px; font-variant-numeric: tabular-nums; }
@@ -489,7 +508,7 @@ onUnmounted(() => {
 .section-label { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; color: var(--hongfen-text); }
 .section-label span { color: var(--hongfen-text-muted); font-size: 11px; }
 .attempt-title-row { display: flex; align-items: center; gap: 9px; width: 100%; padding-right: 8px; color: var(--hongfen-text); font-size: 12px; }
-.attempt-title-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attempt-title-row > .attempt-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attempt-title-row strong { margin-left: auto; font: 11px var(--hongfen-font-mono); }
 .attempt-meta, .attempt-metrics { display: flex; flex-wrap: wrap; gap: 5px 14px; color: var(--hongfen-text-muted); font-size: 11px; }
 .attempt-meta span:last-child { overflow-wrap: anywhere; }

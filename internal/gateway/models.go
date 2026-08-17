@@ -216,39 +216,40 @@ type VerificationReport struct {
 
 // VerificationSession stores the auditable lifecycle and aggregate usage for one channel verification run.
 type VerificationSession struct {
-	ID                  string     `gorm:"size:36;primaryKey" json:"id"`
-	ChannelID           uint64     `gorm:"index;not null" json:"channelId"`
-	ChannelName         string     `gorm:"size:120;not null" json:"channelName"`
-	ModelID             uint64     `gorm:"index;not null" json:"modelId"`
-	PublicModel         string     `gorm:"size:160;not null" json:"publicModel"`
-	UpstreamModel       string     `gorm:"size:200;not null" json:"upstreamModel"`
-	Mode                string     `gorm:"size:16;not null" json:"mode"`
-	Status              string     `gorm:"size:16;index;not null" json:"status"`
-	PlannedCount        int64      `gorm:"not null;default:0" json:"plannedCount"`
-	CompletedCount      int64      `gorm:"not null;default:0" json:"completedCount"`
-	Score               float64    `gorm:"not null;default:0" json:"score"`
-	Verdict             string     `gorm:"size:64;index" json:"verdict"`
-	Summary             string     `gorm:"size:512" json:"summary"`
-	RequestCount        int64      `gorm:"not null;default:0" json:"requestCount"`
-	SuccessCount        int64      `gorm:"not null;default:0" json:"successCount"`
-	InputTokens         int64      `gorm:"not null;default:0" json:"inputTokens"`
-	OutputTokens        int64      `gorm:"not null;default:0" json:"outputTokens"`
-	CachedTokens        int64      `gorm:"not null;default:0" json:"cachedTokens"`
-	CacheWriteTokens    int64      `gorm:"not null;default:0" json:"cacheWriteTokens"`
-	EstimatedCostMicros int64      `gorm:"not null;default:0" json:"estimatedCostMicros"`
-	UpstreamCostMicros  int64      `gorm:"not null;default:0" json:"upstreamCostMicros"`
-	ErrorMessage        string     `gorm:"size:512" json:"errorMessage"`
-	StopRequestedAt     *time.Time `gorm:"index" json:"stopRequestedAt"`
-	StartedAt           time.Time  `gorm:"index;not null" json:"startedAt"`
-	FinishedAt          time.Time  `gorm:"index" json:"finishedAt"`
+	ID                     string     `gorm:"size:36;primaryKey" json:"id"`
+	ChannelID              uint64     `gorm:"index;not null" json:"channelId"`
+	ChannelName            string     `gorm:"size:120;not null" json:"channelName"`
+	ModelID                uint64     `gorm:"index;not null" json:"modelId"`
+	PublicModel            string     `gorm:"size:160;not null" json:"publicModel"`
+	UpstreamModel          string     `gorm:"size:200;not null" json:"upstreamModel"`
+	Mode                   string     `gorm:"size:16;not null" json:"mode"`
+	NativeTransportBackend string     `gorm:"size:24;not null;default:''" json:"nativeTransportBackend"`
+	Status                 string     `gorm:"size:16;index;not null" json:"status"`
+	PlannedCount           int64      `gorm:"not null;default:0" json:"plannedCount"`
+	CompletedCount         int64      `gorm:"not null;default:0" json:"completedCount"`
+	Score                  float64    `gorm:"not null;default:0" json:"score"`
+	Verdict                string     `gorm:"size:64;index" json:"verdict"`
+	Summary                string     `gorm:"size:512" json:"summary"`
+	RequestCount           int64      `gorm:"not null;default:0" json:"requestCount"`
+	SuccessCount           int64      `gorm:"not null;default:0" json:"successCount"`
+	InputTokens            int64      `gorm:"not null;default:0" json:"inputTokens"`
+	OutputTokens           int64      `gorm:"not null;default:0" json:"outputTokens"`
+	CachedTokens           int64      `gorm:"not null;default:0" json:"cachedTokens"`
+	CacheWriteTokens       int64      `gorm:"not null;default:0" json:"cacheWriteTokens"`
+	EstimatedCostMicros    int64      `gorm:"not null;default:0" json:"estimatedCostMicros"`
+	UpstreamCostMicros     int64      `gorm:"not null;default:0" json:"upstreamCostMicros"`
+	ErrorMessage           string     `gorm:"size:512" json:"errorMessage"`
+	StopRequestedAt        *time.Time `gorm:"index" json:"stopRequestedAt"`
+	StartedAt              time.Time  `gorm:"index;not null" json:"startedAt"`
+	FinishedAt             time.Time  `gorm:"index" json:"finishedAt"`
 }
 
 // VerificationJob freezes one logical detector probe. HTTP retries share this identity
 // and never replenish their budget after a restart.
 type VerificationJob struct {
 	ID            string    `gorm:"size:64;primaryKey" json:"id"`
-	SessionID     string    `gorm:"size:36;index:idx_verification_job_session_status,priority:1;not null" json:"sessionId"`
-	Sequence      int       `gorm:"index;not null" json:"sequence"`
+	SessionID     string    `gorm:"size:36;index:idx_verification_job_session_status,priority:1;index:idx_verification_job_session_sequence,priority:1;not null" json:"sessionId"`
+	Sequence      int       `gorm:"index;index:idx_verification_job_session_sequence,priority:2;not null" json:"sequence"`
 	ProbeID       string    `gorm:"size:80;index;not null" json:"probeId"`
 	RequestFormat string    `gorm:"size:24;not null" json:"requestFormat"`
 	ContextMode   string    `gorm:"size:32;not null" json:"contextMode"`
@@ -264,12 +265,13 @@ type VerificationJob struct {
 // VerificationAttempt stores bounded request/response evidence for one detector call.
 type VerificationAttempt struct {
 	ID                    string    `gorm:"size:36;primaryKey" json:"id"`
-	SessionID             string    `gorm:"size:36;index;not null" json:"sessionId"`
-	Sequence              int       `gorm:"not null" json:"sequence"`
+	SessionID             string    `gorm:"size:36;index;index:idx_verification_attempt_session_order,priority:1;not null" json:"sessionId"`
+	Sequence              int       `gorm:"not null;index:idx_verification_attempt_session_order,priority:2" json:"sequence"`
 	JobID                 string    `gorm:"size:64;index;not null;default:''" json:"jobId"`
-	AttemptNo             int       `gorm:"not null;default:0" json:"attemptNo"`
+	AttemptNo             int       `gorm:"not null;default:0;index:idx_verification_attempt_session_order,priority:3" json:"attemptNo"`
 	ProbeID               string    `gorm:"size:80;index" json:"probeId"`
 	RequestFormat         string    `gorm:"size:24" json:"requestFormat"`
+	TransportBackend      string    `gorm:"size:24" json:"transportBackend"`
 	ContextMode           string    `gorm:"size:32" json:"contextMode"`
 	Effort                string    `gorm:"size:16" json:"effort"`
 	DetectorName          string    `gorm:"size:80;index;not null" json:"detectorName"`
