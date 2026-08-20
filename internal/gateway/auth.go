@@ -16,9 +16,19 @@ var (
 	ErrInvalidSession     = errors.New("invalid or expired administrator session")
 )
 
+type AdminUserView struct {
+	ID        uint64    `json:"id"`
+	Username  string    `json:"username"`
+	Role      string    `json:"role"`
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 const (
 	ConsoleLoginAdmin       = "admin"
 	ConsoleLoginAccessToken = "access_token"
+	ConsoleRoleAdmin        = "admin"
+	ConsoleRoleUser         = "user"
 )
 
 // ConsolePrincipal is the authenticated identity for a management-console session.
@@ -30,7 +40,24 @@ type ConsolePrincipal struct {
 }
 
 func (p *ConsolePrincipal) IsAdmin() bool {
-	return p != nil && p.LoginType == ConsoleLoginAdmin && p.Admin != nil
+	return p != nil && p.LoginType == ConsoleLoginAdmin && p.Admin != nil && (p.Admin.Role == "" || p.Admin.Role == ConsoleRoleAdmin)
+}
+
+func (p *ConsolePrincipal) UserID() uint64 {
+	if p == nil {
+		return 0
+	}
+	if p.Admin != nil {
+		return p.Admin.ID
+	}
+	if p.AccessToken != nil {
+		return p.AccessToken.OwnerUserID
+	}
+	return 0
+}
+
+func (p *ConsolePrincipal) IsUser() bool {
+	return p != nil && p.Admin != nil && p.LoginType == ConsoleLoginAdmin && !p.IsAdmin()
 }
 
 func (p *ConsolePrincipal) TokenID() uint64 {
@@ -198,5 +225,85 @@ func (s *AdminAuthService) ChangePassword(userID uint64, currentPassword string,
 			return err
 		}
 		return db.Where("user_id = ?", user.ID).Delete(&AdminSession{}).Error
+	})
+}
+
+func validateAccountPassword(password string) error {
+	if len(password) < 12 {
+		return errors.New("password must contain at least 12 characters")
+	}
+	return nil
+}
+
+func normalizeAccountRole(role string) (string, error) {
+	role = strings.ToLower(strings.TrimSpace(role))
+	if role == "" {
+		role = ConsoleRoleUser
+	}
+	if role != ConsoleRoleAdmin && role != ConsoleRoleUser {
+		return "", errors.New("unsupported account role")
+	}
+	return role, nil
+}
+
+func (s *AdminAuthService) ListUsers() ([]AdminUserView, error) {
+	var users []AdminUser
+	if err := s.store.db.Order("id asc").Find(&users).Error; err != nil {
+		return nil, err
+	}
+	views := make([]AdminUserView, 0, len(users))
+	for _, user := range users {
+		role := user.Role
+		if role == "" {
+			role = ConsoleRoleAdmin
+		}
+		views = append(views, AdminUserView{ID: user.ID, Username: user.Username, Role: role, Enabled: user.Enabled, CreatedAt: user.CreatedAt})
+	}
+	return views, nil
+}
+
+func (s *AdminAuthService) CreateUser(username, password, role string) (*AdminUserView, error) {
+	username = strings.TrimSpace(username)
+	if username == "" || len([]rune(username)) > 80 {
+		return nil, errors.New("username is required and must be at most 80 characters")
+	}
+	if err := validateAccountPassword(password); err != nil {
+		return nil, err
+	}
+	role, err := normalizeAccountRole(role)
+	if err != nil {
+		return nil, err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), 12)
+	if err != nil {
+		return nil, err
+	}
+	user := AdminUser{Username: username, PasswordHash: string(hash), Role: role, Enabled: true}
+	if err := s.store.db.Create(&user).Error; err != nil {
+		return nil, err
+	}
+	return &AdminUserView{ID: user.ID, Username: user.Username, Role: user.Role, Enabled: user.Enabled, CreatedAt: user.CreatedAt}, nil
+}
+
+func (s *AdminAuthService) ResetPassword(userID uint64, nextPassword string) error {
+	if userID == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	if err := validateAccountPassword(nextPassword); err != nil {
+		return err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(nextPassword), 12)
+	if err != nil {
+		return err
+	}
+	return s.store.db.Transaction(func(db *gorm.DB) error {
+		result := db.Model(&AdminUser{}).Where("id = ?", userID).Updates(map[string]any{"password_hash": string(hash), "enabled": true})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return db.Where("user_id = ?", userID).Delete(&AdminSession{}).Error
 	})
 }

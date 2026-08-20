@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
@@ -32,9 +33,16 @@ func TestSaveCodexConfigurationReusesMatchingTokenAndPreservesDocuments(t *testi
 	if err := store.db.Create(&model).Error; err != nil {
 		t.Fatal(err)
 	}
+	channel := Channel{Name: "codex-channel", BaseURL: "http://codex.invalid/v1", APIKeyCipher: "cipher", Enabled: true}
+	if err := store.db.Create(&channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Create(&ChannelModel{ChannelID: channel.ID, ModelID: model.ID, UpstreamModel: model.Name, Priority: 1, Weight: 1, Enabled: true}).Error; err != nil {
+		t.Fatal(err)
+	}
 	token := ClientToken{
 		Name: "existing", KeyHash: hashSecret(secret), KeyPrefix: visibleKeyPrefix(secret),
-		Enabled: true, AllowAllModels: true, RPM: 60, MaxConcurrency: 10,
+		Enabled: true, AllowAllModels: true, AllowAllChannels: true, RPM: 60, MaxConcurrency: 10,
 	}
 	if err := store.db.Create(&token).Error; err != nil {
 		t.Fatal(err)
@@ -125,6 +133,13 @@ func TestSaveCodexConfigurationCreatesScopedTokenAndNewProvider(t *testing.T) {
 	if err := store.db.Create(&model).Error; err != nil {
 		t.Fatal(err)
 	}
+	channel := Channel{Name: "codex-channel", BaseURL: "http://codex.invalid/v1", APIKeyCipher: "cipher", Enabled: true}
+	if err := store.db.Create(&channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Create(&ChannelModel{ChannelID: channel.ID, ModelID: model.ID, UpstreamModel: model.Name, Priority: 1, Weight: 1, Enabled: true}).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	view, err := NewManagementService(store).SaveCodexConfiguration(context.Background(), CodexConfigurationInput{
 		ProviderMode: codexProviderModeNew,
@@ -157,7 +172,7 @@ func TestSaveCodexConfigurationCreatesScopedTokenAndNewProvider(t *testing.T) {
 	if err := store.db.First(&token, view.AuthTokenID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if token.Name != "local Codex" || token.KeyHash != hashSecret(secret) || token.AllowAllModels {
+	if token.Name != "local Codex" || token.KeyHash != hashSecret(secret) || token.AllowAllModels || !token.AllowAllChannels {
 		t.Fatalf("created token = %+v", token)
 	}
 	var link ClientTokenModel
@@ -166,5 +181,50 @@ func TestSaveCodexConfigurationCreatesScopedTokenAndNewProvider(t *testing.T) {
 	}
 	if link.ModelID != model.ID {
 		t.Fatalf("created token model = %+v", link)
+	}
+}
+
+func TestSaveCodexConfigurationRejectsModelWithoutAllowedChannel(t *testing.T) {
+	store := newTestStore(t)
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	model := GatewayModel{Name: "channel-scoped-model", RoutingStrategy: RoutingPriorityWeighted, Enabled: true}
+	if err := store.db.Create(&model).Error; err != nil {
+		t.Fatal(err)
+	}
+	channels := []Channel{
+		{Name: "allowed", BaseURL: "http://allowed.invalid/v1", APIKeyCipher: "cipher", Enabled: true},
+		{Name: "model-route", BaseURL: "http://model.invalid/v1", APIKeyCipher: "cipher", Enabled: true},
+	}
+	if err := store.db.Create(&channels).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Create(&ChannelModel{ChannelID: channels[1].ID, ModelID: model.ID, UpstreamModel: model.Name, Priority: 1, Weight: 1, Enabled: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	allowAllChannels := false
+	management := NewManagementService(store)
+	issued, err := management.CreateToken(context.Background(), ClientTokenInput{
+		Name: "channel-scoped", Enabled: true, AllowAllModels: true, AllowAllChannels: &allowAllChannels,
+		RPM: 60, MaxConcurrency: 10, ChannelIDs: []uint64{channels[0].ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestCodexFiles(t, home, `[model_providers.custom]
+name = "custom"
+base_url = "http://127.0.0.1:8000/v1"
+`, `{"OPENAI_API_KEY":"`+issued.Secret+`"}`)
+
+	_, err = management.SaveCodexConfiguration(context.Background(), CodexConfigurationInput{
+		ProviderMode: codexProviderModeExisting,
+		ProviderName: "custom",
+		Model:        model.Name,
+		BaseURL:      "http://127.0.0.1:8888/v1",
+		TokenMode:    codexTokenModeExisting,
+		TokenID:      issued.Token.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "没有可用于该模型的渠道") {
+		t.Fatalf("SaveCodexConfiguration() error = %v", err)
 	}
 }

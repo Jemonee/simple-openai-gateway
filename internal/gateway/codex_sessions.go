@@ -627,8 +627,11 @@ func (s *Store) mergePrecedingCodexTitleRequest(db *gorm.DB, log *RelayRequestLo
 	if err := db.Select("id, token_id, codex_session_id, codex_session_source, session_name, codex_prompt_hash, codex_title_request, codex_generated_title, request_body, response_body, latency_ms, duration_ms, created_at").
 		Where("token_id = ? AND codex_session_id <> ? AND codex_session_source = ? AND outcome = ?", log.TokenID, log.CodexSessionID, "prompt_cache_key", RelayOutcomeSuccess).
 		Where("created_at >= ? AND created_at <= ?", mainStartedAt.Add(-codexTitleStartTolerance), mainStartedAt.Add(codexTitleMatchWindow)).
-		Where("codex_title_request = ? OR request_parameters_json LIKE ?", true, `%"text_format":"json_schema"%`).
+		Where("codex_title_request = ? OR request_parameters_json LIKE ? OR EXISTS (SELECT 1 FROM relay_request_payloads p WHERE p.request_id = relay_request_logs.id AND p.request_parameters_json LIKE ?)", true, `%"text_format":"json_schema"%`, `%"text_format":"json_schema"%`).
 		Order("created_at DESC, id DESC").Limit(8).Find(&candidates).Error; err != nil {
+		return "", err
+	}
+	if err := hydrateRelayRequestPayloads(db, candidates, true); err != nil {
 		return "", err
 	}
 	for index := range candidates {
@@ -680,6 +683,9 @@ func (s *Store) mergeFollowingCodexTitleRequest(db *gorm.DB, log *RelayRequestLo
 		Where("codex_session_source = ? AND codex_title_request = ? AND outcome = ?", "prompt_cache_key", false, RelayOutcomeSuccess).
 		Where("created_at >= ? AND created_at <= ?", titleStartedAt.Add(-codexTitleStartTolerance), titleStartedAt.Add(codexTitleMatchWindow)).
 		Order("created_at DESC, id DESC").Limit(8).Find(&candidates).Error; err != nil {
+		return "", "", err
+	}
+	if err := hydrateRelayRequestPayloads(db, candidates, true); err != nil {
 		return "", "", err
 	}
 	for index := range candidates {

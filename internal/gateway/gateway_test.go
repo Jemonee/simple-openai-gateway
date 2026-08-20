@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -157,7 +158,7 @@ func newTestStore(t *testing.T) *Store {
 	if err := db.AutoMigrate(
 		&AdminUser{}, &AdminSession{}, &Channel{}, &GatewayModel{}, &ChannelModel{},
 		&CircuitRecord{},
-		&ClientToken{}, &ClientTokenModel{}, &RelayRequestLog{}, &GatewayResource{}, &RequestResource{}, &RelaySessionState{}, &ModelAgentContextWindow{}, &RelayChatSessionClaim{}, &RelayAttemptLog{}, &RelayStepLog{}, &TokenDailyStat{}, &ChannelModelDailyStat{}, &GatewayMigration{},
+		&ClientToken{}, &ClientTokenModel{}, &ClientTokenChannel{}, &RelayRequestLog{}, &RelayRequestPayload{}, &GatewayResource{}, &RequestResource{}, &RelaySessionState{}, &ModelAgentContextWindow{}, &RelayChatSessionClaim{}, &RelayAttemptLog{}, &RelayAttemptPayload{}, &RelayStepLog{}, &TokenDailyStat{}, &ChannelModelDailyStat{}, &GatewayMigration{},
 		&ResponseAffinity{}, &SessionAffinity{},
 	); err != nil {
 		t.Fatal(err)
@@ -176,7 +177,7 @@ func createRouteFixture(t *testing.T, store *Store, strategy string, channelURLs
 	if err := store.db.Create(&model).Error; err != nil {
 		t.Fatal(err)
 	}
-	token := ClientToken{Name: "test", KeyHash: hashSecret("sk-test"), KeyPrefix: "sk-test", Enabled: true, AllowAllModels: true, RPM: 60, MaxConcurrency: 10}
+	token := ClientToken{Name: "test", KeyHash: hashSecret("sk-test"), KeyPrefix: "sk-test", Enabled: true, AllowAllModels: true, AllowAllChannels: true, RPM: 60, MaxConcurrency: 10}
 	if err := store.db.Create(&token).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -286,13 +287,77 @@ func TestRecordFirstResponseUsesRequestClock(t *testing.T) {
 	}
 }
 
-func TestRecordFirstTokenUsesAttemptClock(t *testing.T) {
+func TestRecordOutputTokenUsesAttemptClock(t *testing.T) {
 	attemptStarted := time.Now().Add(-100 * time.Millisecond)
 	execution := &relayExecution{startedAt: attemptStarted.Add(-50 * time.Millisecond)}
 	result := attemptResult{}
-	recordFirstToken([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"), &result, execution, attemptStarted)
+	recordOutputToken([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"), &result, execution, attemptStarted)
 	if result.firstTokenMS < 100 || execution.firstTokenMS != result.firstTokenMS {
 		t.Fatalf("attempt first token = %d, request first token = %d", result.firstTokenMS, execution.firstTokenMS)
+	}
+}
+
+func TestFinalizeTokensPerSecondUsesCompleteGenerationWindow(t *testing.T) {
+	result := attemptResult{
+		firstTokenMS: 500,
+		durationMS:   1_000,
+	}
+	execution := &relayExecution{}
+	finalizeTokensPerSecond(&result, execution, 100)
+	if result.generationDurationMS != 500 || math.Abs(result.tokensPerSecond-200) > 0.000001 {
+		t.Fatalf("attempt throughput = duration %d ms, %.6f token/s", result.generationDurationMS, result.tokensPerSecond)
+	}
+	if execution.generationDurationMS != result.generationDurationMS || execution.tokensPerSecond != result.tokensPerSecond {
+		t.Fatalf("request throughput = duration %d ms, %.6f token/s", execution.generationDurationMS, execution.tokensPerSecond)
+	}
+
+	invalid := attemptResult{firstTokenMS: 500, durationMS: 500}
+	finalizeTokensPerSecond(&invalid, &relayExecution{}, 100)
+	if invalid.generationDurationMS != 0 || invalid.tokensPerSecond != 0 {
+		t.Fatalf("single-event throughput should not be sampled: %+v", invalid)
+	}
+}
+
+func TestNormalizedTokensPerSecondRebuildsBufferedHistoricalSample(t *testing.T) {
+	tokensPerSecond, generationMS := normalizedTokensPerSecond(100, 1_000, 200, 100, 2_000)
+	if generationMS != 700 || math.Abs(tokensPerSecond-(100.0*1000/700)) > 0.000001 {
+		t.Fatalf("normalized throughput = duration %d ms, %.6f", generationMS, tokensPerSecond)
+	}
+}
+
+func TestRecordSessionTokensPerSecondPersistsRunningAverage(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now().UTC()
+	if err := recordSessionTokensPerSecond(store.db, 7, "session-throughput", 100, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordSessionTokensPerSecond(store.db, 7, "session-throughput", 300, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var state RelaySessionState
+	if err := store.db.First(&state, "token_id = ? AND session_id = ?", 7, "session-throughput").Error; err != nil {
+		t.Fatal(err)
+	}
+	if state.TokensPerSecondSampleCount != 2 || math.Abs(state.AverageTokensPerSecond-200) > 0.000001 {
+		t.Fatalf("session throughput state = %+v", state)
+	}
+}
+
+func TestTokenIDsForUserIncludesOnlyOwnedAndWebChatTokens(t *testing.T) {
+	store := newTestStore(t)
+	tokens := []ClientToken{
+		{Name: "owned", KeyHash: hashSecret("sk-owned"), KeyPrefix: "sk-owned", OwnerUserID: 7, Enabled: true},
+		{Name: "other", KeyHash: hashSecret("sk-other"), KeyPrefix: "sk-other", OwnerUserID: 8, Enabled: true},
+	}
+	if err := store.db.Create(&tokens).Error; err != nil {
+		t.Fatal(err)
+	}
+	ids, err := NewManagementService(store).TokenIDsForUser(context.Background(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || !slices.Contains(ids, tokens[0].ID) || !slices.Contains(ids, webChatTokenIDForUser(7)) || slices.Contains(ids, tokens[1].ID) {
+		t.Fatalf("user token scope = %v", ids)
 	}
 }
 
@@ -742,8 +807,8 @@ func TestBackfillResponsePhaseTimingsRunsOnce(t *testing.T) {
 func TestBackfillCostFieldsZerosRecentFailuresAndPreservesOlderAggregates(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().UTC()
-	recentDate := now.Format(time.DateOnly)
-	oldDate := now.Add(-(DetailedLogRetentionDays*24*time.Hour + 48*time.Hour)).Format(time.DateOnly)
+	recentDate := eastEightDate(now)
+	oldDate := eastEightDate(now.Add(-(DetailedLogRetentionDays*24*time.Hour + 48*time.Hour)))
 	logs := []RelayRequestLog{
 		{ID: "recent-success", TokenID: 9, Endpoint: "responses", RequestedModel: "model-a", StatusCode: http.StatusOK, InputTokens: 10, EstimatedCost: 11, CreatedAt: now.Add(-time.Hour)},
 		{ID: "recent-failure", TokenID: 9, Endpoint: "responses", RequestedModel: "model-a", StatusCode: http.StatusBadGateway, InputTokens: 20, EstimatedCost: 22, CreatedAt: now.Add(-30 * time.Minute)},
@@ -789,7 +854,7 @@ func TestBackfillCostFieldsZerosRecentFailuresAndPreservesOlderAggregates(t *tes
 	if err := store.db.First(&recentStat, "date = ? AND token_id = ?", recentDate, 9).Error; err != nil {
 		t.Fatal(err)
 	}
-	if recentStat.RequestCount != 2 || recentStat.SuccessCount != 1 || recentStat.InputTokens != 0 || recentStat.OutputTokens != 0 || recentStat.EstimatedCost != 11 || recentStat.UpstreamCost != 11 {
+	if recentStat.RequestCount != 2 || recentStat.SuccessCount != 1 || recentStat.InputTokens != 10 || recentStat.OutputTokens != 0 || recentStat.EstimatedCost != 11 || recentStat.UpstreamCost != 11 {
 		t.Fatalf("rebuilt recent stat = %+v", recentStat)
 	}
 	var oldStat TokenDailyStat
@@ -947,7 +1012,7 @@ func TestDashboardUsesTokenStatsWithoutDoubleCountingDetails(t *testing.T) {
 	}
 	requestLog := RelayRequestLog{
 		ID: "detail-request", TokenID: 1, Endpoint: "responses", RequestedModel: "public-model",
-		StatusCode: http.StatusOK, InputTokens: 10, OutputTokens: 2, EstimatedCost: 50, UpstreamCost: 30, CreatedAt: now,
+		StatusCode: http.StatusOK, InputTokens: 10, OutputTokens: 2, EstimatedCost: 50, UpstreamCost: 30, TokensPerSecond: 240, CreatedAt: now,
 	}
 	if err := store.db.Create(&requestLog).Error; err != nil {
 		t.Fatal(err)
@@ -963,14 +1028,48 @@ func TestDashboardUsesTokenStatsWithoutDoubleCountingDetails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.Requests != 1 || summary.InputTokens != 10 || summary.OutputTokens != 2 || summary.EstimatedCost != 50 || summary.UpstreamCost != 30 || summary.AverageFirstTokenMS != 0 || summary.AverageLatency != 0 || summary.AverageDurationMS != 0 {
+	if summary.Requests != 1 || summary.InputTokens != 10 || summary.OutputTokens != 2 || summary.EstimatedCost != 50 || summary.UpstreamCost != 30 || summary.AverageFirstTokenMS != 0 || summary.AverageLatency != 0 || summary.AverageDurationMS != 0 || math.Abs(summary.AverageTokensPerSecond-240) > 0.000001 || summary.TokensPerSecondSampleCount != 1 {
 		t.Fatalf("dashboard totals = %+v", summary)
 	}
-	if len(summary.Channels) != 1 || summary.Channels[0].Requests != 1 || summary.Channels[0].Successes != 1 || summary.Channels[0].SuccessRate != 1 || summary.Channels[0].InputTokens != 10 || summary.Channels[0].OutputTokens != 2 || summary.Channels[0].UpstreamCost != 30 || len(summary.Models) != 1 || summary.Models[0].Requests != 1 || summary.Models[0].Successes != 1 || summary.Models[0].SuccessRate != 1 || summary.Models[0].InputTokens != 10 || summary.Models[0].OutputTokens != 2 || summary.Models[0].UpstreamCost != 30 {
+	if len(summary.Channels) != 1 || summary.Channels[0].Requests != 1 || summary.Channels[0].Successes != 1 || summary.Channels[0].SuccessRate != 1 || summary.Channels[0].InputTokens != 10 || summary.Channels[0].OutputTokens != 2 || summary.Channels[0].UpstreamCost != 30 || math.Abs(summary.Channels[0].AverageTokensPerSecond-240) > 0.000001 || summary.Channels[0].TokensPerSecondSampleCount != 1 || len(summary.Models) != 1 || summary.Models[0].Requests != 1 || summary.Models[0].Successes != 1 || summary.Models[0].SuccessRate != 1 || summary.Models[0].InputTokens != 10 || summary.Models[0].OutputTokens != 2 || summary.Models[0].UpstreamCost != 30 || math.Abs(summary.Models[0].AverageTokensPerSecond-240) > 0.000001 || summary.Models[0].TokensPerSecondSampleCount != 1 {
 		t.Fatalf("dashboard breakdowns = channels %+v models %+v", summary.Channels, summary.Models)
 	}
 	if len(summary.Daily) != 1 || summary.Daily[0].Date != eastEightDate(now) || summary.Daily[0].Requests != 1 {
 		t.Fatalf("dashboard daily = %+v", summary.Daily)
+	}
+}
+
+func TestDashboardWeightsTPSByCompleteGenerationTime(t *testing.T) {
+	store := newTestStore(t)
+	_, _, channels, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, "http://one.invalid")
+	now := time.Now().UTC()
+	logs := []RelayRequestLog{
+		{ID: "weighted-tps-fast", TokenID: 1, Endpoint: "responses", RequestedModel: "public-model", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, OutputTokens: 100, LatencyMS: 100, FirstTokenMS: 100, DurationMS: 1_000, TokensPerSecond: 2_000, CreatedAt: now},
+		{ID: "weighted-tps-slow", TokenID: 1, Endpoint: "responses", RequestedModel: "public-model", StatusCode: http.StatusOK, Outcome: RelayOutcomeSuccess, OutputTokens: 100, LatencyMS: 100, FirstTokenMS: 100, DurationMS: 3_000, TokensPerSecond: 2_000, CreatedAt: now.Add(time.Millisecond)},
+	}
+	if err := store.db.Create(&logs).Error; err != nil {
+		t.Fatal(err)
+	}
+	attempts := []RelayAttemptLog{
+		{RequestID: logs[0].ID, ChannelID: channels[0].ID, ChannelName: channels[0].Name, ChannelModelID: mappings[0].ID, UpstreamModel: mappings[0].UpstreamModel, Success: true, CreatedAt: logs[0].CreatedAt},
+		{RequestID: logs[1].ID, ChannelID: channels[0].ID, ChannelName: channels[0].Name, ChannelModelID: mappings[0].ID, UpstreamModel: mappings[0].UpstreamModel, Success: true, CreatedAt: logs[1].CreatedAt},
+	}
+	if err := store.db.Create(&attempts).Error; err != nil {
+		t.Fatal(err)
+	}
+	summary, err := NewManagementService(store).Dashboard(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 200.0 * 1000 / 3_600
+	if summary.TokensPerSecondSampleCount != 2 || math.Abs(summary.AverageTokensPerSecond-want) > 0.000001 {
+		t.Fatalf("dashboard TPS = %.6f from %d samples, want %.6f", summary.AverageTokensPerSecond, summary.TokensPerSecondSampleCount, want)
+	}
+	if len(summary.Channels) != 1 || summary.Channels[0].TokensPerSecondSampleCount != 2 || math.Abs(summary.Channels[0].AverageTokensPerSecond-want) > 0.000001 {
+		t.Fatalf("channel TPS = %+v, want %.6f", summary.Channels, want)
+	}
+	if len(summary.Models) != 1 || summary.Models[0].TokensPerSecondSampleCount != 2 || math.Abs(summary.Models[0].AverageTokensPerSecond-want) > 0.000001 {
+		t.Fatalf("model TPS = %+v, want %.6f", summary.Models, want)
 	}
 }
 
@@ -1456,6 +1555,39 @@ func TestListChannelsIncludesRecentModelSuccessMetrics(t *testing.T) {
 	}
 }
 
+func TestListChannelsIncludesAverageTokensPerSecond(t *testing.T) {
+	store := newTestStore(t)
+	secret, err := store.secretBox.Encrypt("upstream-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel := Channel{Name: "throughput", BaseURL: "https://throughput.example/v1", APIKeyCipher: secret, Enabled: true}
+	if err := store.db.Create(&channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	attempts := []RelayAttemptLog{
+		{RequestID: "throughput-1", ChannelID: channel.ID, ChannelModelID: 1, UpstreamModel: "upstream-model", OutputTokens: 100, FirstTokenMS: 100, DurationMS: 300, TokensPerSecond: 200, Success: true, CreatedAt: now.Add(-time.Hour)},
+		{RequestID: "throughput-2", ChannelID: channel.ID, ChannelModelID: 1, UpstreamModel: "upstream-model", OutputTokens: 60, FirstTokenMS: 200, DurationMS: 500, TokensPerSecond: 400, Success: true, CreatedAt: now.Add(-30 * time.Minute)},
+		{RequestID: "throughput-no-sample", ChannelID: channel.ID, ChannelModelID: 1, UpstreamModel: "upstream-model", OutputTokens: 100, FirstTokenMS: 0, DurationMS: 300, Success: true, CreatedAt: now.Add(-20 * time.Minute)},
+	}
+	if err := store.db.Create(&attempts).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	views, err := NewManagementService(store).ListChannels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("channel views = %+v", views)
+	}
+	metrics := views[0].Metrics
+	if metrics.TokensPerSecondSampleCount != 2 || math.Abs(metrics.AverageTokensPerSecond-320) > 0.000001 {
+		t.Fatalf("throughput metrics = %+v", metrics)
+	}
+}
+
 func TestDiscoverChannelModelsUsesStoredSecretAndNormalizesList(t *testing.T) {
 	store := newTestStore(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -1553,6 +1685,24 @@ func TestDiscoverChannelModelsIncludesExactOfficialPrice(t *testing.T) {
 	}
 }
 
+func TestDiscoverChatGPTOAuthModelsIncludesExactOfficialPrice(t *testing.T) {
+	store := newTestStore(t)
+	models := []GatewayModel{
+		{Name: "gpt-5.6-sol", RoutingStrategy: RoutingPriorityWeighted, Enabled: true},
+		{Name: "gpt-5.6-sol-custom", RoutingStrategy: RoutingPriorityWeighted, Enabled: true},
+	}
+	if err := store.db.Create(&models).Error; err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := NewManagementService(store).DiscoverChannelModels(context.Background(), ChannelModelDiscoveryInput{AuthType: ChannelTypeChatGPTOAuth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Models) != 2 || discovery.Models[0].OfficialPrice == nil || discovery.Models[0].OfficialPrice.InputPriceMicros != 5_000_000 || discovery.Models[1].OfficialPrice != nil {
+		t.Fatalf("ChatGPT OAuth discovery prices = %+v", discovery.Models)
+	}
+}
+
 func TestClientAccessLimitsAndModelPermission(t *testing.T) {
 	store := newTestStore(t)
 	access := NewClientAccessService(store)
@@ -1602,7 +1752,7 @@ func TestClientAccessListModelsReturnsOnlyRoutableModels(t *testing.T) {
 		channelEnabled bool
 		circuitUntil   *time.Time
 	}
-	createModel := func(name string, state routeState) GatewayModel {
+	createModel := func(name string, state routeState) (GatewayModel, Channel) {
 		t.Helper()
 		model := GatewayModel{Name: name, RoutingStrategy: RoutingPriorityWeighted, Enabled: true}
 		if err := store.db.Create(&model).Error; err != nil {
@@ -1637,12 +1787,12 @@ func TestClientAccessListModelsReturnsOnlyRoutableModels(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		return model
+		return model, channel
 	}
 
-	available := createModel("available", routeState{modelEnabled: true, mappingEnabled: true, channelEnabled: true})
+	available, availableChannel := createModel("available", routeState{modelEnabled: true, mappingEnabled: true, channelEnabled: true})
 	expiredCircuit := now.Add(-time.Minute)
-	expired := createModel("expired-circuit", routeState{modelEnabled: true, mappingEnabled: true, channelEnabled: true, circuitUntil: &expiredCircuit})
+	expired, _ := createModel("expired-circuit", routeState{modelEnabled: true, mappingEnabled: true, channelEnabled: true, circuitUntil: &expiredCircuit})
 	createModel("disabled-model", routeState{mappingEnabled: true, channelEnabled: true})
 	createModel("disabled-mapping", routeState{modelEnabled: true, channelEnabled: true})
 	createModel("disabled-channel", routeState{modelEnabled: true, mappingEnabled: true})
@@ -1652,7 +1802,7 @@ func TestClientAccessListModelsReturnsOnlyRoutableModels(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	allModels, err := access.ListModels(context.Background(), &ClientToken{ID: 1, Enabled: true, AllowAllModels: true})
+	allModels, err := access.ListModels(context.Background(), &ClientToken{ID: 1, Enabled: true, AllowAllModels: true, AllowAllChannels: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1660,7 +1810,7 @@ func TestClientAccessListModelsReturnsOnlyRoutableModels(t *testing.T) {
 		t.Fatalf("all-model token models = %+v", allModels)
 	}
 
-	restrictedToken := &ClientToken{ID: 2, Enabled: true}
+	restrictedToken := &ClientToken{ID: 2, Enabled: true, AllowAllChannels: true}
 	if err := store.db.Create(&ClientTokenModel{TokenID: restrictedToken.ID, ModelID: expired.ID}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -1670,6 +1820,33 @@ func TestClientAccessListModelsReturnsOnlyRoutableModels(t *testing.T) {
 	}
 	if len(restrictedModels) != 1 || restrictedModels[0].ID != expired.ID {
 		t.Fatalf("restricted token models = %+v", restrictedModels)
+	}
+
+	channelRestrictedToken := &ClientToken{ID: 3, Enabled: true, AllowAllModels: true}
+	if err := store.db.Create(&ClientTokenChannel{TokenID: channelRestrictedToken.ID, ChannelID: availableChannel.ID}).Error; err != nil {
+		t.Fatal(err)
+	}
+	channelRestrictedModels, err := access.ListModels(context.Background(), channelRestrictedToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(channelRestrictedModels) != 1 || channelRestrictedModels[0].ID != available.ID {
+		t.Fatalf("channel-restricted token models = %+v", channelRestrictedModels)
+	}
+
+	intersectionToken := &ClientToken{ID: 4, Enabled: true}
+	if err := store.db.Create(&ClientTokenModel{TokenID: intersectionToken.ID, ModelID: expired.ID}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Create(&ClientTokenChannel{TokenID: intersectionToken.ID, ChannelID: availableChannel.ID}).Error; err != nil {
+		t.Fatal(err)
+	}
+	intersectionModels, err := access.ListModels(context.Background(), intersectionToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(intersectionModels) != 0 {
+		t.Fatalf("model and channel intersection = %+v", intersectionModels)
 	}
 }
 
@@ -1840,6 +2017,59 @@ func TestRouterPlanUsesSingleCandidateWithoutRoutingAlgorithm(t *testing.T) {
 	}
 }
 
+func TestRouterUsesChatGPTOAuthReferencePricingWithoutPersistedBackfill(t *testing.T) {
+	store := newTestStore(t)
+	token, model, channels, mappings := createRouteFixture(t, store, RoutingLowestCost, "http://one.invalid")
+	staleCachePrice := int64(99)
+	if err := store.db.Model(&Channel{}).Where("id = ?", channels[0].ID).Update("auth_type", ChannelTypeChatGPTOAuth).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Model(&ChannelModel{}).Where("id = ?", mappings[0].ID).Updates(map[string]any{
+		"upstream_model":                "gpt-5.6-sol",
+		"input_price_micros":            99,
+		"output_price_micros":           99,
+		"cached_input_price_micros":     staleCachePrice,
+		"cache_write_price_micros":      staleCachePrice,
+		"price_multiplier_basis_points": 25_000,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := NewRouter(store, NewClientAccessService(store), nil).Plan(context.Background(), token, model.Name, 1_000_000, 1_000_000, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Candidates) != 1 {
+		t.Fatalf("route candidates = %+v", plan.Candidates)
+	}
+	candidate := plan.Candidates[0]
+	if candidate.Cost != 35_000_000 || candidate.Mapping.InputPriceMicros != 5_000_000 || candidate.Mapping.OutputPriceMicros != 30_000_000 || candidate.Mapping.CachedInputPriceMicros == nil || *candidate.Mapping.CachedInputPriceMicros != 500_000 || candidate.Mapping.CacheWritePriceMicros != nil || candidate.Mapping.PriceMultiplierBasisPoints != DefaultPriceMultiplierBasisPoints {
+		t.Fatalf("OAuth route candidate = %+v", candidate)
+	}
+	views, err := NewManagementService(store).ListChannels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].PriceMultiplierBasisPoints != DefaultPriceMultiplierBasisPoints || len(views[0].Models) != 1 || views[0].Models[0].InputPriceMicros != 5_000_000 || views[0].Models[0].OutputPriceMicros != 30_000_000 {
+		t.Fatalf("OAuth channel view = %+v", views)
+	}
+	var stored ChannelModel
+	if err := store.db.First(&stored, mappings[0].ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.InputPriceMicros != 99 || stored.OutputPriceMicros != 99 || stored.PriceMultiplierBasisPoints != 25_000 {
+		t.Fatalf("persisted mapping was modified during routing: %+v", stored)
+	}
+
+	unknown := effectiveChannelModelPricing(Channel{AuthType: ChannelTypeChatGPTOAuth}, ChannelModel{
+		UpstreamModel: "gpt-5.6-sol-custom", InputPriceMicros: 99, OutputPriceMicros: 99,
+		CachedInputPriceMicros: &staleCachePrice, CacheWritePriceMicros: &staleCachePrice, PriceMultiplierBasisPoints: 25_000,
+	})
+	if unknown.InputPriceMicros != 0 || unknown.OutputPriceMicros != 0 || unknown.CachedInputPriceMicros != nil || unknown.CacheWritePriceMicros != nil || unknown.PriceMultiplierBasisPoints != DefaultPriceMultiplierBasisPoints {
+		t.Fatalf("unknown OAuth route pricing = %+v", unknown)
+	}
+}
+
 func TestRouterExpectationProbabilityIncludesEveryRoutingSignal(t *testing.T) {
 	router := &Router{random: func(int) int { return 0 }}
 	candidates := []RouteCandidate{
@@ -1866,8 +2096,8 @@ func TestRecentRoutingMetricsUseCandidateScopedDynamicSample(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now()
 	attempts := []RelayAttemptLog{
-		{RequestID: "target-a-cache-hit", ChannelID: 1, ChannelModelID: 11, InputTokens: 100, CachedTokens: 50, OutputTokens: 20, LatencyMS: 20, FirstTokenMS: 50, DurationMS: 250, Success: true, CreatedAt: now.Add(-time.Minute)},
-		{RequestID: "target-b-cache-miss", ChannelID: 2, ChannelModelID: 22, InputTokens: 200, CachedTokens: 0, OutputTokens: 10, LatencyMS: 40, FirstTokenMS: 100, DurationMS: 300, Success: true, CreatedAt: now.Add(-2 * time.Minute)},
+		{RequestID: "target-a-cache-hit", ChannelID: 1, ChannelModelID: 11, InputTokens: 100, CachedTokens: 50, OutputTokens: 20, LatencyMS: 20, FirstTokenMS: 50, DurationMS: 250, TokensPerSecond: 100, Success: true, CreatedAt: now.Add(-time.Minute)},
+		{RequestID: "target-b-cache-miss", ChannelID: 2, ChannelModelID: 22, InputTokens: 200, CachedTokens: 0, OutputTokens: 10, LatencyMS: 40, FirstTokenMS: 100, DurationMS: 300, TokensPerSecond: 50, Success: true, CreatedAt: now.Add(-2 * time.Minute)},
 		{RequestID: "other-model", ChannelID: 3, ChannelModelID: 33, InputTokens: 100, CachedTokens: 100, OutputTokens: 5, LatencyMS: 10, FirstTokenMS: 20, DurationMS: 120, Success: true, CreatedAt: now.Add(-3 * time.Minute)},
 		{RequestID: "target-a-expired-cache-hit", ChannelID: 1, ChannelModelID: 11, InputTokens: 300, CachedTokens: 300, OutputTokens: 30, LatencyMS: 90, FirstTokenMS: 200, DurationMS: 500, Success: true, CreatedAt: now.Add(-31 * time.Minute)},
 	}
@@ -2698,16 +2928,16 @@ func TestSessionLogsAggregateExistingFiveDayDetails(t *testing.T) {
 	token, model, channels, mappings := createRouteFixture(t, store, RoutingPriorityWeighted, "http://one.invalid", "http://two.invalid")
 	now := time.Now()
 	logs := []RelayRequestLog{
-		{ID: "session-request-1", TokenID: token.ID, TokenName: token.Name, TokenKeyPrefix: token.KeyPrefix, Endpoint: "responses", RequestedModel: model.Name, CodexSessionID: "codex-session", CodexSessionSource: "prompt_cache_key", IsCompaction: true, RequestParametersJSON: `{"temperature":0.2}`, StatusCode: http.StatusOK, InputTokens: 100, NormalInputTokens: 60, OutputTokens: 20, CachedTokens: 30, CacheWriteTokens: 10, SentTokens: 100, EstimatedCost: 70, UpstreamCost: 60, AttemptCount: 1, FirstTokenMS: 50, FirstResponseMS: 20, LatencyMS: 20, DurationMS: 100, CreatedAt: now.Add(-2 * time.Hour)},
+		{ID: "session-request-1", TokenID: token.ID, TokenName: token.Name, TokenKeyPrefix: token.KeyPrefix, Endpoint: "responses", RequestedModel: model.Name, CodexSessionID: "codex-session", CodexSessionSource: "prompt_cache_key", IsCompaction: true, RequestParametersJSON: `{"temperature":0.2}`, StatusCode: http.StatusOK, InputTokens: 100, NormalInputTokens: 60, OutputTokens: 20, CachedTokens: 30, CacheWriteTokens: 10, SentTokens: 100, EstimatedCost: 70, UpstreamCost: 60, AttemptCount: 1, FirstTokenMS: 50, FirstResponseMS: 20, LatencyMS: 20, DurationMS: 100, GenerationDurationMS: 95, TokensPerSecond: 200, CreatedAt: now.Add(-2 * time.Hour)},
 		{ID: "session-request-2", TokenID: token.ID, TokenName: token.Name, TokenKeyPrefix: token.KeyPrefix, Endpoint: "responses", RequestedModel: model.Name, CodexSessionID: "codex-session", CodexSessionSource: "prompt_cache_key", IsCompaction: true, RequestParametersJSON: `{"reasoning":{"effort":"high"}}`, StatusCode: http.StatusBadGateway, Outcome: RelayOutcomeFailed, InputTokens: 10, NormalInputTokens: 10, SentTokens: 20, EstimatedCost: 0, UpstreamCost: 0, AttemptCount: 2, FirstResponseMS: 40, LatencyMS: 40, DurationMS: 300, CreatedAt: now.Add(-time.Hour)},
-		{ID: "unknown-request", TokenID: token.ID, TokenName: token.Name, TokenKeyPrefix: token.KeyPrefix, Endpoint: "chat", RequestedModel: model.Name, CodexSessionSource: "unavailable", RequestParametersJSON: `{}`, StatusCode: http.StatusOK, InputTokens: 50, OutputTokens: 10, CachedTokens: 5, EstimatedCost: 20, UpstreamCost: 15, AttemptCount: 0, FirstTokenMS: 30, LatencyMS: 10, DurationMS: 80, CreatedAt: now.Add(-30 * time.Minute)},
+		{ID: "unknown-request", TokenID: token.ID, TokenName: token.Name, TokenKeyPrefix: token.KeyPrefix, Endpoint: "chat", RequestedModel: model.Name, CodexSessionSource: "unavailable", RequestParametersJSON: `{}`, StatusCode: http.StatusOK, InputTokens: 50, OutputTokens: 10, CachedTokens: 5, EstimatedCost: 20, UpstreamCost: 15, AttemptCount: 0, FirstTokenMS: 30, LatencyMS: 10, DurationMS: 80, GenerationDurationMS: 90, TokensPerSecond: 100, CreatedAt: now.Add(-30 * time.Minute)},
 		{ID: "expired-request", TokenID: token.ID, Endpoint: "responses", RequestedModel: model.Name, CodexSessionID: "codex-session", StatusCode: http.StatusOK, InputTokens: 1000, CreatedAt: now.Add(-(DetailedLogRetentionDays*24*time.Hour + time.Hour))},
 	}
 	if err := store.db.Create(&logs).Error; err != nil {
 		t.Fatal(err)
 	}
 	attempts := []RelayAttemptLog{
-		{RequestID: logs[0].ID, ChannelID: channels[0].ID, ChannelName: channels[0].Name, ChannelBaseURL: channels[0].BaseURL, ChannelModelID: mappings[0].ID, UpstreamModel: mappings[0].UpstreamModel, SelectionReason: SelectionReasonInitialRoute, RouteDecisionJSON: `{"strategy":"priority_weighted","mode":"probability","candidates":[{"channelId":1,"channelName":"channel-1","channelModelId":1,"upstreamModel":"upstream-1","expectation":0.8,"probability":0.8,"selected":true}]}`, StatusCode: http.StatusOK, InputTokens: 100, NormalInputTokens: 60, OutputTokens: 20, CachedTokens: 30, CacheWriteTokens: 10, SentTokens: 100, Success: true, CreatedAt: logs[0].CreatedAt},
+		{RequestID: logs[0].ID, ChannelID: channels[0].ID, ChannelName: channels[0].Name, ChannelBaseURL: channels[0].BaseURL, ChannelModelID: mappings[0].ID, UpstreamModel: mappings[0].UpstreamModel, SelectionReason: SelectionReasonInitialRoute, RouteDecisionJSON: `{"strategy":"priority_weighted","mode":"probability","candidates":[{"channelId":1,"channelName":"channel-1","channelModelId":1,"upstreamModel":"upstream-1","expectation":0.8,"probability":0.8,"selected":true}]}`, StatusCode: http.StatusOK, InputTokens: 100, NormalInputTokens: 60, OutputTokens: 20, CachedTokens: 30, CacheWriteTokens: 10, SentTokens: 100, FirstTokenMS: 50, LatencyMS: 20, DurationMS: 100, GenerationDurationMS: 95, TokensPerSecond: 200, Success: true, CreatedAt: logs[0].CreatedAt},
 		{RequestID: logs[1].ID, ChannelID: channels[0].ID, ChannelName: channels[0].Name, ChannelBaseURL: channels[0].BaseURL, ChannelModelID: mappings[0].ID, UpstreamModel: mappings[0].UpstreamModel, StatusCode: http.StatusInternalServerError, SentTokens: 10, Success: false, CreatedAt: logs[1].CreatedAt},
 		{RequestID: logs[1].ID, ChannelID: channels[1].ID, ChannelName: channels[1].Name, ChannelBaseURL: channels[1].BaseURL, ChannelModelID: mappings[1].ID, UpstreamModel: mappings[1].UpstreamModel, PreviousChannelID: channels[0].ID, PreviousChannelName: channels[0].Name, SelectionReason: SelectionReasonRetryableStatus, SelectionDetail: "HTTP 500", StatusCode: http.StatusBadGateway, SentTokens: 10, Success: false, CreatedAt: logs[1].CreatedAt.Add(time.Second)},
 	}
@@ -2724,7 +2954,7 @@ func TestSessionLogsAggregateExistingFiveDayDetails(t *testing.T) {
 	if page.Total != 2 || len(page.Items) != 2 {
 		t.Fatalf("session page = %+v", page)
 	}
-	if page.Summary.RequestCount != 3 || page.Summary.SuccessCount != 2 || page.Summary.AttemptCount != 3 || page.Summary.InputTokens != 150 || page.Summary.OutputTokens != 30 {
+	if page.Summary.RequestCount != 3 || page.Summary.SuccessCount != 2 || page.Summary.AttemptCount != 3 || page.Summary.InputTokens != 150 || page.Summary.OutputTokens != 30 || math.Abs(page.Summary.AverageTokensPerSecond-(30.0*1000/70)) > 0.000001 || page.Summary.TokensPerSecondSampleCount != 2 {
 		t.Fatalf("session page summary = %+v", page.Summary)
 	}
 	var identified, unknown *SessionLogSummary
@@ -2738,7 +2968,7 @@ func TestSessionLogsAggregateExistingFiveDayDetails(t *testing.T) {
 	if identified == nil || unknown == nil {
 		t.Fatalf("session summaries = %+v", page.Items)
 	}
-	if identified.RequestCount != 2 || identified.SuccessCount != 1 || identified.AttemptCount != 3 || identified.InputTokens != 100 || identified.NormalInputTokens != 60 || identified.OutputTokens != 20 || identified.CachedTokens != 30 || identified.CacheWriteTokens != 10 || identified.SentTokens != 100 || identified.EstimatedCost != 70 || identified.UpstreamCost != 60 || identified.AverageFirstTokenMS != 50 || identified.FirstTokenSampleCount != 1 || identified.AverageLatencyMS != 30 || identified.LatencySampleCount != 2 || identified.AverageDurationMS != 200 || identified.DurationSampleCount != 2 {
+	if identified.RequestCount != 2 || identified.SuccessCount != 1 || identified.AttemptCount != 3 || identified.InputTokens != 100 || identified.NormalInputTokens != 60 || identified.OutputTokens != 20 || identified.CachedTokens != 30 || identified.CacheWriteTokens != 10 || identified.SentTokens != 100 || identified.EstimatedCost != 70 || identified.UpstreamCost != 60 || identified.AverageFirstTokenMS != 50 || identified.FirstTokenSampleCount != 1 || identified.AverageLatencyMS != 30 || identified.LatencySampleCount != 2 || identified.AverageDurationMS != 200 || identified.DurationSampleCount != 2 || math.Abs(identified.AverageTokensPerSecond-(20.0*1000/30)) > 0.000001 || identified.TokensPerSecondSampleCount != 1 {
 		t.Fatalf("identified summary = %+v", identified)
 	}
 	if identified.CurrentChannel == nil || identified.CurrentChannel.ChannelID != channels[1].ID || identified.CurrentChannel.AssignmentSource != "session_affinity" {
@@ -2762,7 +2992,7 @@ func TestSessionLogsAggregateExistingFiveDayDetails(t *testing.T) {
 	if detail.RequestTotal != 2 || detail.Summary.CompactionCount != 1 || len(detail.Requests) != 2 || detail.Requests[0].ID != "session-request-2" || len(detail.Requests[0].Attempts) != 2 || detail.Requests[1].ID != "session-request-1" {
 		t.Fatalf("session detail = %+v", detail)
 	}
-	if detail.Summary.NormalInputTokens != 60 || detail.Summary.CacheWriteTokens != 10 || detail.Summary.SentTokens != 100 || detail.Summary.UpstreamCost != 60 || detail.Summary.AverageFirstTokenMS != 50 || detail.Summary.AverageLatencyMS != 30 || detail.Summary.AverageDurationMS != 200 || detail.Requests[1].CacheWriteTokens != 10 || detail.Requests[1].Attempts[0].CacheWriteTokens != 10 || detail.Requests[1].Attempts[0].SentTokens != 100 {
+	if detail.Summary.NormalInputTokens != 60 || detail.Summary.CacheWriteTokens != 10 || detail.Summary.SentTokens != 100 || detail.Summary.UpstreamCost != 60 || detail.Summary.AverageFirstTokenMS != 50 || detail.Summary.AverageLatencyMS != 30 || detail.Summary.AverageDurationMS != 200 || math.Abs(detail.Summary.AverageTokensPerSecond-(20.0*1000/30)) > 0.000001 || detail.Summary.TokensPerSecondSampleCount != 1 || math.Abs(detail.Requests[1].TokensPerSecond-(20.0*1000/30)) > 0.000001 || math.Abs(detail.Requests[1].Attempts[0].TokensPerSecond-(20.0*1000/30)) > 0.000001 || detail.Requests[1].CacheWriteTokens != 10 || detail.Requests[1].Attempts[0].CacheWriteTokens != 10 || detail.Requests[1].Attempts[0].SentTokens != 100 {
 		t.Fatalf("session cache-write detail = %+v", detail)
 	}
 	if detail.Summary.AverageFirstResponseMS != 30 || detail.Summary.FirstResponseSampleCount != 2 {
@@ -4182,8 +4412,11 @@ func TestRelayRecordsDistinctStreamingTimings(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"))
 		flusher.Flush()
+		time.Sleep(50 * time.Millisecond)
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\" world\"}\n\n"))
+		flusher.Flush()
 		time.Sleep(20 * time.Millisecond)
-		_, _ = writer.Write([]byte("data: [DONE]\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_timing\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":9}}}\n\n"))
 	}))
 	defer upstream.Close()
 	token, _, _, _ := createRouteFixture(t, store, RoutingPriorityWeighted, upstream.URL)
@@ -4212,6 +4445,15 @@ func TestRelayRecordsDistinctStreamingTimings(t *testing.T) {
 	}
 	if requestLog.FirstTokenMS != attemptLog.FirstTokenMS || requestLog.FirstResponseMS != attemptLog.FirstResponseMS || requestLog.LatencyMS != attemptLog.LatencyMS || requestLog.DurationMS != attemptLog.DurationMS {
 		t.Fatalf("request timings = %+v, attempt timings = %+v", requestLog, attemptLog)
+	}
+	if requestLog.GenerationDurationMS < 35 || requestLog.GenerationDurationMS > 250 {
+		t.Fatalf("request generation duration = %dms", requestLog.GenerationDurationMS)
+	}
+	if requestLog.TokensPerSecond < 30 || requestLog.TokensPerSecond > 300 {
+		t.Fatalf("request tokens per second = %f", requestLog.TokensPerSecond)
+	}
+	if requestLog.GenerationDurationMS != attemptLog.GenerationDurationMS || math.Abs(requestLog.TokensPerSecond-attemptLog.TokensPerSecond) > 0.000001 {
+		t.Fatalf("request throughput = %+v, attempt throughput = %+v", requestLog, attemptLog)
 	}
 	var stat TokenDailyStat
 	if err := store.db.First(&stat).Error; err != nil {

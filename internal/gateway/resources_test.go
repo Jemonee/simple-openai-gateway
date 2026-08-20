@@ -355,6 +355,46 @@ func TestResourceQueriesHideLegacyPathOnlyFiles(t *testing.T) {
 	}
 }
 
+func TestResourceQueriesCanSkipPayloadPreviewHydration(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now().UTC()
+	body := []byte(`{"input":[{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]}`)
+	detected := detectResources(body)
+	if len(detected) != 1 {
+		t.Fatalf("detected resources = %d, want 1", len(detected))
+	}
+	request := RelayRequestLog{ID: "resource-preview-request", TokenID: 7, CodexSessionID: "resource-preview-session", Endpoint: "/v1/responses", RequestedModel: "gpt-test", CreatedAt: now}
+	if err := store.db.Create(&request).Error; err != nil {
+		t.Fatal(err)
+	}
+	resource := GatewayResource{Fingerprint: detected[0].Fingerprint, Kind: detected[0].Kind, FirstSeenAt: now, LastSeenAt: now}
+	if err := store.db.Create(&resource).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Create(&RequestResource{RequestID: request.ID, ResourceID: resource.ID, Location: "$.input[0]", Role: "user"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Create(&RelayRequestPayload{RequestID: request.ID, RequestBody: string(body)}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	withoutPreview, err := loadSessionResources(store.db, request.TokenID, request.CodexSessionID, "", true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withoutPreview) != 1 || withoutPreview[0].PreviewData != "" {
+		t.Fatalf("metadata-only resources = %+v", withoutPreview)
+	}
+
+	withPreview, err := loadSessionResources(store.db, request.TokenID, request.CodexSessionID, "", true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withPreview) != 1 || withPreview[0].PreviewData == "" {
+		t.Fatalf("hydrated resources = %+v", withPreview)
+	}
+}
+
 func TestResourceDetailKeepsSessionLookupIdentity(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().UTC()

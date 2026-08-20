@@ -91,3 +91,53 @@ func TestAccessTokenConsoleSessionLifecycle(t *testing.T) {
 		t.Fatalf("deleted token session error = %v", err)
 	}
 }
+
+func TestManagementPersistsAndRotatesTokenChannelScope(t *testing.T) {
+	store := newTestStore(t)
+	management := NewManagementService(store)
+	ctx := context.Background()
+	channels := []Channel{
+		{Name: "channel-one", BaseURL: "http://one.invalid/v1", APIKeyCipher: "cipher", Enabled: true},
+		{Name: "channel-two", BaseURL: "http://two.invalid/v1", APIKeyCipher: "cipher", Enabled: true},
+	}
+	if err := store.db.Create(&channels).Error; err != nil {
+		t.Fatal(err)
+	}
+	allowAllChannels := false
+	input := ClientTokenInput{
+		Name: "channel scoped", Enabled: true, AllowAllModels: true, AllowAllChannels: &allowAllChannels,
+		RPM: 60, MaxConcurrency: 4, ChannelIDs: []uint64{channels[1].ID},
+	}
+	issued, err := management.CreateToken(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issued.Token.AllowAllChannels || len(issued.Token.ChannelIDs) != 1 || issued.Token.ChannelIDs[0] != channels[1].ID {
+		t.Fatalf("issued channel scope = %+v", issued.Token)
+	}
+
+	legacyUpdate := ClientTokenInput{Name: input.Name, Enabled: true, AllowAllModels: true, RPM: 120, MaxConcurrency: 4}
+	updated, err := management.UpdateToken(ctx, issued.Token.ID, legacyUpdate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.AllowAllChannels || len(updated.ChannelIDs) != 1 || updated.ChannelIDs[0] != channels[1].ID {
+		t.Fatalf("legacy update changed channel scope = %+v", updated)
+	}
+
+	rotated, err := management.RotateToken(ctx, issued.Token.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Token.AllowAllChannels || len(rotated.Token.ChannelIDs) != 1 || rotated.Token.ChannelIDs[0] != channels[1].ID {
+		t.Fatalf("rotated channel scope = %+v", rotated.Token)
+	}
+
+	defaultToken, err := management.CreateToken(ctx, ClientTokenInput{Name: "default channels", Enabled: true, AllowAllModels: true, RPM: 60, MaxConcurrency: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !defaultToken.Token.AllowAllChannels || len(defaultToken.Token.ChannelIDs) != 0 {
+		t.Fatalf("default channel scope = %+v", defaultToken.Token)
+	}
+}

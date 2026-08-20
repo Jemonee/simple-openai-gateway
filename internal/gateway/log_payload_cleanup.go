@@ -44,7 +44,7 @@ func (s *ManagementService) clearHistoricalLogPayloadsBeforeAge(ctx context.Cont
 		requestIDs := db.Model(&RelayRequestLog{}).Select("id").Where("created_at < ?", cutoff)
 		attemptUpdate := db.Model(&RelayAttemptLog{}).
 			Where("request_id IN (?)", requestIDs).
-			Where("payload_log_detail <> ? OR request_body <> '' OR response_body <> '' OR request_body_truncated = ? OR response_body_truncated = ?", config.PayloadLogDetailNone, true, true).
+			Where("payload_log_detail <> ? OR request_body <> '' OR response_body <> '' OR request_body_truncated = ? OR response_body_truncated = ? OR EXISTS (SELECT 1 FROM relay_attempt_payloads p WHERE p.attempt_id = relay_attempt_logs.id)", config.PayloadLogDetailNone, true, true).
 			Updates(map[string]any{
 				"payload_log_detail":      config.PayloadLogDetailNone,
 				"request_body":            "",
@@ -56,10 +56,13 @@ func (s *ManagementService) clearHistoricalLogPayloadsBeforeAge(ctx context.Cont
 			return attemptUpdate.Error
 		}
 		result.AttemptLogsCleared = attemptUpdate.RowsAffected
+		if err := db.Where("request_id IN (?)", requestIDs).Delete(&RelayAttemptPayload{}).Error; err != nil {
+			return err
+		}
 
 		requestUpdate := db.Model(&RelayRequestLog{}).
 			Where("created_at < ?", cutoff).
-			Where("payload_log_detail <> ? OR request_parameters_json <> '' OR request_body <> '' OR response_body <> '' OR request_body_truncated = ? OR response_body_truncated = ?", config.PayloadLogDetailNone, true, true).
+			Where("payload_log_detail <> ? OR request_parameters_json <> '' OR request_body <> '' OR response_body <> '' OR request_body_truncated = ? OR response_body_truncated = ? OR EXISTS (SELECT 1 FROM relay_request_payloads p WHERE p.request_id = relay_request_logs.id)", config.PayloadLogDetailNone, true, true).
 			Updates(map[string]any{
 				"payload_log_detail":      config.PayloadLogDetailNone,
 				"request_parameters_json": "",
@@ -72,6 +75,9 @@ func (s *ManagementService) clearHistoricalLogPayloadsBeforeAge(ctx context.Cont
 			return requestUpdate.Error
 		}
 		result.RequestLogsCleared = requestUpdate.RowsAffected
+		if err := db.Where("request_id IN (?)", requestIDs).Delete(&RelayRequestPayload{}).Error; err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {

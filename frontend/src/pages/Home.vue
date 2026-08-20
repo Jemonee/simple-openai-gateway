@@ -18,7 +18,7 @@ import type {
 } from '@/types/gateway'
 import { request } from '@/utils/api'
 import { useAdminAuth } from '@/composables/useAdminAuth'
-import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatTokensPerSecond, formatUSD } from '@/utils/formatters'
 import { preserveHeadlessQuery } from '@/utils/headlessMode'
 import { isLocalBrowserAccess } from '@/utils/localAccess'
 
@@ -82,6 +82,10 @@ const topCacheChannels = computed(() => [...(dashboard.value?.channels ?? [])]
   .slice(0, 3))
 const topCostModels = computed(() => (dashboard.value?.models ?? []).slice(0, 5))
 const topCostRatios = computed(() => dashboard.value?.costRatios ?? [])
+const topTpsChannels = computed(() => [...(dashboard.value?.channels ?? [])]
+  .filter((channel) => channel.tokensPerSecondSampleCount > 0 && channel.averageTokensPerSecond > 0)
+  .sort((left, right) => right.averageTokensPerSecond - left.averageTokensPerSecond || right.tokensPerSecondSampleCount - left.tokensPerSecondSampleCount || left.name.localeCompare(right.name))
+  .slice(0, 5))
 const selectedRangeLabel = computed(() => timeRangeOptions.find((option) => option.value === selectedRangeDays.value)?.label ?? '当前')
 const availableChannels = computed(() => channels.value.filter((channel) => (
   channel.enabled && (!channel.circuitOpenUntil || Date.parse(channel.circuitOpenUntil) <= Date.now())
@@ -122,6 +126,18 @@ const paginatedModels = computed(() => {
 const readyChannels = computed(() => channels.value.filter((channel) => channel.enabled && (!channel.circuitOpenUntil || Date.parse(channel.circuitOpenUntil) <= Date.now())))
 const readyModels = computed(() => models.value.filter((model) => model.enabled && readyChannels.value.some((channel) => channel.models.some((mapping) => mapping.enabled && mapping.modelId === model.id))))
 const readyTokens = computed(() => tokens.value.filter((token) => token.enabled))
+const selectedExistingToken = computed(() => readyTokens.value.find((token) => token.id === selectedTokenId.value) ?? null)
+const codexReadyModels = computed(() => {
+  if (tokenMode.value !== 'existing' || !selectedExistingToken.value) return readyModels.value
+  const token = selectedExistingToken.value
+  return readyModels.value.filter((model) => (
+    (token.allowAllModels || token.modelIds.includes(model.id))
+    && readyChannels.value.some((channel) => (
+      (token.allowAllChannels || token.channelIds.includes(channel.id))
+      && channel.models.some((mapping) => mapping.enabled && mapping.modelId === model.id)
+    ))
+  ))
+})
 const activeProviderName = computed(() => providerMode.value === 'existing' ? existingProviderName.value : newProviderName.value.trim())
 const currentCodexProvider = computed(() => localCodexConfig.value?.providers.find((provider) => provider.name === localCodexConfig.value?.modelProvider) ?? null)
 const canReuseCurrentToken = computed(() => Boolean(
@@ -143,6 +159,16 @@ name = "custom"
 wire_api = "responses"
 requires_openai_auth = true
 base_url = "${serviceBaseUrl.value.trim() || '/v1'}"`)
+
+function selectAvailableCodexModel(preferredModel = selectedModel.value) {
+  if (codexReadyModels.value.some((model) => model.name === preferredModel)) {
+    selectedModel.value = preferredModel
+    return
+  }
+  selectedModel.value = codexReadyModels.value.find((model) => model.name === defaultCodexModel)?.name
+    ?? codexReadyModels.value[0]?.name
+    ?? ''
+}
 
 function formatPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`
@@ -184,12 +210,7 @@ async function loadDashboard() {
     channels.value = channelItems
     models.value = modelItems
     tokens.value = tokenItems
-    if (!readyModels.value.some((model) => model.name === selectedModel.value)) {
-      selectedModel.value = readyModels.value.find((model) => model.name === defaultCodexModel)?.name
-        ?? readyModels.value[0]?.name
-        ?? modelItems.find((model) => model.enabled)?.name
-        ?? ''
-    }
+    selectAvailableCodexModel()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '仪表盘加载失败'
   } finally {
@@ -227,6 +248,7 @@ function handleTokenModeChange() {
   if (tokenMode.value === 'existing' && canReuseCurrentToken.value) {
     selectedTokenId.value = localCodexConfig.value?.authTokenId ?? null
   }
+  selectAvailableCodexModel(localCodexConfig.value?.model || selectedModel.value)
 }
 
 function applyLocalCodexConfiguration(configuration: CodexLocalConfiguration) {
@@ -241,9 +263,6 @@ function applyLocalCodexConfiguration(configuration: CodexLocalConfiguration) {
     providerMode.value = 'new'
     existingProviderName.value = ''
   }
-  if (configuration.model && readyModels.value.some((model) => model.name === configuration.model)) {
-    selectedModel.value = configuration.model
-  }
   if (configuration.authTokenId && tokens.value.some((token) => token.id === configuration.authTokenId && token.enabled)) {
     tokenMode.value = 'existing'
     selectedTokenId.value = configuration.authTokenId
@@ -251,6 +270,7 @@ function applyLocalCodexConfiguration(configuration: CodexLocalConfiguration) {
     tokenMode.value = 'new'
     selectedTokenId.value = null
   }
+  selectAvailableCodexModel(configuration.model)
 }
 
 async function loadLocalCodexConfiguration() {
@@ -287,6 +307,10 @@ async function saveLocalCodexConfiguration() {
   }
   if (tokenMode.value === 'new' && !newTokenName.value.trim()) {
     ElMessage.error('请输入新访问令牌名称')
+    return
+  }
+  if (!codexReadyModels.value.some((model) => model.name === selectedModel.value)) {
+    ElMessage.error(tokenMode.value === 'existing' ? '所选访问令牌无法通过允许的渠道使用该模型' : '所选模型当前没有可用渠道')
     return
   }
   const payload: CodexConfigurationSaveRequest = {
@@ -450,6 +474,26 @@ onMounted(loadDashboard)
           <el-skeleton v-else :rows="1" animated />
           <small>{{ formatCompactNumber(dashboard?.firstTokenSampleCount ?? 0) }} 个流式样本</small>
         </article>
+        <el-tooltip placement="bottom" :disabled="loading || topTpsChannels.length === 0" popper-class="dashboard-metric-popper">
+          <template #content>
+            <div class="metric-tooltip" :aria-label="`${selectedRangeLabel} TPS 前五渠道`">
+              <header><strong>渠道 TPS 前五</strong><span>{{ selectedRangeLabel }} · 按平均值降序</span></header>
+              <ol>
+                <li v-for="(channel, index) in topTpsChannels" :key="channel.name">
+                  <span class="metric-tooltip-rank">{{ index + 1 }}</span>
+                  <code>{{ channel.name }}</code>
+                  <div><strong>{{ formatTokensPerSecond(channel.averageTokensPerSecond, channel.tokensPerSecondSampleCount) }}</strong><small>{{ formatCompactNumber(channel.tokensPerSecondSampleCount) }} 个样本</small></div>
+                </li>
+              </ol>
+            </div>
+          </template>
+          <article class="metric-cell metric-cell-tooltip" tabindex="0">
+            <span><DataLine />平均输出 TPS</span>
+            <strong v-if="!loading">{{ formatTokensPerSecond(dashboard?.averageTokensPerSecond ?? 0, dashboard?.tokensPerSecondSampleCount ?? 0) }}</strong>
+            <el-skeleton v-else :rows="1" animated />
+            <small>悬浮查看时间范围内渠道前五</small>
+          </article>
+        </el-tooltip>
         <article class="metric-cell">
           <span><Odometer />平均请求延迟</span>
           <strong v-if="!loading">{{ dashboard?.latencySampleCount ? formatDuration(dashboard.averageLatencyMs) : '--' }}</strong>
@@ -563,7 +607,7 @@ onMounted(loadDashboard)
               <div class="codex-form-grid">
                 <el-form-item label="Codex 模型">
                   <el-select v-model="selectedModel" filterable placeholder="选择已就绪模型">
-                    <el-option v-for="model in readyModels" :key="model.id" :label="model.name" :value="model.name" />
+                    <el-option v-for="model in codexReadyModels" :key="model.id" :label="model.name" :value="model.name" />
                   </el-select>
                 </el-form-item>
                 <el-form-item label="服务地址">
@@ -581,7 +625,7 @@ onMounted(loadDashboard)
                 </el-radio-group>
               </el-form-item>
               <el-form-item v-if="tokenMode === 'existing'" label="现有访问令牌">
-                <el-select v-model="selectedTokenId" placeholder="选择访问令牌">
+                <el-select v-model="selectedTokenId" placeholder="选择访问令牌" @change="selectAvailableCodexModel()">
                   <el-option
                     v-for="token in readyTokens"
                     :key="token.id"
@@ -593,7 +637,7 @@ onMounted(loadDashboard)
               </el-form-item>
               <div v-else class="new-token-row">
                 <el-form-item label="新令牌名称"><el-input v-model="newTokenName" maxlength="120" /></el-form-item>
-                <div class="new-token-policy"><Key /><span>所选模型 · 60 RPM · 10 并发</span></div>
+                <div class="new-token-policy"><Key /><span>所选模型 · 全部渠道 · 60 RPM · 10 并发</span></div>
               </div>
               <p v-if="!canReuseCurrentToken" class="token-reuse-note">现有令牌只保存不可逆摘要；当前 auth.json 没有可匹配的明文令牌，请新增令牌。</p>
             </section>

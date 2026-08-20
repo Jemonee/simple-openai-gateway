@@ -49,22 +49,21 @@ func loadRecentRoutingMetrics(ctx context.Context, db *gorm.DB, mappingIDs []uin
 		LatencySamples    int64
 		FirstTokenTotal   int64
 		FirstTokenSamples int64
-		OutputTokens      int64
-		GenerationMS      int64
+		TokensPerSecond   float64
 		InputTokens       int64
 		CachedTokens      int64
 		CacheHits         int64
 		CacheSamples      int64
 	}
 	var rows []row
+	averageTPS, _ := throughputSQL("", "success = 1")
 	err := db.WithContext(ctx).Model(&RelayAttemptLog{}).
 		Select("channel_model_id, "+
 			"COALESCE(SUM(CASE WHEN success = ? AND latency_ms > 0 THEN latency_ms ELSE 0 END), 0) AS latency_total, SUM(CASE WHEN success = ? AND latency_ms > 0 THEN 1 ELSE 0 END) AS latency_samples, "+
 			"COALESCE(SUM(CASE WHEN success = ? AND first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0) AS first_token_total, SUM(CASE WHEN success = ? AND first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_samples, "+
-			"COALESCE(SUM(CASE WHEN success = ? AND output_tokens > 0 AND first_token_ms > 0 AND duration_ms > first_token_ms THEN output_tokens ELSE 0 END), 0) AS output_tokens, "+
-			"COALESCE(SUM(CASE WHEN success = ? AND output_tokens > 0 AND first_token_ms > 0 AND duration_ms > first_token_ms THEN duration_ms - first_token_ms ELSE 0 END), 0) AS generation_ms, "+
+			averageTPS+" AS tokens_per_second, "+
 			"COALESCE(SUM(CASE WHEN success = ? THEN input_tokens ELSE 0 END), 0) AS input_tokens, COALESCE(SUM(CASE WHEN success = ? THEN cached_tokens ELSE 0 END), 0) AS cached_tokens, SUM(CASE WHEN success = ? AND input_tokens > 0 AND cached_tokens > 0 THEN 1 ELSE 0 END) AS cache_hits, SUM(CASE WHEN success = ? AND input_tokens > 0 THEN 1 ELSE 0 END) AS cache_samples",
-			true, true, true, true, true, true, true, true, true, true).
+			true, true, true, true, true, true, true, true).
 		Where("channel_model_id IN ? AND created_at >= ?", mappingIDs, now.Add(-routingMetricWindow)).
 		Group("channel_model_id").Scan(&rows).Error
 	if err != nil {
@@ -78,9 +77,7 @@ func loadRecentRoutingMetrics(ctx context.Context, db *gorm.DB, mappingIDs []uin
 		if item.FirstTokenSamples > 0 {
 			metric.FirstTokenMS = float64(item.FirstTokenTotal) / float64(item.FirstTokenSamples)
 		}
-		if item.GenerationMS > 0 {
-			metric.TokensPerSecond = float64(item.OutputTokens) * 1000 / float64(item.GenerationMS)
-		}
+		metric.TokensPerSecond = item.TokensPerSecond
 		if item.CacheSamples > 0 {
 			metric.CacheHitRate = min(max(float64(item.CacheHits)/float64(item.CacheSamples), 0), 1)
 			metric.CacheSampleCount = item.CacheSamples

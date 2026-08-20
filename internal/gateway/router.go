@@ -174,7 +174,7 @@ func (r *Router) PlanWithOptions(ctx context.Context, token *ClientToken, modelN
 		outputTokens = r.recentOutputMedian(ctx, model.Name)
 	}
 	if options.PinnedChannelID != 0 {
-		candidates, err := r.availableCandidates(ctx, model.ID, model.RoutingStrategy, inputTokens, outputTokens)
+		candidates, err := r.availableCandidates(ctx, token, model.ID, model.RoutingStrategy, inputTokens, outputTokens)
 		if err != nil {
 			return nil, err
 		}
@@ -203,7 +203,7 @@ func (r *Router) PlanWithOptions(ctx context.Context, token *ClientToken, modelN
 		previousSessionRoute.RequestedModel != "" &&
 		previousSessionRoute.RequestedModel != model.Name
 	if modelSwitched {
-		candidates, err = r.availableCandidates(ctx, model.ID, model.RoutingStrategy, inputTokens, outputTokens)
+		candidates, err = r.availableCandidates(ctx, token, model.ID, model.RoutingStrategy, inputTokens, outputTokens)
 		if err != nil {
 			return nil, err
 		}
@@ -248,7 +248,7 @@ func (r *Router) PlanWithOptions(ctx context.Context, token *ClientToken, modelN
 	}
 
 	if previousResponseID != "" {
-		candidate, err := r.affinityCandidate(ctx, model.ID, previousResponseID, inputTokens, outputTokens)
+		candidate, err := r.affinityCandidate(ctx, token, model.ID, previousResponseID, inputTokens, outputTokens)
 		if err != nil {
 			return nil, err
 		}
@@ -263,7 +263,7 @@ func (r *Router) PlanWithOptions(ctx context.Context, token *ClientToken, modelN
 	}
 
 	if candidates == nil {
-		candidates, err = r.availableCandidates(ctx, model.ID, model.RoutingStrategy, inputTokens, outputTokens)
+		candidates, err = r.availableCandidates(ctx, token, model.ID, model.RoutingStrategy, inputTokens, outputTokens)
 		if err != nil {
 			return nil, err
 		}
@@ -444,9 +444,18 @@ func pinChannelCandidate(candidates []RouteCandidate, channelID uint64) bool {
 	return false
 }
 
-func (r *Router) availableCandidates(ctx context.Context, modelID uint64, strategy string, inputTokens int64, outputTokens int64) ([]RouteCandidate, error) {
+func (r *Router) availableCandidates(ctx context.Context, token *ClientToken, modelID uint64, strategy string, inputTokens int64, outputTokens int64) ([]RouteCandidate, error) {
 	var mappings []ChannelModel
-	if err := r.store.db.WithContext(ctx).Where("model_id = ? AND enabled = ?", modelID, true).Find(&mappings).Error; err != nil {
+	mappingQuery := r.store.db.WithContext(ctx).Where("model_id = ? AND enabled = ?", modelID, true)
+	if token == nil {
+		return nil, ErrInvalidClientToken
+	}
+	if !token.AllowAllChannels {
+		mappingQuery = mappingQuery.Where("channel_id IN (SELECT channel_id FROM client_token_channels WHERE token_id = ?)", token.ID)
+	} else if token.OwnerUserID > 0 {
+		mappingQuery = mappingQuery.Where("channel_id IN (SELECT id FROM channels WHERE owner_user_id = ?)", token.OwnerUserID)
+	}
+	if err := mappingQuery.Find(&mappings).Error; err != nil {
 		return nil, err
 	}
 	now := time.Now()
@@ -500,6 +509,7 @@ func (r *Router) availableCandidates(ctx context.Context, modelID uint64, strate
 				continue
 			}
 			channel := channelsByID[mapping.ChannelID]
+			mapping = effectiveChannelModelPricing(channel, mapping)
 			return []RouteCandidate{{
 				Channel: channel,
 				Mapping: mapping,
@@ -524,6 +534,7 @@ func (r *Router) availableCandidates(ctx context.Context, modelID uint64, strate
 		if !channel.Enabled || (channel.CircuitOpenUntil != nil && channel.CircuitOpenUntil.After(now)) {
 			continue
 		}
+		mapping = effectiveChannelModelPricing(channel, mapping)
 		metric := recentSuccess.ByChannelModel[mapping.ID]
 		routingMetric := recentRouting[mapping.ID]
 		expectedCachedTokens := int64(math.Round(float64(max(inputTokens, 0)) * routingMetric.CacheRate))
@@ -551,7 +562,7 @@ func (r *Router) availableCandidates(ctx context.Context, modelID uint64, strate
 	return candidates, nil
 }
 
-func (r *Router) affinityCandidate(ctx context.Context, modelID uint64, previousResponseID string, inputTokens int64, outputTokens int64) (*RouteCandidate, error) {
+func (r *Router) affinityCandidate(ctx context.Context, token *ClientToken, modelID uint64, previousResponseID string, inputTokens int64, outputTokens int64) (*RouteCandidate, error) {
 	var affinity ResponseAffinity
 	err := r.store.db.WithContext(ctx).Where("response_hash = ? AND expires_at > ?", hashSecret(previousResponseID), time.Now()).First(&affinity).Error
 	if err != nil {
@@ -561,6 +572,12 @@ func (r *Router) affinityCandidate(ctx context.Context, modelID uint64, previous
 	if err := r.store.db.WithContext(ctx).Where("id = ? AND model_id = ? AND enabled = ?", affinity.ChannelModelID, modelID, true).First(&mapping).Error; err != nil {
 		return nil, ErrAffinityUnavailable
 	}
+	if err := r.access.AuthorizeChannel(ctx, token, mapping.ChannelID); err != nil {
+		if errors.Is(err, ErrChannelNotAllowed) {
+			return nil, ErrAffinityUnavailable
+		}
+		return nil, err
+	}
 	var channel Channel
 	if err := r.store.db.WithContext(ctx).First(&channel, mapping.ChannelID).Error; err != nil {
 		return nil, ErrAffinityUnavailable
@@ -568,6 +585,7 @@ func (r *Router) affinityCandidate(ctx context.Context, modelID uint64, previous
 	if !channel.Enabled || (channel.CircuitOpenUntil != nil && channel.CircuitOpenUntil.After(time.Now())) {
 		return nil, ErrAffinityUnavailable
 	}
+	mapping = effectiveChannelModelPricing(channel, mapping)
 	usage := Usage{InputTokens: inputTokens, OutputTokens: outputTokens}
 	return &RouteCandidate{Channel: channel, Mapping: mapping, Cost: CalculateCostMicros(mapping, usage)}, nil
 }

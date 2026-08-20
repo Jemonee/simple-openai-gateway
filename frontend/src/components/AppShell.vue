@@ -30,6 +30,7 @@ let firstLoginGuideChecked = false
 let mobileMediaQuery: MediaQueryList | null = null
 
 const isAccessTokenLogin = computed(() => user.value?.loginType === 'access_token')
+const isAdminLogin = computed(() => user.value?.role === 'admin' && !isAccessTokenLogin.value)
 const headlessMode = computed(() => isHeadlessMode(route.query.headless))
 
 function filterNavigationItems(items: NavigationItem[], query: string): NavigationItem[] {
@@ -45,7 +46,7 @@ const filteredGroups = computed(() => {
   const visibleGroups = navigationGroups
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => !isAccessTokenLogin.value || !item.adminOnly),
+      items: group.items.filter((item) => isAdminLogin.value || !item.adminOnly),
     }))
     .filter((group) => group.items.length > 0)
   if (!query) return visibleGroups
@@ -78,7 +79,7 @@ const breadcrumbs = computed(() => route.meta.breadcrumbs ?? ['网关控制台']
 const workspaceContained = computed(() => route.meta.workspaceMode === 'contained')
 const quickNavigationItems = computed(() => navigationGroups
   .flatMap((group) => group.items)
-  .filter((item) => (item.key === 'active-sessions' || item.key === 'sessions') && (!isAccessTokenLogin.value || !item.adminOnly)))
+  .filter((item) => (item.key === 'active-sessions' || item.key === 'sessions') && (isAdminLogin.value || !item.adminOnly)))
 
 function syncMobileViewport(event: MediaQueryList | MediaQueryListEvent) {
   isMobileViewport.value = event.matches

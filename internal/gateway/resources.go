@@ -950,32 +950,102 @@ func persistRequestResources(db *gorm.DB, requestID string, tokenID uint64, sess
 }
 
 func loadRequestResources(db *gorm.DB, requestID string) ([]ResourceView, error) {
-	var rows []struct {
-		GatewayResource
-		Location    string
-		RequestBody string
-	}
-	if err := db.Table("gateway_resources AS r").Select("r.*, rr.location, l.request_body").Joins("JOIN request_resources rr ON rr.resource_id = r.id").Joins("JOIN relay_request_logs l ON l.id = rr.request_id").Where("rr.request_id = ?", requestID).Where("r.kind <> ? OR r.sha256 <> ''", "file").Order("rr.id ASC").Scan(&rows).Error; err != nil {
+	items, err := loadRequestResourcesBatch(db, []string{requestID}, true)
+	if err != nil {
 		return nil, err
 	}
-	items := make([]ResourceView, 0, len(rows))
-	index := map[uint64]int{}
+	return items[requestID], nil
+}
+
+func loadRequestResourcesBatch(db *gorm.DB, requestIDs []string, includePreviews bool) (map[string][]ResourceView, error) {
+	result := make(map[string][]ResourceView, len(requestIDs))
+	if len(requestIDs) == 0 {
+		return result, nil
+	}
+	for _, requestID := range requestIDs {
+		result[requestID] = make([]ResourceView, 0)
+	}
+	var rows []struct {
+		GatewayResource
+		RequestID string
+		Location  string
+	}
+	if err := db.Table("gateway_resources AS r").Select("r.*, rr.request_id, rr.location").Joins("JOIN request_resources rr ON rr.resource_id = r.id").Where("rr.request_id IN ?", requestIDs).Where("r.kind <> ? OR r.sha256 <> ''", "file").Order("rr.id ASC").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	indexes := make(map[string]map[uint64]int, len(requestIDs))
+	missing := make(map[uint64]string)
+	targets := make(map[string][]struct {
+		RequestID string
+		Index     int
+	})
 	for _, row := range rows {
-		pos, ok := index[row.ID]
-		if !ok {
-			pos = len(items)
-			index[row.ID] = pos
-			items = append(items, ResourceView{GatewayResource: row.GatewayResource})
+		if indexes[row.RequestID] == nil {
+			indexes[row.RequestID] = make(map[uint64]int)
 		}
-		if items[pos].PreviewData == "" {
-			items[pos].PreviewData = resourcePreviewFromBody(row.RequestBody, items[pos].Fingerprint)
-			if items[pos].PreviewData != "" {
-				items[pos].Kind = "image"
+		pos, ok := indexes[row.RequestID][row.ID]
+		if !ok {
+			pos = len(result[row.RequestID])
+			indexes[row.RequestID][row.ID] = pos
+			result[row.RequestID] = append(result[row.RequestID], ResourceView{GatewayResource: row.GatewayResource})
+			if row.PreviewData == "" {
+				missing[row.ID] = row.Fingerprint
+				targets[row.Fingerprint] = append(targets[row.Fingerprint], struct {
+					RequestID string
+					Index     int
+				}{RequestID: row.RequestID, Index: pos})
 			}
 		}
-		items[pos].Locations = append(items[pos].Locations, row.Location)
+		result[row.RequestID][pos].Locations = append(result[row.RequestID][pos].Locations, row.Location)
 	}
-	return items, nil
+	if len(missing) == 0 {
+		return result, nil
+	}
+	if !includePreviews {
+		return result, nil
+	}
+	bodyIDs := make([]string, 0, len(requestIDs))
+	for _, requestID := range requestIDs {
+		if _, ok := result[requestID]; ok {
+			bodyIDs = append(bodyIDs, requestID)
+		}
+	}
+	type requestBodyRow struct {
+		ID          string
+		RequestBody string
+	}
+	var bodies []requestBodyRow
+	if err := db.Model(&RelayRequestLog{}).Select("id, request_body").Where("id IN ?", bodyIDs).Find(&bodies).Error; err != nil {
+		return nil, err
+	}
+	positions := make(map[string]int, len(bodies))
+	for index := range bodies {
+		positions[bodies[index].ID] = index
+	}
+	var payloads []RelayRequestPayload
+	if err := db.Select("request_id, request_body").Where("request_id IN ?", bodyIDs).Find(&payloads).Error; err != nil {
+		return nil, err
+	}
+	for _, payload := range payloads {
+		if index, ok := positions[payload.RequestID]; ok {
+			bodies[index].RequestBody = payload.RequestBody
+		}
+	}
+	for _, body := range bodies {
+		if body.RequestBody == "" {
+			continue
+		}
+		for _, detected := range detectResources([]byte(decompressStoredPayload(body.RequestBody))) {
+			for _, target := range targets[detected.Fingerprint] {
+				item := &result[target.RequestID][target.Index]
+				if item.PreviewData == "" && detected.PreviewData != "" {
+					item.PreviewData = detected.PreviewData
+					item.Kind = "image"
+				}
+			}
+		}
+	}
+	return result, nil
 }
 
 func resourcePreviewFromBody(storedBody, fingerprint string) string {
@@ -990,7 +1060,7 @@ func resourcePreviewFromBody(storedBody, fingerprint string) string {
 	return ""
 }
 
-func loadSessionResources(db *gorm.DB, tokenID uint64, sessionID, requestID string, identified bool) ([]ResourceSummary, error) {
+func loadSessionResources(db *gorm.DB, tokenID uint64, sessionID, requestID string, identified, includePreviews bool) ([]ResourceSummary, error) {
 	query := db.Table("request_resources rr").Select("r.*, COUNT(DISTINCT rr.request_id) AS request_count, COUNT(*) AS use_count").Joins("JOIN gateway_resources r ON r.id = rr.resource_id").Joins("JOIN relay_request_logs l ON l.id = rr.request_id").Where("r.kind <> ? OR r.sha256 <> ''", "file")
 	if identified {
 		query = query.Where("l.token_id = ? AND l.codex_session_id = ?", tokenID, sessionID)
@@ -1001,9 +1071,26 @@ func loadSessionResources(db *gorm.DB, tokenID uint64, sessionID, requestID stri
 	if err := query.Group("r.id").Order("use_count DESC, r.last_seen_at DESC").Scan(&items).Error; err != nil {
 		return nil, err
 	}
+	if !includePreviews {
+		return items, nil
+	}
+	missing := make(map[uint64]string)
 	for index := range items {
-		items[index].PreviewData = resourcePreviewForResource(db, items[index].ID, items[index].Fingerprint)
-		if items[index].PreviewData != "" {
+		if items[index].PreviewData == "" {
+			missing[items[index].ID] = items[index].Fingerprint
+		}
+	}
+	requestIDs, err := previewRequestIDs(db, missing, 20)
+	if err != nil {
+		return nil, err
+	}
+	previews, err := loadResourcePreviews(db, missing, requestIDs)
+	if err != nil {
+		return nil, err
+	}
+	for index := range items {
+		if preview := previews[items[index].ID]; items[index].PreviewData == "" && preview != "" {
+			items[index].PreviewData = preview
 			items[index].Kind = "image"
 		}
 	}
@@ -1011,16 +1098,97 @@ func loadSessionResources(db *gorm.DB, tokenID uint64, sessionID, requestID stri
 }
 
 func resourcePreviewForResource(db *gorm.DB, resourceID uint64, fingerprint string) string {
-	var bodies []string
-	if err := db.Table("request_resources rr").Select("l.request_body").Joins("JOIN relay_request_logs l ON l.id = rr.request_id").Where("rr.resource_id = ? AND l.request_body <> ''", resourceID).Order("rr.id ASC").Limit(20).Scan(&bodies).Error; err != nil {
+	missing := map[uint64]string{resourceID: fingerprint}
+	requestIDs, err := previewRequestIDs(db, missing, 20)
+	if err != nil {
 		return ""
 	}
-	for _, body := range bodies {
-		if preview := resourcePreviewFromBody(body, fingerprint); preview != "" {
-			return preview
+	previews, err := loadResourcePreviews(db, missing, requestIDs)
+	if err != nil {
+		return ""
+	}
+	return previews[resourceID]
+}
+
+func previewRequestIDs(db *gorm.DB, resources map[uint64]string, perResourceLimit int) ([]string, error) {
+	if len(resources) == 0 {
+		return nil, nil
+	}
+	resourceIDs := make([]uint64, 0, len(resources))
+	for resourceID := range resources {
+		resourceIDs = append(resourceIDs, resourceID)
+	}
+	type association struct {
+		ResourceID uint64
+		RequestID  string
+	}
+	var associations []association
+	if err := db.Model(&RequestResource{}).Select("resource_id, request_id").Where("resource_id IN ?", resourceIDs).Order("id ASC").Find(&associations).Error; err != nil {
+		return nil, err
+	}
+	counts := make(map[uint64]int, len(resources))
+	seen := make(map[string]struct{})
+	requestIDs := make([]string, 0)
+	for _, association := range associations {
+		if perResourceLimit > 0 && counts[association.ResourceID] >= perResourceLimit {
+			continue
+		}
+		counts[association.ResourceID]++
+		if _, ok := seen[association.RequestID]; ok {
+			continue
+		}
+		seen[association.RequestID] = struct{}{}
+		requestIDs = append(requestIDs, association.RequestID)
+	}
+	return requestIDs, nil
+}
+
+func loadResourcePreviews(db *gorm.DB, resources map[uint64]string, requestIDs []string) (map[uint64]string, error) {
+	previews := make(map[uint64]string)
+	if len(resources) == 0 || len(requestIDs) == 0 {
+		return previews, nil
+	}
+	type requestBodyRow struct {
+		ID          string
+		RequestBody string
+	}
+	var bodies []requestBodyRow
+	if err := db.Model(&RelayRequestLog{}).Select("id, request_body").Where("id IN ?", requestIDs).Find(&bodies).Error; err != nil {
+		return nil, err
+	}
+	positions := make(map[string]int, len(bodies))
+	for index := range bodies {
+		positions[bodies[index].ID] = index
+	}
+	var payloads []RelayRequestPayload
+	if err := db.Select("request_id, request_body").Where("request_id IN ?", requestIDs).Find(&payloads).Error; err != nil {
+		return nil, err
+	}
+	for _, payload := range payloads {
+		if index, ok := positions[payload.RequestID]; ok {
+			bodies[index].RequestBody = payload.RequestBody
 		}
 	}
-	return ""
+	resourceByFingerprint := make(map[string]uint64, len(resources))
+	for resourceID, fingerprint := range resources {
+		resourceByFingerprint[fingerprint] = resourceID
+	}
+	for _, body := range bodies {
+		if body.RequestBody == "" {
+			continue
+		}
+		for _, detected := range detectResources([]byte(decompressStoredPayload(body.RequestBody))) {
+			resourceID, ok := resourceByFingerprint[detected.Fingerprint]
+			if !ok || detected.PreviewData == "" || previews[resourceID] != "" {
+				continue
+			}
+			previews[resourceID] = detected.PreviewData
+		}
+		if len(previews) == len(resources) {
+			break
+		}
+	}
+	return previews, nil
 }
 
 func (s *ManagementService) Resources(ctx context.Context, query ResourceQuery) (*ResourcePage, error) {

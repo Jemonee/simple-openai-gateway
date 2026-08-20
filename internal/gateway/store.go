@@ -74,7 +74,9 @@ func (s *Store) migrate() error {
 		&CircuitRecord{},
 		&ClientToken{},
 		&ClientTokenModel{},
+		&ClientTokenChannel{},
 		&RelayRequestLog{},
+		&RelayRequestPayload{},
 		&VerificationReport{},
 		&VerificationSession{},
 		&VerificationJob{},
@@ -85,6 +87,7 @@ func (s *Store) migrate() error {
 		&ModelAgentContextWindow{},
 		&RelayChatSessionClaim{},
 		&RelayAttemptLog{},
+		&RelayAttemptPayload{},
 		&RelayStepLog{},
 		&TokenDailyStat{},
 		&ChannelModelDailyStat{},
@@ -98,6 +101,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.db.Model(&AdminSession{}).Where("login_type = ''").Update("login_type", ConsoleLoginAdmin).Error; err != nil {
+		return err
+	}
+	if err := s.db.Model(&AdminUser{}).Where("role = ''").Update("role", ConsoleRoleAdmin).Error; err != nil {
 		return err
 	}
 	if err := s.backfillTokenDailyStats(); err != nil {
@@ -149,6 +155,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.backfillRelaySessionActivity(); err != nil {
+		return err
+	}
+	if err := s.migrateRelayPayloadTables(); err != nil {
 		return err
 	}
 	return s.reclaimSQLiteSpaceOnce()
@@ -546,6 +555,7 @@ func (s *Store) bootstrapAdmin() error {
 	return s.db.Create(&AdminUser{
 		Username:     username,
 		PasswordHash: string(passwordHash),
+		Role:         ConsoleRoleAdmin,
 		Enabled:      true,
 	}).Error
 }
@@ -571,6 +581,9 @@ func (s *Store) cleanupExpired() {
 	_ = s.db.Where("expires_at < ?", now).Delete(&SessionAffinity{}).Error
 	if detailCutoff, ok := s.detailedLogCutoff(now); ok {
 		requestIDs := s.db.Model(&RelayRequestLog{}).Select("id").Where("created_at < ?", detailCutoff)
+		attemptIDs := s.db.Model(&RelayAttemptLog{}).Select("id").Where("created_at < ? OR request_id IN (?)", detailCutoff, requestIDs)
+		_ = s.db.Where("attempt_id IN (?)", attemptIDs).Delete(&RelayAttemptPayload{}).Error
+		_ = s.db.Where("request_id IN (?)", requestIDs).Delete(&RelayRequestPayload{}).Error
 		_ = s.db.Where("created_at < ? OR request_id IN (?)", detailCutoff, requestIDs).Delete(&RelayAttemptLog{}).Error
 		_ = s.db.Where("created_at < ? OR request_id IN (?)", detailCutoff, requestIDs).Delete(&RelayStepLog{}).Error
 		_ = s.db.Where("request_id IN (?)", requestIDs).Delete(&RequestResource{}).Error

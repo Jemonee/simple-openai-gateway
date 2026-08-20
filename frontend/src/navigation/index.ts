@@ -13,6 +13,7 @@ import {
   Setting,
   Tickets,
   WarningFilled,
+  UserFilled,
 } from '@element-plus/icons-vue'
 
 export interface NavigationItem {
@@ -62,7 +63,6 @@ export const navigationGroups: NavigationGroup[] = [
         label: '渠道管理',
         icon: Connection,
         component: () => import('@/pages/Channels.vue'),
-        adminOnly: true,
       },
       {
         key: 'channel-verification',
@@ -115,6 +115,14 @@ export const navigationGroups: NavigationGroup[] = [
         label: '访问令牌',
         icon: Key,
         component: () => import('@/pages/Tokens.vue'),
+      },
+      {
+        key: 'user-management',
+        path: '/users',
+        routeName: 'user-management',
+        label: '账号管理',
+        icon: UserFilled,
+        component: () => import('@/pages/UserManagement.vue'),
         adminOnly: true,
       },
       {

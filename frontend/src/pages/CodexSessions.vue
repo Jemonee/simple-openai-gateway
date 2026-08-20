@@ -8,7 +8,7 @@ import SessionRelationBadge from '@/components/SessionRelationBadge.vue'
 import { useAdminAuth } from '@/composables/useAdminAuth'
 import type { AvailableGatewayModel, Channel, ClientToken, CodexSessionDetail, CodexSessionPage, CodexSessionSummary, LogAggregateSummary } from '@/types/gateway'
 import { request } from '@/utils/api'
-import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatTokensPerSecond, formatUSD } from '@/utils/formatters'
 import { logDateDefaultTimes, logDateRangeShortcuts, toEastEightISOString, todayLogRange } from '@/utils/logDateRanges'
 
 const loading = ref(true)
@@ -295,9 +295,9 @@ onMounted(async () => {
         <small>自行估算 {{ formatUSD(summary?.estimatedCostMicros ?? 0) }}</small>
       </article>
       <article class="metric-cell">
-        <span><Timer />平均请求耗时</span>
-        <strong v-if="!loading">{{ formatTiming(summary?.averageDurationMs ?? 0, summary?.durationSampleCount ?? 0) }}</strong><el-skeleton v-else :rows="1" animated />
-        <small>首 Token {{ formatTiming(summary?.averageFirstTokenMs ?? 0, summary?.firstTokenSampleCount ?? 0) }} · 延迟 {{ formatTiming(summary?.averageLatencyMs ?? 0, summary?.latencySampleCount ?? 0) }}</small>
+        <span><Timer />平均输出 TPS</span>
+        <strong v-if="!loading">{{ formatTokensPerSecond(summary?.averageTokensPerSecond ?? 0, summary?.tokensPerSecondSampleCount ?? 0) }}</strong><el-skeleton v-else :rows="1" animated />
+        <small>耗时 {{ formatTiming(summary?.averageDurationMs ?? 0, summary?.durationSampleCount ?? 0) }} · 首 Token {{ formatTiming(summary?.averageFirstTokenMs ?? 0, summary?.firstTokenSampleCount ?? 0) }} · 延迟 {{ formatTiming(summary?.averageLatencyMs ?? 0, summary?.latencySampleCount ?? 0) }}</small>
       </article>
     </section>
 
@@ -361,7 +361,7 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="性能 / 时间" min-width="270"><template #default="scope"><div class="performance-cell"><strong>首 Token {{ formatTiming(scope.row.averageFirstTokenMs, scope.row.firstTokenSampleCount) }} · 延迟 {{ formatTiming(scope.row.averageLatencyMs, scope.row.latencySampleCount) }}</strong><small>请求耗时 {{ formatTiming(scope.row.averageDurationMs, scope.row.durationSampleCount) }}</small><small>首次 {{ formatDate(scope.row.firstSeenAt) }} · 最近 {{ formatDate(scope.row.lastSeenAt) }}</small></div></template></el-table-column>
+        <el-table-column label="性能 / 时间" min-width="290"><template #default="scope"><div class="performance-cell"><strong>TPS {{ formatTokensPerSecond(scope.row.averageTokensPerSecond, scope.row.tokensPerSecondSampleCount) }} · 首 Token {{ formatTiming(scope.row.averageFirstTokenMs, scope.row.firstTokenSampleCount) }}</strong><small>延迟 {{ formatTiming(scope.row.averageLatencyMs, scope.row.latencySampleCount) }} · 请求耗时 {{ formatTiming(scope.row.averageDurationMs, scope.row.durationSampleCount) }}</small><small>首次 {{ formatDate(scope.row.firstSeenAt) }} · 最近 {{ formatDate(scope.row.lastSeenAt) }}</small></div></template></el-table-column>
         <el-table-column label="操作" width="96" fixed="right" align="right"><template #default="scope"><div class="table-actions"><el-tooltip content="修改会话名称" placement="top"><el-button class="table-action-button" text :icon="EditPen" aria-label="修改会话名称" @click.stop="renameSession(scope.row)" /></el-tooltip><el-tooltip content="查看会话详情" placement="top"><el-button class="table-action-button" text :icon="View" aria-label="查看会话详情" @click.stop="openSession(scope.row)" /></el-tooltip></div></template></el-table-column>
       </el-table>
       <footer class="table-pagination"><el-pagination v-model:current-page="pagination.page" v-model:page-size="pagination.pageSize" :disabled="loading" :total="total" :page-sizes="[25, 50, 100]" layout="total, sizes, prev, pager, next" @change="loadSessions" /></footer>

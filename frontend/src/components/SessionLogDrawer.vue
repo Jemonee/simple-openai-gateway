@@ -10,7 +10,7 @@ import ResourceList from '@/components/ResourceList.vue'
 import { useAdminAuth } from '@/composables/useAdminAuth'
 import type { CodexSessionDetail, CodexSessionSummary, RelayAttemptLog, RelayRequestLog } from '@/types/gateway'
 import { request } from '@/utils/api'
-import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatTokensPerSecond, formatUSD } from '@/utils/formatters'
 
 interface SessionLogDrawerProps {
   /** Session aggregate selected from the session log table. */
@@ -110,7 +110,12 @@ const timelineRequests = computed(() => (detail.value?.requests ?? []).map((requ
   })),
 })))
 const hasMoreRequests = computed(() => (detail.value?.requests.length ?? 0) < (detail.value?.requestTotal ?? 0))
-const failureCount = computed(() => Math.max(0, (detail.value?.summary.requestCount ?? 0) - (detail.value?.summary.successCount ?? 0) - (detail.value?.summary.canceledCount ?? 0) - (detail.value?.summary.processingCount ?? 0)))
+const isVerificationSession = computed(() => detail.value?.summary.clientKind === 'verification' && detail.value.summary.sessionSource === 'other')
+const failureCount = computed(() => {
+  const summary = detail.value?.summary
+  if (!summary) return 0
+  return Math.max(0, summary.requestCount - summary.successCount - summary.canceledCount - summary.processingCount)
+})
 const channelUsageText = computed(() => (detail.value?.channels ?? [])
   .slice()
   .sort((left, right) => right.share - left.share || right.attemptCount - left.attemptCount || left.channelName.localeCompare(right.channelName, 'zh-CN'))
@@ -485,7 +490,8 @@ watch(
           <article>
             <span>请求总数</span>
             <strong>{{ formatCompactNumber(detail.summary.requestCount) }}</strong>
-            <small>成功 {{ formatCompactNumber(detail.summary.successCount) }} · 取消 {{ formatCompactNumber(detail.summary.canceledCount) }}</small>
+            <small v-if="isVerificationSession">请求成功 {{ formatCompactNumber(detail.summary.successCount) }} · 尝试成功 {{ formatCompactNumber(detail.summary.verificationAttemptSuccessCount) }} · 取消 {{ formatCompactNumber(detail.summary.canceledCount) }}</small>
+            <small v-else>成功 {{ formatCompactNumber(detail.summary.successCount) }} · 取消 {{ formatCompactNumber(detail.summary.canceledCount) }}</small>
           </article>
           <article :class="{ 'is-success': detail.summary.successRate >= 0.9 }">
             <span>成功率</span>
@@ -529,6 +535,7 @@ watch(
               <div><dt>首 Token</dt><dd>{{ detail.summary.firstTokenSampleCount ? formatTiming(detail.summary.averageFirstTokenMs) : '--' }}</dd></div>
               <div><dt>中转首 Token</dt><dd>{{ detail.summary.firstResponseSampleCount ? formatTiming(detail.summary.averageFirstResponseMs) : '--' }}</dd></div>
               <div><dt>请求延迟</dt><dd>{{ detail.summary.latencySampleCount ? formatTiming(detail.summary.averageLatencyMs) : '--' }}</dd></div>
+              <div><dt>输出 TPS</dt><dd>{{ formatTokensPerSecond(detail.summary.averageTokensPerSecond, detail.summary.tokensPerSecondSampleCount) }}</dd></div>
             </dl>
           </section>
           <section class="token-breakdown" aria-label="Token 构成">
@@ -665,7 +672,7 @@ watch(
                 </div>
               </header>
               <div v-if="!isRequestExpanded(entry.request.id)" class="request-brief" aria-label="路由和耗时摘要">
-                <span v-if="!isAccessTokenLogin">
+                <span v-if="!isAccessTokenLogin && !isVerificationSession">
                   <strong>路由策略</strong>{{ entry.routeSummary.strategy }} ·
                   <em class="route-result" :class="`is-${entry.routeSummary.kind}`">{{ entry.routeSummary.result }}</em>
                 </span>
@@ -686,8 +693,8 @@ watch(
               <RelayStepTimeline v-if="!isAccessTokenLogin" :steps="entry.request.steps ?? []" />
 
               <div v-if="entry.attempts.length === 0" class="route-stage-failure">
-                <strong>请求未进入上游渠道</strong>
-                <span>{{ entry.request.errorCode || '路由或网关准备阶段结束' }}</span>
+                <strong>{{ isVerificationSession ? '请求未发送到上游' : '请求未进入上游渠道' }}</strong>
+                <span>{{ entry.request.errorCode || (isVerificationSession ? '验证在发送前结束' : '路由或网关准备阶段结束') }}</span>
               </div>
 
               <div v-for="(attemptEntry, attemptIndex) in entry.attempts" :key="attemptEntry.attempt.id" class="attempt-sequence">
@@ -770,7 +777,7 @@ watch(
 .session-secondary-metrics > section:last-child { border-right: 0; }
 .session-secondary-metrics h3 { margin-bottom: 7px; color: var(--hongfen-text-subtle); font-size: 10px; font-weight: 600; }
 .session-secondary-metrics dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; }
-.session-secondary-metrics > section:nth-child(2) dl { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.session-secondary-metrics > section:nth-child(2) dl { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .session-secondary-metrics .token-breakdown dl { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .session-secondary-metrics dl > div { display: grid; min-width: 0; justify-items: center; gap: 3px; }
 .session-secondary-metrics dt { color: var(--hongfen-text-muted); font-size: 9px; }

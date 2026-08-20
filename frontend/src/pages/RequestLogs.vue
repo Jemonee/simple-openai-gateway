@@ -8,7 +8,7 @@ import ResourceList from '@/components/ResourceList.vue'
 import { useAdminAuth } from '@/composables/useAdminAuth'
 import type { AvailableGatewayModel, Channel, ClientToken, LogAggregateSummary, LogPage, RelayAttemptLog, RelayRequestLog } from '@/types/gateway'
 import { request } from '@/utils/api'
-import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatTokensPerSecond, formatUSD } from '@/utils/formatters'
 import { logDateDefaultTimes, logDateRangeShortcuts, toEastEightISOString, todayLogRange } from '@/utils/logDateRanges'
 
 const loading = ref(true)
@@ -231,9 +231,9 @@ onMounted(async () => {
         <small>自行估算 {{ formatUSD(summary?.estimatedCostMicros ?? 0) }}</small>
       </article>
       <article class="metric-cell">
-        <span><Timer />平均请求耗时</span>
-        <strong v-if="!loading">{{ formatAverageTiming(summary?.averageDurationMs ?? 0, summary?.durationSampleCount ?? 0) }}</strong><el-skeleton v-else :rows="1" animated />
-        <small>首 Token {{ formatAverageTiming(summary?.averageFirstTokenMs ?? 0, summary?.firstTokenSampleCount ?? 0) }} · 延迟 {{ formatAverageTiming(summary?.averageLatencyMs ?? 0, summary?.latencySampleCount ?? 0) }}</small>
+        <span><Timer />平均输出 TPS</span>
+        <strong v-if="!loading">{{ formatTokensPerSecond(summary?.averageTokensPerSecond ?? 0, summary?.tokensPerSecondSampleCount ?? 0) }}</strong><el-skeleton v-else :rows="1" animated />
+        <small>耗时 {{ formatAverageTiming(summary?.averageDurationMs ?? 0, summary?.durationSampleCount ?? 0) }} · 首 Token {{ formatAverageTiming(summary?.averageFirstTokenMs ?? 0, summary?.firstTokenSampleCount ?? 0) }} · 延迟 {{ formatAverageTiming(summary?.averageLatencyMs ?? 0, summary?.latencySampleCount ?? 0) }}</small>
       </article>
     </section>
 
@@ -280,7 +280,7 @@ onMounted(async () => {
           </template>
         </el-table-column>
         <el-table-column label="来源" width="142"><template #default="scope"><div class="source-breakdown"><el-tag :type="costSourceType(scope.row)" effect="plain" size="small">{{ costSource(scope.row) }}</el-tag><small>{{ usageSource(scope.row.usageSource) }}</small></div></template></el-table-column>
-        <el-table-column label="性能 / 尝试" min-width="240"><template #default="scope"><div class="performance-cell"><strong>首 Token {{ formatTiming(scope.row.firstTokenMs) }} <small class="relay-first-response">中转首响 {{ formatTiming(scope.row.firstResponseMs) }}</small></strong><small>延迟 {{ formatTiming(scope.row.latencyMs) }} · 请求耗时 {{ formatTiming(scope.row.durationMs) }} · {{ scope.row.attemptCount }} 次尝试</small></div></template></el-table-column>
+        <el-table-column label="性能 / 尝试" min-width="260"><template #default="scope"><div class="performance-cell"><strong>TPS {{ formatTokensPerSecond(scope.row.tokensPerSecond) }} · 首 Token {{ formatTiming(scope.row.firstTokenMs) }} <small class="relay-first-response">中转首响 {{ formatTiming(scope.row.firstResponseMs) }}</small></strong><small>生成窗口 {{ formatTiming(scope.row.generationDurationMs) }} · 延迟 {{ formatTiming(scope.row.latencyMs) }} · 请求耗时 {{ formatTiming(scope.row.durationMs) }} · {{ scope.row.attemptCount }} 次尝试</small></div></template></el-table-column>
         <el-table-column v-if="!isAccessTokenLogin" label="资源" min-width="150"><template #default="scope"><ResourceList v-if="scope.row.resources?.length" :resources="scope.row.resources" compact /><span v-else class="muted-text">--</span></template></el-table-column>
         <el-table-column label="详情" width="62" fixed="right" align="right"><template #default="scope"><el-tooltip content="查看调用记录" placement="top"><el-button class="table-action-button" text :icon="View" :loading="payloadLoadingId === scope.row.id" aria-label="查看调用记录" @click="showPayloads(scope.row)" /></el-tooltip></template></el-table-column>
       </el-table>

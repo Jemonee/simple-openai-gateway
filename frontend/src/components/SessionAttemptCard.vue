@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { WarningFilled } from '@element-plus/icons-vue'
 import { useAdminAuth } from '@/composables/useAdminAuth'
 import type { RelayAttemptLog } from '@/types/gateway'
-import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatTokensPerSecond, formatUSD } from '@/utils/formatters'
 
 interface SessionAttemptCardProps {
   /** Upstream attempt displayed within a session request timeline. */
@@ -87,6 +87,7 @@ function costSourceType(): 'success' | 'warning' | 'info' {
         <span class="metric-group-label">性能</span>
         <dl>
           <div><dt>首 Token</dt><dd>{{ formatTiming(attempt.firstTokenMs) }} <small>中转首响 {{ formatTiming(attempt.firstResponseMs) }}</small></dd></div>
+          <div><dt>输出 TPS</dt><dd>{{ formatTokensPerSecond(attempt.tokensPerSecond) }} <small>窗口 {{ formatTiming(attempt.generationDurationMs) }}</small></dd></div>
           <div><dt>请求延迟</dt><dd>{{ formatTiming(attempt.latencyMs) }}</dd></div>
           <div><dt>请求耗时</dt><dd>{{ formatTiming(attempt.durationMs) }}</dd></div>
         </dl>
@@ -139,7 +140,7 @@ function costSourceType(): 'success' | 'warning' | 'info' {
 .attempt-metric-group + .attempt-metric-group { border-left: 1px solid var(--hongfen-border); }
 .metric-group-label { display: block; margin-bottom: 8px; color: var(--hongfen-text-subtle); font-size: 9px; font-weight: 650; }
 .attempt-metric-group dl { display: grid; gap: 9px 12px; margin: 0; font-variant-numeric: tabular-nums; }
-.performance-metrics dl { grid-template-columns: repeat(3, minmax(68px, 1fr)); }
+.performance-metrics dl { grid-template-columns: repeat(4, minmax(68px, 1fr)); }
 .usage-metrics dl { grid-template-columns: repeat(5, minmax(64px, 1fr)); }
 .cost-metrics dl { grid-template-columns: repeat(2, minmax(78px, 1fr)); }
 .attempt-metric-group dl > div { display: grid; gap: 2px; min-width: 0; }

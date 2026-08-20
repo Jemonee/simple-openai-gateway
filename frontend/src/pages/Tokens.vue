@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { CircleClose, CopyDocument, Edit, Plus, Refresh, RefreshRight } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { ClientToken, GatewayModel, IssuedClientToken } from '@/types/gateway'
+import type { Channel, ClientToken, ClientTokenInput, GatewayModel, IssuedClientToken } from '@/types/gateway'
 import { request } from '@/utils/api'
 import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
 
@@ -11,6 +11,7 @@ const saving = ref(false)
 const errorMessage = ref('')
 const tokens = ref<ClientToken[]>([])
 const models = ref<GatewayModel[]>([])
+const channels = ref<Channel[]>([])
 const dialogOpen = ref(false)
 const secretDialogOpen = ref(false)
 const issuedSecret = ref('')
@@ -18,7 +19,7 @@ const editingId = ref<number | null>(null)
 const rotatingTokenId = ref<number | null>(null)
 const revokingTokenId = ref<number | null>(null)
 const copyingSecret = ref(false)
-const form = reactive({ name: '', enabled: true, allowAllModels: true, rpm: 60, maxConcurrency: 10, modelIds: [] as number[] })
+const form = reactive({ name: '', enabled: true, allowAllModels: true, allowAllChannels: true, rpm: 60, maxConcurrency: 10, modelIds: [] as number[], channelIds: [] as number[] })
 const dialogTitle = computed(() => editingId.value ? '编辑访问令牌' : '签发访问令牌')
 
 function modelNames(token: ClientToken): string {
@@ -26,14 +27,21 @@ function modelNames(token: ClientToken): string {
   return token.modelIds.map((id) => models.value.find((model) => model.id === id)?.name ?? `#${id}`).join('、')
 }
 
+function channelNames(token: ClientToken): string {
+  if (token.allowAllChannels) return '全部渠道'
+  return token.channelIds.map((id) => channels.value.find((channel) => channel.id === id)?.name ?? `#${id}`).join('、') || '未配置渠道'
+}
+
 function openEditor(token?: ClientToken) {
   editingId.value = token?.id ?? null
   form.name = token?.name ?? ''
   form.enabled = token?.enabled ?? true
   form.allowAllModels = token?.allowAllModels ?? true
+  form.allowAllChannels = token?.allowAllChannels ?? true
   form.rpm = token?.rpm ?? 60
   form.maxConcurrency = token?.maxConcurrency ?? 10
   form.modelIds = [...(token?.modelIds ?? [])]
+  form.channelIds = [...(token?.channelIds ?? [])]
   dialogOpen.value = true
 }
 
@@ -41,9 +49,10 @@ async function loadData() {
   loading.value = true
   errorMessage.value = ''
   try {
-    [tokens.value, models.value] = await Promise.all([
+    [tokens.value, models.value, channels.value] = await Promise.all([
       request<ClientToken[]>('/admin/gateway/tokens'),
       request<GatewayModel[]>('/admin/gateway/models'),
+      request<Channel[]>('/admin/gateway/channels'),
     ])
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '访问令牌加载失败'
@@ -52,20 +61,22 @@ async function loadData() {
   }
 }
 
-function tokenPayload() {
+function tokenPayload(): ClientTokenInput {
   return {
     name: form.name,
     enabled: form.enabled,
     allowAllModels: form.allowAllModels,
+    allowAllChannels: form.allowAllChannels,
     rpm: form.rpm,
     maxConcurrency: form.maxConcurrency,
     modelIds: form.allowAllModels ? [] : form.modelIds,
+    channelIds: form.allowAllChannels ? [] : form.channelIds,
   }
 }
 
 async function saveToken() {
-  if (!form.name.trim() || (!form.allowAllModels && form.modelIds.length === 0)) {
-    ElMessage.error('请输入令牌名称并配置模型权限')
+  if (!form.name.trim() || (!form.allowAllModels && form.modelIds.length === 0) || (!form.allowAllChannels && form.channelIds.length === 0)) {
+    ElMessage.error('请输入令牌名称并配置模型与渠道权限')
     return
   }
   saving.value = true
@@ -123,7 +134,7 @@ async function revokeToken(token: ClientToken) {
   try {
     await request<ClientToken>(`/admin/gateway/tokens/${token.id}`, {
       method: 'PUT',
-      body: JSON.stringify({ name: token.name, enabled: false, allowAllModels: token.allowAllModels, rpm: token.rpm, maxConcurrency: token.maxConcurrency, modelIds: token.modelIds }),
+      body: JSON.stringify({ name: token.name, enabled: false, allowAllModels: token.allowAllModels, allowAllChannels: token.allowAllChannels, rpm: token.rpm, maxConcurrency: token.maxConcurrency, modelIds: token.modelIds, channelIds: token.channelIds } satisfies ClientTokenInput),
     })
     ElMessage.success('令牌已吊销')
     await loadData()
@@ -148,7 +159,7 @@ onMounted(loadData)
 <template>
   <div class="page-stack">
     <header class="page-heading">
-      <div><h1>访问令牌</h1><p>签发客户端 sk- Token，并限制模型、RPM 与并发数</p></div>
+      <div><h1>访问令牌</h1><p>签发客户端 sk- Token，并限制模型、渠道、RPM 与并发数</p></div>
       <div class="page-actions"><el-tooltip content="刷新令牌列表" placement="bottom"><el-button class="page-refresh-button" :icon="Refresh" :loading="loading" aria-label="刷新令牌列表" @click="loadData" /></el-tooltip><el-button type="primary" :icon="Plus" @click="openEditor()">签发令牌</el-button></div>
     </header>
 
@@ -158,6 +169,7 @@ onMounted(loadData)
         <el-table-column label="令牌" min-width="190"><template #default="scope"><div class="primary-cell"><strong>{{ scope.row.name }}</strong><small><code>{{ scope.row.keyPrefix }}</code></small></div></template></el-table-column>
         <el-table-column label="状态" width="100"><template #default="scope"><el-tag :type="scope.row.enabled ? 'success' : 'info'" effect="plain">{{ scope.row.enabled ? '有效' : '已吊销' }}</el-tag></template></el-table-column>
         <el-table-column label="模型权限" min-width="190"><template #default="scope"><span class="clamped-text">{{ modelNames(scope.row) }}</span></template></el-table-column>
+        <el-table-column label="渠道权限" min-width="170"><template #default="scope"><span class="clamped-text">{{ channelNames(scope.row) }}</span></template></el-table-column>
         <el-table-column label="RPM" width="88" align="right" prop="rpm" />
         <el-table-column label="并发" width="88" align="right" prop="maxConcurrency" />
         <el-table-column label="累计统计" min-width="220"><template #default="scope"><div class="primary-cell"><strong>{{ formatCompactNumber(scope.row.statistics.requests) }} 次 · {{ formatUSD(scope.row.statistics.upstreamCostMicros) }}</strong><small>估算 {{ formatUSD(scope.row.statistics.estimatedCostMicros) }} · {{ formatCompactNumber(scope.row.statistics.inputTokens + scope.row.statistics.outputTokens) }} Tokens</small></div></template></el-table-column>
@@ -168,7 +180,7 @@ onMounted(loadData)
       <div v-if="!loading && tokens.length === 0" class="table-empty-action"><el-button type="primary" :icon="Plus" @click="openEditor()">签发第一个令牌</el-button></div>
     </section>
 
-    <el-dialog v-model="dialogOpen" :title="dialogTitle" width="min(560px, calc(100vw - 32px))">
+    <el-dialog v-model="dialogOpen" :title="dialogTitle" width="min(640px, calc(100vw - 32px))">
       <el-form label-position="top" @submit.prevent="saveToken">
         <el-form-item label="令牌名称"><el-input v-model="form.name" placeholder="例如 数据分析客户端" /></el-form-item>
         <div class="form-columns"><el-form-item label="每分钟请求数"><el-input-number v-model="form.rpm" :min="1" :max="100000" controls-position="right" /></el-form-item><el-form-item label="最大并发数"><el-input-number v-model="form.maxConcurrency" :min="1" :max="10000" controls-position="right" /></el-form-item></div>
@@ -176,6 +188,10 @@ onMounted(loadData)
           <el-radio-group v-model="form.allowAllModels"><el-radio-button :value="true">全部模型</el-radio-button><el-radio-button :value="false">指定模型</el-radio-button></el-radio-group>
         </el-form-item>
         <el-checkbox-group v-if="!form.allowAllModels" v-model="form.modelIds" class="model-checks"><el-checkbox v-for="model in models" :key="model.id" :value="model.id">{{ model.name }}</el-checkbox></el-checkbox-group>
+        <el-form-item label="渠道权限">
+          <el-radio-group v-model="form.allowAllChannels"><el-radio-button :value="true">全部渠道</el-radio-button><el-radio-button :value="false">指定渠道</el-radio-button></el-radio-group>
+        </el-form-item>
+        <el-checkbox-group v-if="!form.allowAllChannels" v-model="form.channelIds" class="model-checks"><el-checkbox v-for="channel in channels" :key="channel.id" :value="channel.id">{{ channel.name }}{{ channel.enabled ? '' : '（已停用）' }}</el-checkbox></el-checkbox-group>
         <el-checkbox v-model="form.enabled">令牌立即生效</el-checkbox>
       </el-form>
       <template #footer><div class="dialog-actions"><el-button @click="dialogOpen = false">取消</el-button><el-button type="primary" :loading="saving" @click="saveToken">{{ editingId ? '保存策略' : '签发令牌' }}</el-button></div></template>

@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/Jemonee/simple-openai-gateway/internal/gateway"
@@ -10,6 +11,7 @@ import (
 	"github.com/Jemonee/simple-openai-gateway/pkg/common"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type AdminApi struct {
@@ -32,10 +34,21 @@ type adminPasswordRequest struct {
 	NewPassword     string `json:"newPassword" binding:"required"`
 }
 
+type adminCreateUserRequest struct {
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required"`
+	Role     string `json:"role"`
+}
+
+type adminResetPasswordRequest struct {
+	NewPassword string `json:"newPassword" binding:"required"`
+}
+
 type adminSessionView struct {
 	ID        uint64 `json:"id"`
 	Username  string `json:"username"`
 	LoginType string `json:"loginType"`
+	Role      string `json:"role"`
 	TokenID   uint64 `json:"tokenId,omitempty"`
 }
 
@@ -51,6 +64,11 @@ func (a *AdminApi) Register(router *gin.RouterGroup) {
 	auth.POST("/logout", a.security.RequireConsole, a.logout)
 	auth.GET("/session", a.security.RequireConsole, a.session)
 	auth.PUT("/password", a.security.RequireAdmin, a.changePassword)
+	admin := auth.Group("/users")
+	admin.Use(a.security.RequireAdmin)
+	admin.GET("", a.listUsers)
+	admin.POST("", a.createUser)
+	admin.POST("/:id/reset-password", a.resetUserPassword)
 }
 
 func (a *AdminApi) login(c *gin.Context) {
@@ -128,13 +146,67 @@ func adminView(principal *gateway.ConsolePrincipal) *adminSessionView {
 			ID:        principal.AccessToken.ID,
 			Username:  principal.AccessToken.Name,
 			LoginType: gateway.ConsoleLoginAccessToken,
+			Role:      gateway.ConsoleRoleUser,
 			TokenID:   principal.AccessToken.ID,
 		}
 	}
 	if principal != nil && principal.Admin != nil {
-		return &adminSessionView{ID: principal.Admin.ID, Username: principal.Admin.Username, LoginType: gateway.ConsoleLoginAdmin}
+		role := principal.Admin.Role
+		if role == "" {
+			role = gateway.ConsoleRoleAdmin
+		}
+		return &adminSessionView{ID: principal.Admin.ID, Username: principal.Admin.Username, LoginType: gateway.ConsoleLoginAdmin, Role: role}
 	}
 	return &adminSessionView{}
+}
+
+func (a *AdminApi) listUsers(c *gin.Context) {
+	users, err := a.auth.ListUsers()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, common.F[any](http.StatusInternalServerError, err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, common.S(&users))
+}
+
+func (a *AdminApi) createUser(c *gin.Context) {
+	var input adminCreateUserRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, common.F[any](http.StatusBadRequest, "用户名和密码不能为空"))
+		return
+	}
+	user, err := a.auth.CreateUser(input.Username, input.Password, input.Role)
+	if err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			status = http.StatusConflict
+		}
+		c.JSON(status, common.F[any](status, err.Error()))
+		return
+	}
+	c.JSON(http.StatusCreated, common.S(user))
+}
+
+func (a *AdminApi) resetUserPassword(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, common.F[any](http.StatusBadRequest, "账号 ID 无效"))
+		return
+	}
+	var input adminResetPasswordRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, common.F[any](http.StatusBadRequest, "新密码不能为空"))
+		return
+	}
+	if err := a.auth.ResetPassword(id, input.NewPassword); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, gateway.ErrInvalidSession) || errors.Is(err, gorm.ErrRecordNotFound) {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, common.F[any](status, err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, common.S[any](nil))
 }
 
 func (a *AdminApi) changePassword(c *gin.Context) {

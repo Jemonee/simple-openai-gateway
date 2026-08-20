@@ -95,8 +95,23 @@ export interface AdminSession {
   username: string
   /** Authentication method that determines the console feature set. */
   loginType: 'admin' | 'access_token'
+  /** Account role used to determine management permissions and data scope. */
+  role: 'admin' | 'user'
   /** Client token owning this console session; omitted for administrator logins. */
   tokenId?: number
+}
+
+export interface AdminUserView {
+  /** Stable account identifier. */
+  id: number
+  /** Login name shown in the account list. */
+  username: string
+  /** Account role controlling administrator or owner-scoped access. */
+  role: 'admin' | 'user'
+  /** Whether the account can sign in. */
+  enabled: boolean
+  /** Account creation timestamp. */
+  createdAt: string
 }
 
 export interface AvailableGatewayModel {
@@ -170,6 +185,10 @@ export interface ChannelMetrics {
   averageDurationMs: number
   /** Successful attempts with a recorded full-response duration within five days. */
   durationSampleCount: number
+  /** Sampled output tokens divided by their total complete generation time. */
+  averageTokensPerSecond: number
+  /** Successful streamed attempts with at least two output events and a measurable generation interval within five days. */
+  tokensPerSecondSampleCount: number
   /** Upstream-reported input tokens from successful attempts within five days. */
   inputTokens: number
   /** Upstream-reported cached input tokens included in inputTokens within five days. */
@@ -193,6 +212,16 @@ export interface Channel {
   name: string
   /** OpenAI-compatible upstream base URL, normally ending in /v1. */
   baseUrl: string
+  /** Credential mode used to authenticate the upstream channel. */
+  authType: 'api_key' | 'chatgpt_oauth'
+  /** Whether a ChatGPT subscription access token is configured. */
+  chatgptAccountId: string
+  /** ChatGPT user identifier returned by OAuth, when available. */
+  chatgptUserId: string
+  /** ChatGPT plan label returned by OAuth, when available. */
+  chatgptPlanType: string
+  /** OAuth access-token expiry timestamp, or null for legacy/API-key channels. */
+  oauthExpiresAt: string | null
   /** Whether new requests may be routed to the channel. */
   enabled: boolean
   /** Whether Chat streaming requests may include stream_options.include_usage. */
@@ -215,6 +244,8 @@ export interface Channel {
   lastError: string
   /** Whether an encrypted upstream API key is stored. */
   apiKeyConfigured: boolean
+  /** Whether an encrypted HTTP proxy URL is stored for this channel. */
+  proxyConfigured: boolean
   /** Public-to-upstream model mappings configured for the channel. */
   models: ChannelModel[]
   /** Performance, cache, and rolling 30-minute success metrics derived from detailed attempt logs. */
@@ -223,6 +254,50 @@ export interface Channel {
   createdAt: string
   /** Channel update timestamp in RFC 3339 format. */
   updatedAt: string
+}
+
+export interface ChatGPTOAuthStartRequest {
+  /** Local callback URI registered for the OAuth authorization code. */
+  redirectUri: string
+  /** Optional HTTP proxy URL used for the server-side OAuth token exchange. */
+  proxyUrl?: string
+}
+
+export interface ChatGPTOAuthStartResponse {
+  /** Browser URL where the administrator grants ChatGPT access. */
+  authorizationUrl: string
+  /** Short-lived server-side PKCE session identifier. */
+  sessionId: string
+  /** CSRF state value returned by the OAuth provider. */
+  state: string
+  /** Redirect URI bound to this PKCE session. */
+  redirectUri: string
+}
+
+export interface ChatGPTOAuthExchangeRequest {
+  /** Short-lived PKCE session identifier. */
+  sessionId: string
+  /** Authorization code returned by OpenAI. */
+  code: string
+  /** State returned by OpenAI and shown in the start response. */
+  state: string
+}
+
+export interface ChatGPTOAuthCredential {
+  /** OAuth bearer token encrypted by the backend after channel save. */
+  accessToken: string
+  /** Refresh token used by the backend to renew the bearer token. */
+  refreshToken: string
+  /** Access-token expiry returned by OpenAI, when provided. */
+  expiresAt: string | null
+  /** Account email returned in the ID token metadata. */
+  email: string
+  /** ChatGPT account identifier used by the upstream Codex API. */
+  chatgptAccountId: string
+  /** ChatGPT user identifier returned by OAuth. */
+  chatgptUserId: string
+  /** ChatGPT plan label returned by OAuth. */
+  chatgptPlanType: string
 }
 
 export type CircuitResolution = '' | 'automatic_recovery' | 'escalated' | 'manual_reopen' | 'mapping_removed' | 'manual_reset'
@@ -465,7 +540,7 @@ export interface VerificationAttempt {
   /** HTTP response status, zero for transport failures. */
   statusCode: number
   /** Call outcome. */
-  outcome: 'success' | 'failed'
+  outcome: 'success' | 'failed' | 'canceled'
   /** Transport or response error text. */
   errorMessage: string
   /** Input tokens observed or estimated. */
@@ -517,6 +592,14 @@ export interface ChannelModelDiscoveryRequest {
   baseUrl: string
   /** Replacement or unsaved upstream key; blank reuses the stored encrypted key. */
   apiKey: string
+  /** Authentication mode used to select normal upstream discovery or the ChatGPT subscription model set. */
+  authType?: 'api_key' | 'chatgpt_oauth'
+  /** Unsaved ChatGPT OAuth access token; omitted when discovery can use stored credentials. */
+  oauthAccessToken?: string
+  /** ChatGPT account identifier forwarded during subscription-channel discovery. */
+  chatgptAccountId?: string
+  /** Optional HTTP proxy URL used for ChatGPT OAuth upstream requests. */
+  proxyUrl?: string
 }
 
 export interface OfficialModelPrice {
@@ -596,6 +679,8 @@ export interface ClientToken {
   enabled: boolean
   /** Whether every enabled public model is allowed. */
   allowAllModels: boolean
+  /** Whether routing may use every configured channel. */
+  allowAllChannels: boolean
   /** Maximum accepted requests in each fixed one-minute window. */
   rpm: number
   /** Maximum concurrent in-flight requests. */
@@ -604,12 +689,33 @@ export interface ClientToken {
   lastUsedAt: string | null
   /** Explicit model permissions when allowAllModels is false. */
   modelIds: number[]
+  /** Explicit channel permissions when allowAllChannels is false. */
+  channelIds: number[]
   /** Long-term daily statistics retained after detailed logs expire. */
   statistics: TokenStatistics
   /** Token creation timestamp in RFC 3339 format. */
   createdAt: string
   /** Token update timestamp in RFC 3339 format. */
   updatedAt: string
+}
+
+export interface ClientTokenInput {
+  /** Administrator-facing token name. */
+  name: string
+  /** Whether the token may authenticate public API requests immediately. */
+  enabled: boolean
+  /** Whether every enabled public model is allowed. */
+  allowAllModels: boolean
+  /** Whether routing may use every configured channel. */
+  allowAllChannels: boolean
+  /** Maximum accepted requests in each fixed one-minute window. */
+  rpm: number
+  /** Maximum concurrent in-flight requests. */
+  maxConcurrency: number
+  /** Explicit model permissions when allowAllModels is false. */
+  modelIds: number[]
+  /** Explicit channel permissions when allowAllChannels is false. */
+  channelIds: number[]
 }
 
 export interface TokenStatistics {
@@ -784,6 +890,10 @@ export interface DashboardBreakdown {
   estimatedCostMicros: number
   /** Upstream cost in micro-USD, with estimate fallback when the upstream omits cost. */
   upstreamCostMicros: number
+  /** Sampled output tokens divided by total complete generation time for this breakdown. */
+  averageTokensPerSecond: number
+  /** Successful requests with a valid output-throughput sample. */
+  tokensPerSecondSampleCount: number
 }
 
 export interface DashboardSummary {
@@ -827,6 +937,10 @@ export interface DashboardSummary {
   averageDurationMs: number
   /** Requests included in the duration average. */
   durationSampleCount: number
+  /** Sampled output tokens divided by their total complete generation time. */
+  averageTokensPerSecond: number
+  /** Successful streamed requests with a valid TPS sample in the selected range. */
+  tokensPerSecondSampleCount: number
   /** Daily metrics for each date in the selected range, including zero-value dates. */
   daily: DashboardDaily[]
   /** Hourly request metrics from the start of the selected range through the current UTC+8 hour. */
@@ -1002,6 +1116,10 @@ export interface RelayAttemptLog {
   latencyMs: number
   /** Time from upstream response headers until its response body ended. */
   durationMs: number
+  /** Complete generation window from the first output token to the end of the upstream response. */
+  generationDurationMs: number
+  /** Persisted output throughput for this attempt; zero when the stream cannot provide a valid sample. */
+  tokensPerSecond: number
   /** Compatibility success flag; outcome carries the three-state result. */
   success: boolean
   /** Sanitized transport or status failure detail. */
@@ -1089,6 +1207,10 @@ export interface RelayRequestLog {
   latencyMs: number
   /** Time from final upstream response headers until the response body ended. */
   durationMs: number
+  /** Complete generation window from the first output token to the end of the final upstream response. */
+  generationDurationMs: number
+  /** Persisted output throughput for this request; zero when the stream cannot provide a valid sample. */
+  tokensPerSecond: number
   /** Whether the client requested an SSE response. */
   stream: boolean
   /** Stable gateway or upstream error code. */
@@ -1165,6 +1287,10 @@ export interface LogAggregateSummary {
   averageDurationMs: number
   /** Matching requests included in the duration average. */
   durationSampleCount: number
+  /** Sampled output tokens divided by total complete generation time across matching requests. */
+  averageTokensPerSecond: number
+  /** Matching successful streamed requests with a valid TPS sample. */
+  tokensPerSecondSampleCount: number
 }
 
 export interface LogPage {
@@ -1318,9 +1444,15 @@ export interface CodexSessionSummary {
   successCount: number
   /** Requests canceled by downstream clients before protocol completion. */
   canceledCount: number
+  /** Successful upstream attempts made by a channel-verification session. */
+  verificationAttemptSuccessCount: number
+  /** Failed upstream attempts made by a channel-verification session. */
+  verificationAttemptFailureCount: number
+  /** Canceled upstream attempts made by a channel-verification session. */
+  verificationAttemptCanceledCount: number
   /** Requests accepted by the gateway but not yet finalized. */
   processingCount: number
-  /** Successful retained requests divided by total upstream attempts. */
+  /** Success ratio; channel-verification sessions use successful verification attempts as the numerator. */
   successRate: number
   /** Total upstream attempts made by retained requests. */
   attemptCount: number
@@ -1358,6 +1490,10 @@ export interface CodexSessionSummary {
   averageDurationMs: number
   /** Retained requests included in the duration average. */
   durationSampleCount: number
+  /** Sampled output tokens divided by total complete generation time for this session. */
+  averageTokensPerSecond: number
+  /** Retained successful streamed requests with a valid TPS sample. */
+  tokensPerSecondSampleCount: number
   /** Earliest retained request timestamp in RFC 3339 format. */
   firstSeenAt: string
   /** Latest retained request timestamp in RFC 3339 format. */

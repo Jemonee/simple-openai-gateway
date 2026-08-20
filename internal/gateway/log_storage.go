@@ -17,16 +17,30 @@ func (s *ManagementService) LogStorageUsage(ctx context.Context) (*LogStorageUsa
 	if cutoff, ok := s.store.detailedLogCutoff(time.Now()); ok {
 		result.CutoffAt = &cutoff
 	}
-	if err := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).
+	if err := s.store.db.WithContext(ctx).Model(&RelayRequestPayload{}).
 		Select("COALESCE(SUM(length(request_parameters_json) + length(request_body) + length(response_body)), 0)").
 		Scan(&result.RequestPayloadBytes).Error; err != nil {
 		return nil, err
 	}
-	if err := s.store.db.WithContext(ctx).Model(&RelayAttemptLog{}).
+	var legacyRequestPayloadBytes int64
+	if err := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).
+		Select("COALESCE(SUM(length(request_parameters_json) + length(request_body) + length(response_body)), 0)").
+		Scan(&legacyRequestPayloadBytes).Error; err != nil {
+		return nil, err
+	}
+	result.RequestPayloadBytes += legacyRequestPayloadBytes
+	if err := s.store.db.WithContext(ctx).Model(&RelayAttemptPayload{}).
 		Select("COALESCE(SUM(length(request_body) + length(response_body)), 0)").
 		Scan(&result.AttemptPayloadBytes).Error; err != nil {
 		return nil, err
 	}
+	var legacyAttemptPayloadBytes int64
+	if err := s.store.db.WithContext(ctx).Model(&RelayAttemptLog{}).
+		Select("COALESCE(SUM(length(request_body) + length(response_body)), 0)").
+		Scan(&legacyAttemptPayloadBytes).Error; err != nil {
+		return nil, err
+	}
+	result.AttemptPayloadBytes += legacyAttemptPayloadBytes
 	result.PayloadBytes = result.RequestPayloadBytes + result.AttemptPayloadBytes
 	return result, nil
 }

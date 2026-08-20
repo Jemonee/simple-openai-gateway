@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { Right } from '@element-plus/icons-vue'
 import type { RouteDecision, RouteDecisionCandidate } from '@/types/gateway'
-import { formatDuration, formatUSD } from '@/utils/formatters'
+import { formatDuration, formatTokensPerSecond, formatUSD } from '@/utils/formatters'
 
 interface RouteDecisionPanelProps {
   /** Immutable routing calculation snapshot attached to an upstream attempt. */
@@ -41,7 +41,7 @@ function formatFirstToken(candidate: RouteDecisionCandidate): string {
 }
 
 function formatThroughput(candidate: RouteDecisionCandidate): string {
-  return candidate.tokensPerSecond > 0 ? `${candidate.tokensPerSecond.toFixed(1)} token/s` : '无样本'
+  return candidate.tokensPerSecond > 0 ? formatTokensPerSecond(candidate.tokensPerSecond) : '无样本'
 }
 
 function formatRecentShare(candidate: RouteDecisionCandidate): string {
@@ -116,7 +116,7 @@ function modeLabel(): string {
             <td><span class="channel-name"><i aria-hidden="true" />{{ candidate.channelName }}<em v-if="candidate.selected">{{ isAffinityDecision ? '沿用' : '已命中' }}</em></span><code>{{ candidate.upstreamModel }}</code></td>
             <td><strong>{{ candidate.priority }}</strong><span>× {{ candidate.weight }}</span></td>
             <td><span>{{ formatUSD(candidate.expectedCostMicros) }}</span><small>价格分 {{ formatScore(candidate.priceScore) }}</small></td>
-            <td class="efficiency-cell"><span>首 token {{ formatFirstToken(candidate) }}</span><span>响应 {{ formatLatency(candidate) }}</span><span>{{ formatThroughput(candidate) }}</span><small>效率分 {{ formatScore(candidate.efficiencyScore) }}</small></td>
+            <td class="efficiency-cell"><span>首 token {{ formatFirstToken(candidate) }}</span><span>响应 {{ formatLatency(candidate) }}</span><span>TPS {{ formatThroughput(candidate) }}</span><small>效率分 {{ formatScore(candidate.efficiencyScore) }}</small></td>
             <td><span>成功 {{ formatPercent(candidate.successRate) }}</span><small>质量分 {{ formatScore(candidate.qualityScore) }} · 缓存命中 {{ formatCacheHitRate(candidate) }} · 缓存率 {{ formatCacheRate(candidate) }}</small></td>
             <td><span>{{ formatRecentShare(candidate) }}</span><small>目标 / 修正 {{ formatBalance(candidate) }}</small></td>
             <td><code>{{ formatExpectation(candidate.expectation) }}</code></td>

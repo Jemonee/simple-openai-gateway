@@ -116,13 +116,15 @@ func (a *WebChatApi) complete(c *gin.Context) {
 	} else {
 		admin := principal.Admin
 		token = &gateway.ClientToken{
-			ID:             webChatTokenIDBase + admin.ID,
-			Name:           "网页聊天 / " + admin.Username,
-			KeyPrefix:      "web-chat",
-			Enabled:        true,
-			AllowAllModels: true,
-			RPM:            0,
-			MaxConcurrency: 0,
+			ID:               webChatTokenIDBase + admin.ID,
+			Name:             "网页聊天 / " + admin.Username,
+			KeyPrefix:        "web-chat",
+			OwnerUserID:      admin.ID,
+			Enabled:          true,
+			AllowAllModels:   true,
+			AllowAllChannels: true,
+			RPM:              0,
+			MaxConcurrency:   0,
 		}
 	}
 	publicErr := a.relay.Relay(c.Request.Context(), recorder, headers, "", "chat", token, payload, body)

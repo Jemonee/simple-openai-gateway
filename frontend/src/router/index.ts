@@ -11,7 +11,7 @@ const router = createRouter({
 router.beforeEach(async (to) => {
   const auth = useAdminAuth()
   await auth.ensureSession()
-  if (auth.user.value?.loginType === 'access_token' && to.meta.adminOnly) {
+  if (auth.user.value && auth.user.value.role !== 'admin' && to.meta.adminOnly) {
     return { path: '/', query: preserveHeadlessQuery(to.query.headless) }
   }
   return true

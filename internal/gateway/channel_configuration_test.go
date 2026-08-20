@@ -38,6 +38,59 @@ func TestSaveChannelConfigurationCommitsChannelAndMappingsTogether(t *testing.T)
 	}
 }
 
+func TestSaveChatGPTOAuthChannelConfigurationUsesReferencePrices(t *testing.T) {
+	store := newTestStore(t)
+	models := []GatewayModel{
+		{Name: "gpt-5.6-sol", RoutingStrategy: RoutingPriorityWeighted, Enabled: true},
+		{Name: "gpt-5.6-sol-custom", RoutingStrategy: RoutingPriorityWeighted, Enabled: true},
+	}
+	if err := store.db.Create(&models).Error; err != nil {
+		t.Fatal(err)
+	}
+	customMultiplier := int64(25_000)
+	customCachePrice := int64(7_000_000)
+
+	created, err := NewManagementService(store).SaveChannelConfiguration(context.Background(), ChannelConfigurationInput{
+		Channel: ChannelInput{
+			Name: "ChatGPT subscription", AuthType: ChannelTypeChatGPTOAuth, OAuthAccessToken: "oauth-secret",
+			Enabled: true, SupportsStreamUsage: true, PriceMultiplierBasisPoints: &customMultiplier,
+		},
+		Models: []ChannelModelInput{
+			{
+				ModelID: models[0].ID, UpstreamModel: models[0].Name, Weight: 100,
+				InputPriceMicros: 99, OutputPriceMicros: 99, CachedInputPriceMicros: &customCachePrice,
+				PriceMultiplierBasisPoints: &customMultiplier, Enabled: true,
+			},
+			{
+				ModelID: models[1].ID, UpstreamModel: models[1].Name, Weight: 100,
+				InputPriceMicros: 99, OutputPriceMicros: 99, CachedInputPriceMicros: &customCachePrice,
+				PriceMultiplierBasisPoints: &customMultiplier, Enabled: true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.PriceMultiplierBasisPoints != DefaultPriceMultiplierBasisPoints {
+		t.Fatalf("channel multiplier = %d, want %d", created.PriceMultiplierBasisPoints, DefaultPriceMultiplierBasisPoints)
+	}
+	if len(created.Models) != 2 {
+		t.Fatalf("saved mappings = %+v", created.Models)
+	}
+	mappings := make(map[string]ChannelModel, len(created.Models))
+	for _, mapping := range created.Models {
+		mappings[mapping.UpstreamModel] = mapping
+	}
+	priced := mappings[models[0].Name]
+	if priced.InputPriceMicros != 5_000_000 || priced.OutputPriceMicros != 30_000_000 || priced.CachedInputPriceMicros == nil || *priced.CachedInputPriceMicros != 500_000 || priced.CacheWritePriceMicros != nil || priced.PriceMultiplierBasisPoints != DefaultPriceMultiplierBasisPoints {
+		t.Fatalf("reference-priced OAuth mapping = %+v", priced)
+	}
+	unlisted := mappings[models[1].Name]
+	if unlisted.InputPriceMicros != 0 || unlisted.OutputPriceMicros != 0 || unlisted.CachedInputPriceMicros != nil || unlisted.CacheWritePriceMicros != nil || unlisted.PriceMultiplierBasisPoints != DefaultPriceMultiplierBasisPoints {
+		t.Fatalf("unlisted OAuth mapping = %+v", unlisted)
+	}
+}
+
 func TestSaveChannelConfigurationRollsBackChannelWhenMappingFails(t *testing.T) {
 	store := newTestStore(t)
 	management := NewManagementService(store)

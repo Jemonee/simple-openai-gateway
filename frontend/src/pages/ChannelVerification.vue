@@ -17,7 +17,7 @@ import type {
   VerificationVerdict,
 } from '@/types/gateway'
 import { request } from '@/utils/api'
-import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
+import { formatCompactNumber, formatDuration, formatTokensPerSecond, formatUSD } from '@/utils/formatters'
 
 interface ModeOption {
   /** Preset label shown in the segmented control. */
@@ -86,6 +86,18 @@ const fingerprintRows = computed(() => {
 function formatDate(value: string): string {
   if (!value) return '--'
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'medium', timeZone: 'Asia/Shanghai' }).format(new Date(value))
+}
+
+function formatPercent(value: number): string {
+  return new Intl.NumberFormat('zh-CN', { style: 'percent', maximumFractionDigits: 1 }).format(value)
+}
+
+function formatTiming(value: number, samples: number): string {
+  return samples > 0 ? formatDuration(value) : '--'
+}
+
+function channelSuccessRate(channel: Channel): string {
+  return channel.metrics.recentAttemptCount > 0 ? formatPercent(channel.metrics.recentSuccessRate) : '--'
 }
 
 function modeLabel(value: VerificationMode): string {
@@ -208,10 +220,12 @@ async function loadVerificationData() {
   const query = new URLSearchParams({ page: String(pagination.page), pageSize: String(pagination.pageSize) })
   if (filters.channelId) query.set('channelId', String(filters.channelId))
   if (filters.modelId) query.set('modelId', String(filters.modelId))
-  const [reportPage, sessionPage] = await Promise.all([
+  const [reportPage, sessionPage, channelItems] = await Promise.all([
     request<VerificationReportPage>(`/admin/gateway/verifications?${query}`),
     request<{ items: VerificationSession[]; total: number }>(`/admin/gateway/verification-sessions?${query}`),
+    request<Channel[]>('/admin/gateway/channels'),
   ])
+  channels.value = channelItems
   reports.value = reportPage.items
   totalReports.value = reportPage.total
   sessions.value = sessionPage.items
@@ -358,6 +372,16 @@ onUnmounted(() => {
       <div class="active-run-actions"><span>{{ activeSession.requestCount }} 次 HTTP 尝试 · {{ formatUSD(activeSession.upstreamCostMicros) }}</span><el-button text :icon="View" @click="openSession(activeSession)">查看进度</el-button></div>
     </section>
 
+    <section v-if="selectedChannel" class="channel-metrics" aria-label="当前渠道指标">
+      <div class="surface-heading"><div><h2>当前渠道指标</h2><p class="surface-note">优先显示进行中的验证；没有进行中的验证时显示最近一次验证结果</p></div><span class="metric-sample-note">{{ selectedChannel.name }}</span></div>
+      <div class="channel-metrics-grid">
+        <div class="channel-metric"><span>成功率</span><strong>{{ channelSuccessRate(selectedChannel) }}</strong><small>{{ selectedChannel.metrics.recentAttemptCount ? `${formatCompactNumber(selectedChannel.metrics.recentSuccessCount)} / ${formatCompactNumber(selectedChannel.metrics.recentAttemptCount)} 次尝试` : '暂无验证样本' }}</small></div>
+        <div class="channel-metric"><span>平均响应延迟</span><strong>{{ formatTiming(selectedChannel.metrics.averageLatencyMs, selectedChannel.metrics.latencySampleCount) }}</strong><small>{{ formatCompactNumber(selectedChannel.metrics.latencySampleCount) }} 个成功样本</small></div>
+        <div class="channel-metric"><span>平均耗时</span><strong>{{ formatTiming(selectedChannel.metrics.averageDurationMs, selectedChannel.metrics.durationSampleCount) }}</strong><small>{{ formatCompactNumber(selectedChannel.metrics.durationSampleCount) }} 个成功样本</small></div>
+        <div class="channel-metric"><span>输出 TPS</span><strong>{{ formatTokensPerSecond(selectedChannel.metrics.averageTokensPerSecond, selectedChannel.metrics.tokensPerSecondSampleCount) }}</strong><small>{{ formatCompactNumber(selectedChannel.metrics.tokensPerSecondSampleCount) }} 个生成样本</small></div>
+      </div>
+    </section>
+
     <section class="verification-summary" aria-label="验证概览">
       <div class="summary-item"><span>检测会话</span><strong>{{ totalSessions }}</strong></div>
       <div class="summary-item"><span>最近结论</span><el-tag v-if="latestReport" :type="verdictType(latestReport.verdict)" effect="plain">{{ verdictLabel(latestReport.verdict) }}</el-tag><strong v-else>--</strong></div>
@@ -461,6 +485,14 @@ onUnmounted(() => {
 .active-run-heading, .active-run-actions, .run-progress-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .active-run-heading > div { display: grid; gap: 3px; }
 .active-run-heading span, .active-run-actions > span, .run-progress-footer > span { color: var(--hongfen-text-muted); font-size: 11px; }
+.channel-metrics { border: 1px solid var(--hongfen-border); border-radius: 6px; background: var(--hongfen-surface); }
+.channel-metrics .surface-heading { margin: 0; padding: 13px 16px 10px; }
+.metric-sample-note { max-width: 36%; overflow: hidden; color: var(--hongfen-primary); font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.channel-metrics-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; border-top: 1px solid var(--hongfen-border); background: var(--hongfen-border); }
+.channel-metric { display: grid; align-content: center; gap: 5px; min-height: 82px; padding: 12px 16px; background: var(--hongfen-surface-muted); }
+.channel-metric span { color: var(--hongfen-text-muted); font-size: 12px; }
+.channel-metric strong { color: var(--hongfen-text); font: 18px var(--hongfen-font-mono); font-variant-numeric: tabular-nums; }
+.channel-metric small { color: var(--hongfen-text-muted); font-size: 10px; }
 .verification-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; overflow: hidden; background: var(--hongfen-border); }
 .summary-item { display: grid; align-content: center; gap: 6px; min-height: 76px; padding: 12px 16px; background: var(--hongfen-surface); }
 .summary-item > span { color: var(--hongfen-text-muted); font-size: 12px; }
@@ -523,12 +555,13 @@ onUnmounted(() => {
   .heading-copy > div:last-child { min-width: 0; }
   .page-heading h1 { font-size: 20px; line-height: 1.3; }
   .page-refresh-button { flex: 0 0 auto; }
-  .verification-summary, .session-overview, .check-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .channel-metrics-grid, .verification-summary, .session-overview, .check-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .verification-toolbar :deep(.el-form-item) { width: 100%; }
   .verification-toolbar :deep(.el-select) { width: 100% !important; }
   .surface-heading, .report-header { align-items: flex-start; }
 }
 @media (max-width: 480px) {
+  .channel-metrics-grid { grid-template-columns: 1fr; }
   .check-list { grid-template-columns: 1fr; }
   .fingerprint-grid > div { grid-template-columns: 42px minmax(0, 1fr) 68px; }
 }

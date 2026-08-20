@@ -18,15 +18,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Jemonee/simple-openai-gateway/internal/config"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
 	verificationWorkers          = 8
 	verificationMaxAttempts      = 3
 	verificationMaxBodyBytes     = 4 << 20
-	verificationAttemptBodyBytes = 128 << 10
+	verificationAttemptBodyBytes = maxDetailedPayloadBytes
 )
 
 type VerificationRequest struct {
@@ -226,7 +228,10 @@ func (s *VerificationService) Start(ctx context.Context, input VerificationReque
 			}
 			rows = append(rows, VerificationJob{ID: jobID, SessionID: session.ID, Sequence: index + 1, ProbeID: manifest.ProbeID, RequestFormat: manifest.RequestFormat, ContextMode: manifest.ContextMode, Effort: manifest.Effort, Status: "pending", ManifestJSON: string(encoded), CreatedAt: started, UpdatedAt: started})
 		}
-		return tx.Create(&rows).Error
+		if err := tx.Create(&rows).Error; err != nil {
+			return err
+		}
+		return s.createVerificationSessionLog(tx, session, rows)
 	})
 	if err != nil {
 		return nil, err
@@ -429,7 +434,7 @@ func (s *VerificationService) runJob(ctx context.Context, session VerificationSe
 			return s.cancelJob(job)
 		}
 		result, requestBody, responseBody, meta, err := s.performProbe(ctx, baseURL, apiKey, session.UpstreamModel, session.ID, session.NativeTransportBackend, manifest)
-		s.persistAttempt(session.ID, mapping, job, manifest, attemptNo, requestBody, responseBody, meta, err)
+		s.persistAttempt(session.ID, mapping, job, manifest, attemptNo, result, requestBody, responseBody, meta, err)
 		_ = s.store.db.Model(&VerificationJob{}).Where("id = ?", job.ID).Updates(map[string]any{"attempts_sent": attemptNo, "updated_at": time.Now().UTC()}).Error
 		if err == nil {
 			classified := classifyVerificationResult(manifest, claimedModel, result.Answer)
@@ -630,6 +635,9 @@ func parseResponsesSSE(raw []byte) (verificationTransportResult, error) {
 		}
 		typeName, _ := event["type"].(string)
 		if typeName == "response.output_text.delta" {
+			if verificationSSEKeepAlive(event) {
+				continue
+			}
 			if delta, ok := event["delta"].(string); ok {
 				deltas.WriteString(delta)
 			}
@@ -662,6 +670,14 @@ func parseResponsesSSE(raw []byte) (verificationTransportResult, error) {
 		return verificationTransportResult{}, errors.New("Responses stream completed without output text")
 	}
 	return verificationTransportResult{Answer: terminalAnswer, Usage: usage}, nil
+}
+
+func verificationSSEKeepAlive(event map[string]any) bool {
+	if keepAlive, ok := event["SSE-Keep-Alive"].(bool); ok && keepAlive {
+		return true
+	}
+	itemID, _ := event["item_id"].(string)
+	return itemID == "SSE-Keep-Alive"
 }
 
 func responseOutputText(response map[string]any) string {
@@ -719,42 +735,36 @@ func verificationErrorCategory(status int, err error) string {
 	}
 }
 
-func (s *VerificationService) persistAttempt(sessionID string, mapping ChannelModel, job VerificationJob, manifest verificationJobManifest, attemptNo int, requestBody, responseBody []byte, meta verificationTransportMeta, requestErr error) {
-	usage := Usage{}
-	upstreamCost := int64(0)
-	upstreamOK := false
-	if requestErr == nil {
-		if parsed, err := parseResponsesSSE(responseBody); err == nil {
-			usage = parsed.Usage
+func (s *VerificationService) persistAttempt(sessionID string, mapping ChannelModel, job VerificationJob, manifest verificationJobManifest, attemptNo int, result verificationTransportResult, requestBody, responseBody []byte, meta verificationTransportMeta, requestErr error) {
+	usage := result.Usage
+	upstreamSnapshot := upstreamCostSnapshot{micros: result.UpstreamCost, valid: result.UpstreamCostOK}
+	outputEstimate := int64(0)
+	responseID := ""
+	if s.estimator != nil {
+		consumeSSEEvent(responseBody, s.estimator, &usage, &upstreamSnapshot, &outputEstimate, &responseID)
+	}
+	if usage.Source == "" {
+		inputTokens := int64(0)
+		if s.estimator != nil {
+			inputTokens = s.estimator.EstimateJSON(requestBody)
+			if outputEstimate == 0 && strings.TrimSpace(result.Answer) != "" {
+				outputEstimate = s.estimator.EstimateText(result.Answer)
+			}
 		}
-		upstreamCost, upstreamOK = ParseUpstreamCostMicros(responseBody)
+		usage = Usage{InputTokens: inputTokens, OutputTokens: outputEstimate, Source: "estimated_tiktoken"}
 	}
-	inputTokens, outputTokens := usage.InputTokens, usage.OutputTokens
-	if inputTokens == 0 && s.estimator != nil {
-		inputTokens = s.estimator.EstimateJSON(requestBody)
-	}
-	if outputTokens == 0 && s.estimator != nil {
-		outputTokens = s.estimator.EstimateJSON(responseBody)
-	}
-	usage.InputTokens = inputTokens
-	usage.OutputTokens = outputTokens
-	estimated := CalculateCostMicros(mapping, usage)
-	costSource := CostSourceFallback
-	outcome := RelayOutcomeSuccess
-	if requestErr != nil || meta.Status < 200 || meta.Status >= 300 {
-		estimated = 0
-		upstreamCost = 0
-		costSource = CostSourceFailedZero
-		outcome = RelayOutcomeFailed
-	} else if upstreamOK {
-		costSource = CostSourceUpstream
-	} else {
-		upstreamCost = estimated
+	success := requestErr == nil && meta.Status >= http.StatusOK && meta.Status < http.StatusMultipleChoices
+	estimated, upstreamCost, costSource := streamAttemptCosts(mapping, usage, upstreamSnapshot, success)
+	outcome := RelayOutcomeFailed
+	if success {
+		outcome = RelayOutcomeSuccess
+	} else if errors.Is(requestErr, context.Canceled) {
+		outcome = RelayOutcomeCanceled
 	}
 	reqText, reqTrunc := boundVerificationBody(requestBody)
 	respText, respTrunc := boundVerificationBody(responseBody)
 	now := time.Now().UTC()
-	attempt := VerificationAttempt{ID: uuid.NewString(), SessionID: sessionID, Sequence: job.Sequence, JobID: job.ID, AttemptNo: attemptNo, DetectorName: manifest.ProbeID, ProbeID: manifest.ProbeID, RequestFormat: manifest.RequestFormat, TransportBackend: meta.TransportBackend, ContextMode: manifest.ContextMode, Effort: manifest.Effort, Method: http.MethodPost, Path: "/responses", Stream: true, RequestBody: reqText, RequestBodyTruncated: reqTrunc, ResponseBody: respText, ResponseBodyTruncated: respTrunc, ContentType: meta.ContentType, StatusCode: meta.Status, Outcome: outcome, ErrorMessage: truncateVerificationText(errorString(requestErr), 512), InputTokens: inputTokens, OutputTokens: outputTokens, CachedTokens: usage.CachedTokens, CacheWriteTokens: usage.CacheWriteTokens, EstimatedCostMicros: estimated, UpstreamCostMicros: upstreamCost, CostSource: costSource, UsageSource: usage.Source, LatencyMS: meta.LatencyMS, StartedAt: now.Add(-time.Duration(meta.LatencyMS) * time.Millisecond), FinishedAt: now}
+	attempt := VerificationAttempt{ID: uuid.NewString(), SessionID: sessionID, Sequence: job.Sequence, JobID: job.ID, AttemptNo: attemptNo, DetectorName: manifest.ProbeID, ProbeID: manifest.ProbeID, RequestFormat: manifest.RequestFormat, TransportBackend: meta.TransportBackend, ContextMode: manifest.ContextMode, Effort: manifest.Effort, Method: http.MethodPost, Path: "/responses", Stream: true, RequestBody: reqText, RequestBodyTruncated: reqTrunc, ResponseBody: respText, ResponseBodyTruncated: respTrunc, ContentType: meta.ContentType, StatusCode: meta.Status, Outcome: outcome, ErrorMessage: truncateVerificationText(errorString(requestErr), 512), InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens, CachedTokens: usage.CachedTokens, CacheWriteTokens: usage.CacheWriteTokens, EstimatedCostMicros: estimated, UpstreamCostMicros: upstreamCost, CostSource: costSource, UsageSource: usage.Source, LatencyMS: meta.LatencyMS, StartedAt: now.Add(-time.Duration(meta.LatencyMS) * time.Millisecond), FinishedAt: now}
 	_ = s.store.db.Create(&attempt).Error
 }
 
@@ -804,12 +814,58 @@ func (s *VerificationService) Stop(ctx context.Context, sessionID string) (*Veri
 }
 func verificationTimePtr(value time.Time) *time.Time { return &value }
 
-type verificationAggregate struct{ RequestCount, SuccessCount, InputTokens, OutputTokens, CachedTokens, CacheWriteTokens, EstimatedCostMicros, UpstreamCostMicros int64 }
+type verificationAggregate struct {
+	RequestCount, SuccessCount, InputTokens, OutputTokens, CachedTokens, CacheWriteTokens, EstimatedCostMicros, UpstreamCostMicros int64
+	TotalLatencyMS, LatencySamples, TotalDurationMS, DurationSamples                                                               int64
+	UpstreamCostCount, FallbackCostCount, MixedCostCount                                                                           int64
+	TotalTokensPerSecond                                                                                                           float64
+	TokensPerSecondSamples                                                                                                         int64
+}
 
 func (s *VerificationService) verificationAggregate(ctx context.Context, sessionID string) (verificationAggregate, error) {
-	var a verificationAggregate
-	err := s.store.db.WithContext(ctx).Model(&VerificationAttempt{}).Select("COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),0) AS success_count, COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(cached_tokens),0) AS cached_tokens, COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens, COALESCE(SUM(estimated_cost_micros),0) AS estimated_cost_micros, COALESCE(SUM(upstream_cost_micros),0) AS upstream_cost_micros").Where("session_id = ?", sessionID).Scan(&a).Error
-	return a, err
+	db := s.store.db.WithContext(ctx)
+	var attempts []VerificationAttempt
+	if err := db.Where("session_id = ?", sessionID).Order("sequence ASC, attempt_no ASC, finished_at ASC, id ASC").Find(&attempts).Error; err != nil {
+		return verificationAggregate{}, err
+	}
+	if !s.store.db.Migrator().HasTable(&VerificationJob{}) {
+		return aggregateVerificationAttempts(attempts), nil
+	}
+	var jobs []VerificationJob
+	if err := db.Where("session_id = ?", sessionID).Order("sequence ASC").Find(&jobs).Error; err != nil {
+		return verificationAggregate{}, err
+	}
+	if len(jobs) == 0 {
+		return aggregateVerificationAttempts(attempts), nil
+	}
+	attemptsByJob := make(map[string][]VerificationAttempt, len(jobs))
+	for _, attempt := range attempts {
+		attemptsByJob[attempt.JobID] = append(attemptsByJob[attempt.JobID], attempt)
+	}
+	var aggregate verificationAggregate
+	for _, job := range jobs {
+		aggregate.RequestCount++
+		jobAggregate := aggregateVerificationAttempts(attemptsByJob[job.ID])
+		aggregate.InputTokens += jobAggregate.InputTokens
+		aggregate.OutputTokens += jobAggregate.OutputTokens
+		aggregate.CachedTokens += jobAggregate.CachedTokens
+		aggregate.CacheWriteTokens += jobAggregate.CacheWriteTokens
+		aggregate.EstimatedCostMicros += jobAggregate.EstimatedCostMicros
+		aggregate.UpstreamCostMicros += jobAggregate.UpstreamCostMicros
+		aggregate.TotalLatencyMS += jobAggregate.TotalLatencyMS
+		aggregate.LatencySamples += jobAggregate.LatencySamples
+		aggregate.TotalDurationMS += jobAggregate.TotalDurationMS
+		aggregate.DurationSamples += jobAggregate.DurationSamples
+		aggregate.TotalTokensPerSecond += jobAggregate.TotalTokensPerSecond
+		aggregate.TokensPerSecondSamples += jobAggregate.TokensPerSecondSamples
+		aggregate.UpstreamCostCount += jobAggregate.UpstreamCostCount
+		aggregate.FallbackCostCount += jobAggregate.FallbackCostCount
+		aggregate.MixedCostCount += jobAggregate.MixedCostCount
+		if job.Status == "succeeded" {
+			aggregate.SuccessCount++
+		}
+	}
+	return aggregate, nil
 }
 
 type verificationCombinedReport struct {
@@ -844,7 +900,12 @@ func (s *VerificationService) finalizeSession(sessionID, claimedModel string) er
 		if err != nil {
 			return err
 		}
-		return s.store.db.Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{"status": status, "completed_count": completed, "verdict": existing.Verdict, "summary": existing.Summary, "request_count": aggregate.RequestCount, "success_count": aggregate.SuccessCount, "input_tokens": aggregate.InputTokens, "output_tokens": aggregate.OutputTokens, "cached_tokens": aggregate.CachedTokens, "cache_write_tokens": aggregate.CacheWriteTokens, "estimated_cost_micros": aggregate.EstimatedCostMicros, "upstream_cost_micros": aggregate.UpstreamCostMicros, "finished_at": existing.FinishedAt}).Error
+		return s.store.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{"status": status, "completed_count": completed, "verdict": existing.Verdict, "summary": existing.Summary, "request_count": aggregate.RequestCount, "success_count": aggregate.SuccessCount, "input_tokens": aggregate.InputTokens, "output_tokens": aggregate.OutputTokens, "cached_tokens": aggregate.CachedTokens, "cache_write_tokens": aggregate.CacheWriteTokens, "estimated_cost_micros": aggregate.EstimatedCostMicros, "upstream_cost_micros": aggregate.UpstreamCostMicros, "finished_at": existing.FinishedAt}).Error; err != nil {
+				return err
+			}
+			return s.persistVerificationSessionLog(tx, session, existing.FinishedAt, status)
+		})
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
@@ -896,8 +957,514 @@ func (s *VerificationService) finalizeSession(sessionID, claimedModel string) er
 		if err := tx.Create(&report).Error; err != nil {
 			return err
 		}
-		return tx.Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{"status": status, "completed_count": completed, "verdict": outcome, "summary": subtitle, "request_count": aggregate.RequestCount, "success_count": aggregate.SuccessCount, "input_tokens": aggregate.InputTokens, "output_tokens": aggregate.OutputTokens, "cached_tokens": aggregate.CachedTokens, "cache_write_tokens": aggregate.CacheWriteTokens, "estimated_cost_micros": aggregate.EstimatedCostMicros, "upstream_cost_micros": aggregate.UpstreamCostMicros, "finished_at": finished}).Error
+		if err := tx.Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{"status": status, "completed_count": completed, "verdict": outcome, "summary": subtitle, "request_count": aggregate.RequestCount, "success_count": aggregate.SuccessCount, "input_tokens": aggregate.InputTokens, "output_tokens": aggregate.OutputTokens, "cached_tokens": aggregate.CachedTokens, "cache_write_tokens": aggregate.CacheWriteTokens, "estimated_cost_micros": aggregate.EstimatedCostMicros, "upstream_cost_micros": aggregate.UpstreamCostMicros, "finished_at": finished}).Error; err != nil {
+			return err
+		}
+		return s.persistVerificationSessionLog(tx, session, finished, status)
 	})
+}
+
+const verificationSessionSource = "other"
+
+func verificationSessionCodexID(sessionID string) string {
+	return "verification:" + sessionID
+}
+
+func verificationSessionTitle(session VerificationSession) string {
+	started := session.StartedAt
+	if started.IsZero() {
+		started = time.Now().UTC()
+	}
+	return fmt.Sprintf("渠道验证 · %s · %s · %s · %s", truncateRunes(session.ChannelName, 18), truncateRunes(session.PublicModel, 20), verificationModeLabel(session.Mode), started.In(eastEightLocation).Format("2006-01-02 15:04:05"))
+}
+
+func verificationRequestID(sessionID string, job VerificationJob) string {
+	// The first request keeps the historical aggregate ID. This lets a run
+	// started by an older binary finish without leaving a 50th aggregate row.
+	if job.Sequence == 1 {
+		return sessionID
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("verification-request:"+job.ID)).String()
+}
+
+func verificationRequestCreatedAt(session VerificationSession, job VerificationJob) time.Time {
+	createdAt := job.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = session.StartedAt
+	}
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	return createdAt.UTC().Add(time.Duration(max(job.Sequence-1, 0)) * time.Nanosecond)
+}
+
+func (s *VerificationService) currentPayloadLogDetail() string {
+	if s == nil || s.store == nil || s.store.configManager == nil {
+		return config.PayloadLogDetailDefault
+	}
+	return config.EffectivePayloadLogDetail(s.store.configManager.GetConfig())
+}
+
+func newVerificationRequestLog(session VerificationSession, job VerificationJob, payloadLogDetail string) RelayRequestLog {
+	parameters, _ := json.Marshal(map[string]any{
+		"reasoning": map[string]any{"effort": job.Effort},
+		"stream":    true,
+		"store":     false,
+	})
+	return RelayRequestLog{
+		ID: verificationRequestID(session.ID, job), Endpoint: "responses", RequestedModel: session.PublicModel,
+		ClientKind: "verification", CodexSessionID: verificationSessionCodexID(session.ID), CodexSessionSource: verificationSessionSource,
+		SessionName: verificationSessionTitle(session), RequestParametersJSON: string(parameters), PayloadLogDetail: payloadLogDetail, Outcome: RelayOutcomeProcessing,
+		Stream: true, CreatedAt: verificationRequestCreatedAt(session, job),
+	}
+}
+
+func (s *VerificationService) createVerificationSessionLog(tx *gorm.DB, session VerificationSession, jobs []VerificationJob) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	payloadLogDetail := s.currentPayloadLogDetail()
+	latestRequestID := session.ID
+	for _, job := range jobs {
+		request := newVerificationRequestLog(session, job, payloadLogDetail)
+		if err := saveRelayRequestLog(tx, &request, false); err != nil {
+			return err
+		}
+		latestRequestID = request.ID
+	}
+	state := RelaySessionState{
+		TokenID: 0, SessionID: verificationSessionCodexID(session.ID), Title: verificationSessionTitle(session), ThreadSource: verificationSessionSource,
+		SessionSource: verificationSessionSource, ClientKind: "verification", LatestRequestID: latestRequestID,
+		LastActivityAt: verificationTimePtr(session.StartedAt), PrimaryModel: session.PublicModel, CreatedAt: session.StartedAt, UpdatedAt: session.StartedAt,
+	}
+	return tx.Create(&state).Error
+}
+
+func aggregateVerificationAttempts(attempts []VerificationAttempt) verificationAggregate {
+	var aggregate verificationAggregate
+	for _, attempt := range attempts {
+		aggregate.RequestCount++
+		aggregate.EstimatedCostMicros += max(attempt.EstimatedCostMicros, int64(0))
+		aggregate.UpstreamCostMicros += max(attempt.UpstreamCostMicros, int64(0))
+		switch attempt.CostSource {
+		case CostSourceUpstream:
+			aggregate.UpstreamCostCount++
+		case CostSourceFallback:
+			aggregate.FallbackCostCount++
+		case CostSourceMixed:
+			aggregate.MixedCostCount++
+		}
+		if attempt.Outcome != RelayOutcomeSuccess {
+			continue
+		}
+		aggregate.SuccessCount++
+		aggregate.InputTokens += max(attempt.InputTokens, int64(0))
+		aggregate.OutputTokens += max(attempt.OutputTokens, int64(0))
+		aggregate.CachedTokens += max(attempt.CachedTokens, int64(0))
+		aggregate.CacheWriteTokens += max(attempt.CacheWriteTokens, int64(0))
+		if attempt.LatencyMS > 0 {
+			aggregate.TotalLatencyMS += attempt.LatencyMS
+			aggregate.LatencySamples++
+			aggregate.TotalDurationMS += attempt.LatencyMS
+			aggregate.DurationSamples++
+		}
+		if tps := verificationAttemptTokensPerSecond(attempt.OutputTokens, attempt.LatencyMS); tps > 0 {
+			aggregate.TotalTokensPerSecond += tps
+			aggregate.TokensPerSecondSamples++
+		}
+	}
+	return aggregate
+}
+
+func verificationUsageSource(attempts []VerificationAttempt) string {
+	sources := map[string]struct{}{}
+	for _, attempt := range attempts {
+		if source := strings.TrimSpace(attempt.UsageSource); source != "" {
+			sources[source] = struct{}{}
+		}
+	}
+	if len(sources) == 1 {
+		for source := range sources {
+			return source
+		}
+	}
+	if len(sources) > 1 {
+		return "mixed"
+	}
+	return "verification"
+}
+
+func verificationJobErrorCode(job VerificationJob) string {
+	if strings.TrimSpace(job.ResultJSON) == "" {
+		return ""
+	}
+	var result verificationJobResult
+	if json.Unmarshal([]byte(job.ResultJSON), &result) != nil {
+		return ""
+	}
+	return truncateRunes(result.ErrorCategory, 80)
+}
+
+func verificationJobRequestOutcome(job VerificationJob, attempts []VerificationAttempt, sessionStatus string) (string, int) {
+	lastStatus := 0
+	for _, attempt := range attempts {
+		if attempt.StatusCode != 0 {
+			lastStatus = attempt.StatusCode
+		}
+	}
+	switch job.Status {
+	case "succeeded":
+		if lastStatus < http.StatusOK || lastStatus >= http.StatusMultipleChoices {
+			lastStatus = http.StatusOK
+		}
+		return RelayOutcomeSuccess, lastStatus
+	case "cancelled":
+		return RelayOutcomeCanceled, statusClientClosedRequest
+	case "error":
+		if lastStatus == 0 {
+			lastStatus = http.StatusInternalServerError
+		}
+		return RelayOutcomeFailed, lastStatus
+	}
+	if sessionStatus == "stopped" {
+		return RelayOutcomeCanceled, statusClientClosedRequest
+	}
+	return RelayOutcomeFailed, http.StatusInternalServerError
+}
+
+func verificationRetainedPayload(detail string, value string, truncated bool) (string, bool) {
+	return retainLoggedPayload(detail, []byte(value), truncated)
+}
+
+func finalizedVerificationRequestLog(session VerificationSession, job VerificationJob, attempts []VerificationAttempt, sessionStatus string, payloadLogDetail string) RelayRequestLog {
+	aggregate := aggregateVerificationAttempts(attempts)
+	outcome, statusCode := verificationJobRequestOutcome(job, attempts, sessionStatus)
+	request := newVerificationRequestLog(session, job, payloadLogDetail)
+	request.StatusCode = statusCode
+	request.Outcome = outcome
+	request.ErrorCode = verificationJobErrorCode(job)
+	request.InputTokens = aggregate.InputTokens
+	request.NormalInputTokens = verificationNormalInputTokens(aggregate)
+	request.OutputTokens = aggregate.OutputTokens
+	request.CachedTokens = aggregate.CachedTokens
+	request.CacheWriteTokens = aggregate.CacheWriteTokens
+	request.SentTokens = aggregate.InputTokens
+	request.EstimatedCost = aggregate.EstimatedCostMicros
+	request.UpstreamCost = aggregate.UpstreamCostMicros
+	request.CostSource = verificationCostSource(aggregate)
+	request.UsageSource = verificationUsageSource(attempts)
+	request.AttemptCount = len(attempts)
+	if len(attempts) > 0 {
+		selected := attempts[len(attempts)-1]
+		for index := len(attempts) - 1; index >= 0; index-- {
+			if attempts[index].Outcome == RelayOutcomeSuccess {
+				selected = attempts[index]
+				break
+			}
+		}
+		request.LatencyMS = max(selected.LatencyMS, int64(0))
+		request.DurationMS = request.LatencyMS
+		request.TokensPerSecond = verificationAttemptTokensPerSecond(selected.OutputTokens, selected.LatencyMS)
+	}
+	if len(attempts) > 0 {
+		first, last := attempts[0], attempts[len(attempts)-1]
+		if !first.StartedAt.IsZero() {
+			request.CreatedAt = first.StartedAt.UTC()
+		}
+		request.RequestBody, request.RequestBodyTruncated = verificationRetainedPayload(payloadLogDetail, first.RequestBody, first.RequestBodyTruncated)
+		request.ResponseBody, request.ResponseBodyTruncated = verificationRetainedPayload(payloadLogDetail, last.ResponseBody, last.ResponseBodyTruncated)
+	}
+	return request
+}
+
+func verificationRelayAttemptLog(session VerificationSession, mapping ChannelModel, channel Channel, requestID string, attempt VerificationAttempt, payloadLogDetail string) RelayAttemptLog {
+	requestBody, requestBodyTruncated := verificationRetainedPayload(payloadLogDetail, attempt.RequestBody, attempt.RequestBodyTruncated)
+	responseBody, responseBodyTruncated := verificationRetainedPayload(payloadLogDetail, attempt.ResponseBody, attempt.ResponseBodyTruncated)
+	createdAt := attempt.FinishedAt
+	if createdAt.IsZero() {
+		createdAt = attempt.StartedAt
+	}
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	return RelayAttemptLog{
+		RequestID: requestID, ChannelID: session.ChannelID, ChannelName: session.ChannelName, ChannelBaseURL: channel.BaseURL,
+		ChannelModelID: mapping.ID, UpstreamModel: session.UpstreamModel, PayloadLogDetail: payloadLogDetail,
+		RequestBody: requestBody, RequestBodyTruncated: requestBodyTruncated,
+		ResponseBody: responseBody, ResponseBodyTruncated: responseBodyTruncated,
+		StatusCode: attempt.StatusCode, Outcome: attempt.Outcome, Success: attempt.Outcome == RelayOutcomeSuccess,
+		InputTokens: attempt.InputTokens, NormalInputTokens: max(attempt.InputTokens-attempt.CachedTokens-attempt.CacheWriteTokens, int64(0)),
+		OutputTokens: attempt.OutputTokens, CachedTokens: attempt.CachedTokens, CacheWriteTokens: attempt.CacheWriteTokens, SentTokens: attempt.InputTokens,
+		EstimatedCost: attempt.EstimatedCostMicros, UpstreamCost: attempt.UpstreamCostMicros, CostSource: attempt.CostSource, UsageSource: attempt.UsageSource,
+		LatencyMS: attempt.LatencyMS, DurationMS: attempt.LatencyMS, GenerationDurationMS: attempt.LatencyMS,
+		TokensPerSecond: verificationAttemptTokensPerSecond(attempt.OutputTokens, attempt.LatencyMS),
+		ErrorMessage:    attempt.ErrorMessage, CreatedAt: createdAt.UTC(),
+	}
+}
+
+func (s *VerificationService) persistVerificationSessionLog(tx *gorm.DB, session VerificationSession, finished time.Time, status string) error {
+	if finished.IsZero() {
+		finished = time.Now().UTC()
+	}
+	var jobs []VerificationJob
+	if err := tx.Where("session_id = ?", session.ID).Order("sequence ASC").Find(&jobs).Error; err != nil {
+		return err
+	}
+	if len(jobs) == 0 {
+		// Compatibility for sessions created before per-job relay rows were
+		// introduced. New runs always have one job for every logical request.
+		var attempts []VerificationAttempt
+		if err := tx.Where("session_id = ?", session.ID).Find(&attempts).Error; err != nil {
+			return err
+		}
+		aggregate := aggregateVerificationAttempts(attempts)
+		if len(attempts) == 0 {
+			aggregate.RequestCount = 1
+		}
+		return persistVerificationSessionLog(tx, session, aggregate, finished, status)
+	}
+	var verificationAttempts []VerificationAttempt
+	if err := tx.Where("session_id = ?", session.ID).Order("sequence ASC, attempt_no ASC, finished_at ASC, id ASC").Find(&verificationAttempts).Error; err != nil {
+		return err
+	}
+	attemptsByJob := make(map[string][]VerificationAttempt, len(jobs))
+	requestIDs := make([]string, 0, len(jobs))
+	for _, job := range jobs {
+		requestIDs = append(requestIDs, verificationRequestID(session.ID, job))
+	}
+	for _, attempt := range verificationAttempts {
+		attemptsByJob[attempt.JobID] = append(attemptsByJob[attempt.JobID], attempt)
+	}
+	var finalizedCount int64
+	if err := tx.Model(&RelayRequestLog{}).Where("id IN ? AND outcome <> ?", requestIDs, RelayOutcomeProcessing).Count(&finalizedCount).Error; err != nil {
+		return err
+	}
+	alreadyFinalized := finalizedCount > 0
+
+	var mapping ChannelModel
+	_ = tx.Where("channel_id = ? AND model_id = ?", session.ChannelID, session.ModelID).First(&mapping).Error
+	var channel Channel
+	_ = tx.First(&channel, session.ChannelID).Error
+	payloadLogDetail := s.currentPayloadLogDetail()
+	var startedRequest RelayRequestLog
+	if err := tx.Select("payload_log_detail").Where("id = ?", verificationRequestID(session.ID, jobs[0])).First(&startedRequest).Error; err == nil && strings.TrimSpace(startedRequest.PayloadLogDetail) != "" {
+		payloadLogDetail = startedRequest.PayloadLogDetail
+	}
+	requests := make([]RelayRequestLog, 0, len(jobs))
+	relayAttempts := make([]RelayAttemptLog, 0, len(verificationAttempts))
+	for _, job := range jobs {
+		jobAttempts := attemptsByJob[job.ID]
+		request := finalizedVerificationRequestLog(session, job, jobAttempts, status, payloadLogDetail)
+		if err := saveRelayRequestLog(tx, &request, true); err != nil {
+			return err
+		}
+		requests = append(requests, request)
+		for _, attempt := range jobAttempts {
+			relayAttempts = append(relayAttempts, verificationRelayAttemptLog(session, mapping, channel, request.ID, attempt, payloadLogDetail))
+		}
+	}
+	latestRequest := requests[len(requests)-1]
+	stateUpdate := tx.Model(&RelaySessionState{}).Where("token_id = ? AND session_id = ?", 0, latestRequest.CodexSessionID).Updates(map[string]any{
+		"latest_request_id": latestRequest.ID, "last_activity_at": finished, "updated_at": finished,
+	})
+	if stateUpdate.Error != nil {
+		return stateUpdate.Error
+	}
+	if stateUpdate.RowsAffected == 0 {
+		state := RelaySessionState{
+			TokenID: 0, SessionID: latestRequest.CodexSessionID, Title: latestRequest.SessionName, ThreadSource: verificationSessionSource,
+			SessionSource: verificationSessionSource, ClientKind: latestRequest.ClientKind, LatestRequestID: latestRequest.ID,
+			LastActivityAt: verificationTimePtr(finished), PrimaryModel: session.PublicModel,
+			CreatedAt: session.StartedAt, UpdatedAt: finished,
+		}
+		if err := tx.Create(&state).Error; err != nil {
+			return err
+		}
+	}
+	if alreadyFinalized {
+		return nil
+	}
+	if len(relayAttempts) > 0 {
+		persisted, err := saveRelayAttemptLogs(tx, relayAttempts)
+		if err != nil {
+			return err
+		}
+		if err := upsertChannelModelDailyStats(tx, persisted, finished); err != nil {
+			return err
+		}
+	}
+	for _, request := range requests {
+		if err := upsertVerificationTokenDailyStat(tx, request, finished); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// The package-level helpers are retained for older in-package callers and
+// fixtures. Runtime verification uses the service methods above, which create
+// one request row per VerificationJob. These compatibility helpers only apply
+// when a caller has not created jobs (the pre-49-request representation).
+func createVerificationSessionLog(tx *gorm.DB, session VerificationSession) error {
+	request := RelayRequestLog{
+		ID: session.ID, Endpoint: "verification", RequestedModel: session.PublicModel,
+		ClientKind: "verification", CodexSessionID: verificationSessionCodexID(session.ID), CodexSessionSource: verificationSessionSource,
+		SessionName: verificationSessionTitle(session), PayloadLogDetail: config.PayloadLogDetailDefault, Outcome: RelayOutcomeProcessing,
+		Stream: true, CreatedAt: session.StartedAt,
+	}
+	if err := saveRelayRequestLog(tx, &request, false); err != nil {
+		return err
+	}
+	state := RelaySessionState{TokenID: 0, SessionID: request.CodexSessionID, Title: request.SessionName, ThreadSource: verificationSessionSource,
+		SessionSource: verificationSessionSource, ClientKind: request.ClientKind, LatestRequestID: request.ID,
+		LastActivityAt: verificationTimePtr(session.StartedAt), PrimaryModel: session.PublicModel, CreatedAt: session.StartedAt, UpdatedAt: session.StartedAt}
+	return tx.Create(&state).Error
+}
+
+func persistVerificationSessionLog(tx *gorm.DB, session VerificationSession, aggregate verificationAggregate, finished time.Time, status string) error {
+	if finished.IsZero() {
+		finished = time.Now().UTC()
+	}
+	outcome, statusCode := RelayOutcomeFailed, http.StatusInternalServerError
+	if status == "completed" {
+		outcome, statusCode = RelayOutcomeSuccess, http.StatusOK
+	} else if status == "stopped" {
+		outcome, statusCode = RelayOutcomeCanceled, statusClientClosedRequest
+	}
+	request := RelayRequestLog{ID: session.ID, Endpoint: "verification", RequestedModel: session.PublicModel,
+		ClientKind: "verification", CodexSessionID: verificationSessionCodexID(session.ID), CodexSessionSource: verificationSessionSource,
+		SessionName: verificationSessionTitle(session), PayloadLogDetail: config.PayloadLogDetailDefault, StatusCode: statusCode, Outcome: outcome,
+		InputTokens: aggregate.InputTokens, NormalInputTokens: verificationNormalInputTokens(aggregate), OutputTokens: aggregate.OutputTokens,
+		CachedTokens: aggregate.CachedTokens, CacheWriteTokens: aggregate.CacheWriteTokens, SentTokens: aggregate.InputTokens,
+		EstimatedCost: aggregate.EstimatedCostMicros, UpstreamCost: aggregate.UpstreamCostMicros, CostSource: verificationCostSource(aggregate),
+		UsageSource: "verification", AttemptCount: int(aggregate.RequestCount), LatencyMS: averageVerificationMetric(aggregate.TotalLatencyMS, aggregate.LatencySamples),
+		DurationMS: averageVerificationMetric(aggregate.TotalDurationMS, aggregate.DurationSamples), TokensPerSecond: averageVerificationTokensPerSecond(aggregate.TotalTokensPerSecond, aggregate.TokensPerSecondSamples),
+		CreatedAt: session.StartedAt, Stream: true}
+	if err := saveRelayRequestLog(tx, &request, true); err != nil {
+		return err
+	}
+	var mapping ChannelModel
+	_ = tx.Where("channel_id = ? AND model_id = ?", session.ChannelID, session.ModelID).First(&mapping).Error
+	var existing RelayAttemptLog
+	err := tx.Where("request_id = ?", request.ID).First(&existing).Error
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	attempt := RelayAttemptLog{RequestID: request.ID, ChannelID: session.ChannelID, ChannelName: session.ChannelName, ChannelModelID: mapping.ID,
+		UpstreamModel: session.UpstreamModel, StatusCode: statusCode, Outcome: outcome, Success: outcome == RelayOutcomeSuccess,
+		InputTokens: aggregate.InputTokens, NormalInputTokens: verificationNormalInputTokens(aggregate), OutputTokens: aggregate.OutputTokens,
+		CachedTokens: aggregate.CachedTokens, CacheWriteTokens: aggregate.CacheWriteTokens, SentTokens: aggregate.InputTokens,
+		EstimatedCost: aggregate.EstimatedCostMicros, UpstreamCost: aggregate.UpstreamCostMicros, CostSource: verificationCostSource(aggregate), UsageSource: "verification",
+		LatencyMS: request.LatencyMS, DurationMS: request.DurationMS, TokensPerSecond: request.TokensPerSecond, CreatedAt: finished}
+	if err := tx.Create(&attempt).Error; err != nil {
+		return err
+	}
+	if err := upsertVerificationChannelModelDailyStat(tx, attempt, finished); err != nil {
+		return err
+	}
+	return upsertVerificationTokenDailyStat(tx, request, finished)
+}
+
+func verificationAttemptTokensPerSecond(outputTokens, latencyMS int64) float64 {
+	if outputTokens <= 0 || latencyMS <= 0 {
+		return 0
+	}
+	return float64(outputTokens) * 1000 / float64(latencyMS)
+}
+
+func averageVerificationTokensPerSecond(total float64, samples int64) float64 {
+	if total <= 0 || samples <= 0 {
+		return 0
+	}
+	return total / float64(samples)
+}
+
+func verificationNormalInputTokens(aggregate verificationAggregate) int64 {
+	return max(aggregate.InputTokens-aggregate.CachedTokens-aggregate.CacheWriteTokens, 0)
+}
+
+func upsertVerificationChannelModelDailyStat(tx *gorm.DB, attempt RelayAttemptLog, createdAt time.Time) error {
+	if attempt.ChannelID == 0 || attempt.ChannelModelID == 0 {
+		return nil
+	}
+	if attempt.Outcome != RelayOutcomeCanceled || (attempt.EstimatedCost <= 0 && attempt.UpstreamCost <= 0) {
+		return upsertChannelModelDailyStats(tx, []RelayAttemptLog{attempt}, createdAt)
+	}
+	// Stopping a verification does not undo upstream calls that already completed.
+	// Keep the canceled outcome while carrying those incurred costs into history.
+	stat := ChannelModelDailyStat{
+		Date: eastEightDate(attempt.CreatedAt), ChannelID: attempt.ChannelID, ChannelModelID: attempt.ChannelModelID,
+		RequestCount: 1, AttemptCount: 1, CanceledCount: 1,
+		EstimatedCost: max(attempt.EstimatedCost, int64(0)), UpstreamCost: max(attempt.UpstreamCost, int64(0)),
+		CreatedAt: createdAt, UpdatedAt: createdAt,
+	}
+	if attempt.LatencyMS > 0 {
+		stat.LatencyMS = attempt.LatencyMS
+		stat.LatencySamples = 1
+	}
+	if attempt.DurationMS > 0 {
+		stat.DurationMS = attempt.DurationMS
+		stat.DurationSamples = 1
+	}
+	if attempt.StatusCode >= 400 && attempt.StatusCode < 500 {
+		stat.Status4xxCount = 1
+	}
+	switch attempt.CostSource {
+	case CostSourceUpstream:
+		stat.UpstreamCostCount = 1
+	case CostSourceFallback:
+		stat.FallbackCostCount = 1
+	case CostSourceMixed:
+		stat.MixedCostCount = 1
+	}
+	return tx.Clauses(clause.OnConflict{
+		Columns:   channelModelDailyConflictColumns(),
+		DoUpdates: channelModelDailyIncrementAssignments(createdAt),
+	}).Create(&stat).Error
+}
+
+func averageVerificationMetric(total, samples int64) int64 {
+	if total <= 0 || samples <= 0 {
+		return 0
+	}
+	return total / samples
+}
+
+func verificationCostSource(aggregate verificationAggregate) string {
+	if aggregate.MixedCostCount > 0 || (aggregate.UpstreamCostCount > 0 && aggregate.FallbackCostCount > 0) {
+		return CostSourceMixed
+	}
+	if aggregate.UpstreamCostCount > 0 {
+		return CostSourceUpstream
+	}
+	if aggregate.FallbackCostCount > 0 || aggregate.EstimatedCostMicros > 0 {
+		return CostSourceFallback
+	}
+	return CostSourceFailedZero
+}
+
+func upsertVerificationTokenDailyStat(tx *gorm.DB, request RelayRequestLog, createdAt time.Time) error {
+	stat := TokenDailyStat{Date: eastEightDate(createdAt), TokenID: request.TokenID, RequestCount: 1, EstimatedCost: request.EstimatedCost, UpstreamCost: request.UpstreamCost, LatencyMS: request.LatencyMS, DurationMS: request.DurationMS, AttemptCount: int64(request.AttemptCount), UpdatedAt: createdAt, CreatedAt: createdAt}
+	if request.Outcome == RelayOutcomeSuccess {
+		stat.SuccessCount = 1
+		stat.InputTokens = request.InputTokens
+		stat.NormalInputTokens = request.NormalInputTokens
+		stat.OutputTokens = request.OutputTokens
+		stat.CachedTokens = request.CachedTokens
+		stat.CacheWriteTokens = request.CacheWriteTokens
+		stat.SentTokens = request.SentTokens
+	} else if request.Outcome == RelayOutcomeCanceled {
+		stat.CanceledCount = 1
+	}
+	if request.LatencyMS > 0 {
+		stat.LatencySamples = 1
+	}
+	return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "date"}, {Name: "token_id"}}, DoUpdates: clause.Assignments(map[string]any{
+		"request_count": gorm.Expr("request_count + excluded.request_count"), "success_count": gorm.Expr("success_count + excluded.success_count"), "canceled_count": gorm.Expr("canceled_count + excluded.canceled_count"), "input_tokens": gorm.Expr("input_tokens + excluded.input_tokens"), "normal_input_tokens": gorm.Expr("normal_input_tokens + excluded.normal_input_tokens"), "output_tokens": gorm.Expr("output_tokens + excluded.output_tokens"), "cached_tokens": gorm.Expr("cached_tokens + excluded.cached_tokens"), "cache_write_tokens": gorm.Expr("cache_write_tokens + excluded.cache_write_tokens"), "sent_tokens": gorm.Expr("sent_tokens + excluded.sent_tokens"), "estimated_cost": gorm.Expr("estimated_cost + excluded.estimated_cost"), "upstream_cost": gorm.Expr("upstream_cost + excluded.upstream_cost"), "latency_ms": gorm.Expr("latency_ms + excluded.latency_ms"), "latency_samples": gorm.Expr("latency_samples + excluded.latency_samples"), "duration_ms": gorm.Expr("duration_ms + excluded.duration_ms"), "attempt_count": gorm.Expr("attempt_count + excluded.attempt_count"), "updated_at": createdAt,
+	})}).Create(&stat).Error
 }
 
 func summarizeJuice(mode, claimed string, manifests map[string]verificationJobManifest, results map[string]verificationJobResult) (string, map[string]any) {
@@ -1057,11 +1624,43 @@ func verificationFingerprintSummary(f fingerprintSummary, claimedModel string) s
 	return "行为层未形成正式强指向，请结合完成率和线路错误阅读。"
 }
 func verificationModeLabel(mode string) string {
-	return map[string]string{"low": "低档", "medium": "中档", "high": "高档"}[mode]
+	labels := map[string]string{"low": "低档", "medium": "中档", "high": "高档", "quick": "快速档（旧）", "standard": "标准档（旧）", "full": "完整档（旧）"}
+	if label := labels[mode]; label != "" {
+		return label
+	}
+	return strings.TrimSpace(mode)
 }
 
 func (s *VerificationService) failSession(sessionID string, err error) {
-	_ = s.store.db.Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{"status": "failed", "error_message": truncateVerificationText(errorString(err), 512), "finished_at": time.Now().UTC()}).Error
+	finished := time.Now().UTC()
+	message := truncateVerificationText(errorString(err), 512)
+	var session VerificationSession
+	if findErr := s.store.db.First(&session, "id = ?", sessionID).Error; findErr != nil {
+		return
+	}
+	aggregate, aggregateErr := s.verificationAggregate(context.Background(), sessionID)
+	if aggregateErr != nil {
+		_ = s.store.db.Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{"status": "failed", "error_message": message, "finished_at": finished}).Error
+		return
+	}
+	var completed int64
+	_ = s.store.db.Model(&VerificationJob{}).Where("session_id = ? AND status IN ?", sessionID, []string{"succeeded", "error", "cancelled"}).Count(&completed).Error
+	persistErr := s.store.db.Transaction(func(tx *gorm.DB) error {
+		if updateErr := tx.Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{
+			"status": "failed", "completed_count": completed, "error_message": message,
+			"request_count": aggregate.RequestCount, "success_count": aggregate.SuccessCount,
+			"input_tokens": aggregate.InputTokens, "output_tokens": aggregate.OutputTokens,
+			"cached_tokens": aggregate.CachedTokens, "cache_write_tokens": aggregate.CacheWriteTokens,
+			"estimated_cost_micros": aggregate.EstimatedCostMicros, "upstream_cost_micros": aggregate.UpstreamCostMicros,
+			"finished_at": finished,
+		}).Error; updateErr != nil {
+			return updateErr
+		}
+		return s.persistVerificationSessionLog(tx, session, finished, "failed")
+	})
+	if persistErr != nil {
+		_ = s.store.db.Model(&VerificationSession{}).Where("id = ?", sessionID).Updates(map[string]any{"status": "failed", "error_message": message, "finished_at": finished}).Error
+	}
 }
 
 func (s *VerificationService) ListReports(ctx context.Context, q VerificationReportQuery) (*VerificationReportPage, error) {

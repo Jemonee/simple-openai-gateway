@@ -35,6 +35,12 @@ export function formatCompactNumber(value: number): string {
   return compactNumberFormatter.format(value)
 }
 
+/** Formats an observed streamed-output throughput sample. */
+export function formatTokensPerSecond(value: number, sampleCount = 1): string {
+  if (sampleCount <= 0 || !Number.isFinite(value) || value <= 0) return '--'
+  return durationNumberFormatter.format(value)
+}
+
 /** Formats a micro-USD amount with six decimal places using half-up rounding. */
 export function formatUSD(micros: number): string {
   return usdFormatter.format((Number.isFinite(micros) ? micros : 0) / 1_000_000)

@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import type { CSSProperties } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Aim, Connection, Delete, Edit, Plus, Refresh, RefreshLeft, RefreshRight, Search, Unlock } from '@element-plus/icons-vue'
+import { Aim, CircleCheck, Connection, Delete, Edit, Link, Plus, Refresh, RefreshLeft, RefreshRight, Search, Unlock } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import ChannelLatencySparkline from '@/components/ChannelLatencySparkline.vue'
 import type {
@@ -11,6 +11,9 @@ import type {
   ChannelModel,
   ChannelModelDiscovery,
   ChannelModelDiscoveryRequest,
+  ChatGPTOAuthCredential,
+  ChatGPTOAuthExchangeRequest,
+  ChatGPTOAuthStartResponse,
   GatewayModel,
   UpstreamModel,
 } from '@/types/gateway'
@@ -46,7 +49,7 @@ const maxVisibleChannelModels = 3
 const quickStepMinimumVisibleMs = 650
 const quickCompletionVisibleMs = 300
 const quickProgressMessages = [
-  '正在验证 Base URL 和 API key，请稍候…',
+  '正在验证渠道凭据，请稍候…',
   '正在获取上游模型列表，请稍候…',
   '正在自动映射模型并计算价格，请稍候…',
   '正在保存渠道并刷新列表，请稍候…',
@@ -66,7 +69,26 @@ const quickProcessing = ref(false)
 const quickStep = ref(0)
 const quickError = ref('')
 const editingId = ref<number | null>(null)
-const form = reactive({ name: '', baseUrl: '', apiKey: '', enabled: true, supportsStreamUsage: true })
+const form = reactive({
+  name: '',
+  baseUrl: '',
+  proxyUrl: '',
+  apiKey: '',
+  authType: 'api_key' as 'api_key' | 'chatgpt_oauth',
+  oauthAccessToken: '',
+  oauthRefreshToken: '',
+  chatgptAccountId: '',
+  chatgptUserId: '',
+  chatgptPlanType: '',
+  oauthExpiresAt: null as string | null,
+  enabled: true,
+  supportsStreamUsage: true,
+})
+const oauthRedirectUri = ref('http://localhost:1455/auth/callback')
+const oauthSessionId = ref('')
+const oauthCode = ref('')
+const oauthReturnedState = ref('')
+const oauthBusy = ref(false)
 const mappings = ref<MappingDraft[]>([])
 const discoveringModels = ref(false)
 const discoveryError = ref('')
@@ -80,6 +102,8 @@ const deletingChannelId = ref<number | null>(null)
 const resettingCircuitChannelId = ref<number | null>(null)
 const currentTime = ref(Date.now())
 const drawerTitle = computed(() => editingId.value ? '编辑渠道' : '新增渠道')
+const isChatGPTOAuth = computed(() => form.authType === 'chatgpt_oauth')
+const oauthCredentialReady = computed(() => Boolean(form.oauthAccessToken.trim() || (editingId.value && isChatGPTOAuth.value)))
 const quickDialogTitle = computed(() => editingId.value ? '快速设置渠道' : '快速新增渠道')
 const quickProgressMessage = computed(() => quickProgressMessages[Math.min(quickStep.value, quickProgressMessages.length - 1)])
 const todayAttemptTotal = computed(() => channels.value.reduce((total, channel) => total + Math.max(0, channel.metrics.todayAttemptCount), 0))
@@ -225,8 +249,19 @@ function resetForm(channel?: Channel) {
   discoveryRequestVersion += 1
   editingId.value = channel?.id ?? null
   form.name = channel?.name ?? ''
-  form.baseUrl = channel?.baseUrl ?? ''
+  form.authType = channel?.authType ?? 'api_key'
+  form.baseUrl = form.authType === 'chatgpt_oauth' ? 'https://chatgpt.com/backend-api/codex' : channel?.baseUrl ?? ''
+  form.proxyUrl = ''
   form.apiKey = ''
+  form.oauthAccessToken = ''
+  form.oauthRefreshToken = ''
+  form.chatgptAccountId = channel?.chatgptAccountId ?? ''
+  form.chatgptUserId = channel?.chatgptUserId ?? ''
+  form.chatgptPlanType = channel?.chatgptPlanType ?? ''
+  form.oauthExpiresAt = channel?.oauthExpiresAt ?? null
+  oauthSessionId.value = ''
+  oauthCode.value = ''
+  oauthReturnedState.value = ''
   form.enabled = channel?.enabled ?? true
   form.supportsStreamUsage = channel?.supportsStreamUsage ?? true
   mappings.value = channel?.models.map(mappingDraft) ?? []
@@ -235,7 +270,7 @@ function resetForm(channel?: Channel) {
   discoveredModels.value = []
   discoverySummary.value = null
   mappingSearch.value = ''
-  priceMultiplier.value = channel && Number.isFinite(channel.priceMultiplierBasisPoints)
+  priceMultiplier.value = channel && form.authType !== 'chatgpt_oauth' && Number.isFinite(channel.priceMultiplierBasisPoints)
     ? channel.priceMultiplierBasisPoints / 10_000
     : 1
   drawerOpen.value = false
@@ -243,6 +278,66 @@ function resetForm(channel?: Channel) {
   quickProcessing.value = false
   quickStep.value = 0
   quickError.value = ''
+}
+
+function changeAuthType() {
+  if (form.authType === 'chatgpt_oauth') {
+    form.baseUrl = 'https://chatgpt.com/backend-api/codex'
+    form.apiKey = ''
+    priceMultiplier.value = 1
+  } else if (form.baseUrl.includes('chatgpt.com/backend-api/codex')) {
+    form.baseUrl = ''
+  }
+}
+
+async function startChatGPTOAuth() {
+  oauthBusy.value = true
+  try {
+    const result = await request<ChatGPTOAuthStartResponse>('/admin/gateway/chatgpt/oauth/start', {
+      method: 'POST',
+      body: JSON.stringify({ redirectUri: oauthRedirectUri.value.trim(), proxyUrl: form.proxyUrl.trim() }),
+    })
+    oauthSessionId.value = result.sessionId
+    oauthReturnedState.value = result.state
+    window.open(result.authorizationUrl, '_blank', 'noopener,noreferrer')
+    ElMessage.success('授权页已打开，请登录 ChatGPT 后复制回调 code，再点击兑换凭据')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'OAuth 授权链接生成失败')
+  } finally {
+    oauthBusy.value = false
+  }
+}
+
+async function exchangeChatGPTOAuth() {
+  if (!oauthSessionId.value || !oauthCode.value.trim() || !oauthReturnedState.value.trim()) {
+    ElMessage.warning('请先获取授权链接，并填写回调 code 与 state')
+    return
+  }
+  oauthBusy.value = true
+  try {
+    const payload: ChatGPTOAuthExchangeRequest = {
+      sessionId: oauthSessionId.value,
+      code: oauthCode.value.trim(),
+      state: oauthReturnedState.value.trim(),
+    }
+    const credential = await request<ChatGPTOAuthCredential>('/admin/gateway/chatgpt/oauth/exchange', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    form.oauthAccessToken = credential.accessToken
+    form.oauthRefreshToken = credential.refreshToken
+    form.chatgptAccountId = credential.chatgptAccountId
+    form.chatgptUserId = credential.chatgptUserId
+    form.chatgptPlanType = credential.chatgptPlanType
+    form.oauthExpiresAt = credential.expiresAt
+    oauthCode.value = ''
+    oauthReturnedState.value = ''
+    ElMessage.success(credential.email ? `已连接 ${credential.email}` : 'OAuth 凭据兑换成功')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'OAuth 凭据兑换失败')
+  } finally {
+    oauthBusy.value = false
+  }
 }
 
 function openAdvanced() {
@@ -336,6 +431,32 @@ function assignOfficialPrice(mapping: MappingDraft, official: NonNullable<Upstre
   mapping.cacheWritePrice = fromMicros(official.cacheWritePriceMicros)
 }
 
+function clearMappingPrice(mapping: MappingDraft) {
+  mapping.inputPrice = 0
+  mapping.outputPrice = 0
+  mapping.cachedInputPrice = null
+  mapping.cacheWritePrice = null
+  mapping.adjustmentMultiplier = 1
+}
+
+function applyChatGPTOAuthReferencePrices(): { matched: number; zeroed: number } {
+  let matched = 0
+  let zeroed = 0
+  priceMultiplier.value = 1
+  for (const mapping of mappings.value) {
+    const official = officialPriceForMapping(mapping)
+    if (!official) {
+      clearMappingPrice(mapping)
+      zeroed += 1
+      continue
+    }
+    assignOfficialPrice(mapping, official)
+    mapping.adjustmentMultiplier = 1
+    matched += 1
+  }
+  return { matched, zeroed }
+}
+
 function roundedPrice(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000
 }
@@ -365,6 +486,11 @@ function restoreMappingOfficialPrice(mapping: MappingDraft) {
 }
 
 function applyOfficialPriceMultiplier() {
+  if (isChatGPTOAuth.value) {
+    const { matched, zeroed } = applyChatGPTOAuthReferencePrices()
+    ElMessage.success(`已按 1 倍参考价计算 ${matched} 条映射，${zeroed} 条未匹配模型已归零`)
+    return
+  }
   const multiplier = priceMultiplier.value
   if (!Number.isFinite(multiplier) || multiplier < 0) {
     ElMessage.error('请输入有效的价格倍率')
@@ -389,6 +515,11 @@ function applyOfficialPriceMultiplier() {
 }
 
 function restoreAllOfficialPrices() {
+  if (isChatGPTOAuth.value) {
+    const { matched, zeroed } = applyChatGPTOAuthReferencePrices()
+    ElMessage.success(`已恢复 ${matched} 条参考价，${zeroed} 条未匹配模型已归零`)
+    return
+  }
   let updated = 0
   for (const mapping of mappings.value) {
     const official = officialPriceForMapping(mapping)
@@ -410,7 +541,7 @@ function formatDiscoveryTime(value: string): string {
 }
 
 async function discoverChannelModels(showSuccess = false): Promise<boolean> {
-  if (!form.baseUrl.trim() || (!editingId.value && !form.apiKey.trim())) {
+  if (!isChatGPTOAuth.value && (!form.baseUrl.trim() || (!editingId.value && !form.apiKey.trim()))) {
     discoveryError.value = 'Base URL 和 API key 不完整'
     return false
   }
@@ -421,6 +552,10 @@ async function discoverChannelModels(showSuccess = false): Promise<boolean> {
     channelId: editingId.value ?? 0,
     baseUrl: form.baseUrl.trim(),
     apiKey: form.apiKey.trim(),
+    authType: form.authType,
+    oauthAccessToken: form.oauthAccessToken.trim(),
+    chatgptAccountId: form.chatgptAccountId.trim(),
+    proxyUrl: form.proxyUrl.trim(),
   }
   try {
     const result = await request<ChannelModelDiscovery>('/admin/gateway/channels/discover-models', {
@@ -434,6 +569,7 @@ async function discoverChannelModels(showSuccess = false): Promise<boolean> {
     discoveredModels.value = result.models
     models.value = refreshedModels
     mergeDiscoveredMappings(result.models, editingId.value === null)
+    if (isChatGPTOAuth.value) applyChatGPTOAuthReferencePrices()
     if (showSuccess) {
       const createdCount = result.models.filter((model) => model.publicModelCreated).length
       ElMessage.success(createdCount > 0 ? `已获取 ${result.models.length} 个模型，自动新增 ${createdCount} 个公共模型` : `已获取 ${result.models.length} 个模型，公共模型均已存在`)
@@ -451,8 +587,11 @@ async function discoverChannelModels(showSuccess = false): Promise<boolean> {
 }
 
 async function quickSetup() {
-  if (!form.baseUrl.trim() || (!editingId.value && !form.apiKey.trim())) {
-    quickError.value = '请填写 Base URL 和 API key'
+  const missingCredential = isChatGPTOAuth.value
+    ? (!editingId.value && !form.oauthAccessToken.trim())
+    : (!editingId.value && !form.apiKey.trim())
+  if (!form.baseUrl.trim() || missingCredential) {
+    quickError.value = isChatGPTOAuth.value ? '请先完成 ChatGPT OAuth 授权' : '请填写 Base URL 和 API key'
     return
   }
   if (!Number.isFinite(priceMultiplier.value) || priceMultiplier.value < 0 || priceMultiplier.value > 100) {
@@ -642,8 +781,11 @@ async function loadData() {
 }
 
 async function saveChannel(showSuccess = true): Promise<boolean> {
-  if (!form.name.trim() || !form.baseUrl.trim() || (!editingId.value && !form.apiKey.trim())) {
-    ElMessage.error('请完整填写渠道名称、Base URL 和 API key')
+  const missingCredential = isChatGPTOAuth.value
+    ? (!editingId.value && !form.oauthAccessToken.trim())
+    : (!editingId.value && !form.apiKey.trim())
+  if (!form.name.trim() || !form.baseUrl.trim() || missingCredential) {
+    ElMessage.error(isChatGPTOAuth.value ? '请填写渠道名称并完成 ChatGPT OAuth 授权' : '请完整填写渠道名称、Base URL 和 API key')
     return false
   }
   if (mappings.value.some((item) => !item.modelId || !item.upstreamModel.trim())) {
@@ -783,7 +925,7 @@ onUnmounted(() => {
       </header>
       <el-table v-loading="loading" :data="filteredChannels" row-key="id" height="var(--channel-table-height)" :empty-text="channelTableEmptyText" :row-class-name="channelRowClassName" :row-style="channelRowStyle">
         <el-table-column label="渠道" width="228" fixed="left">
-          <template #default="scope"><div class="primary-cell"><strong>{{ scope.row.name }}</strong><small>{{ scope.row.baseUrl }}</small></div></template>
+          <template #default="scope"><div class="primary-cell"><strong>{{ scope.row.name }} <el-tag v-if="scope.row.authType === 'chatgpt_oauth'" size="small" type="warning" effect="plain">ChatGPT OAuth</el-tag></strong><small>{{ scope.row.baseUrl }}</small></div></template>
         </el-table-column>
         <el-table-column label="状态" width="260">
           <template #default="scope">
@@ -882,29 +1024,107 @@ onUnmounted(() => {
       <div v-if="!loading && channels.length === 0" class="table-empty-action"><el-button type="primary" :icon="Plus" @click="resetForm()">添加第一个渠道</el-button></div>
     </section>
 
-    <el-dialog v-model="quickDialogOpen" :title="quickDialogTitle" width="min(520px, calc(100vw - 32px))" destroy-on-close :close-on-click-modal="false" :close-on-press-escape="!quickProcessing" :show-close="!quickProcessing">
+    <el-dialog v-model="quickDialogOpen" class="quick-setup-dialog" :title="quickDialogTitle" width="min(600px, calc(100vw - 32px))" destroy-on-close :close-on-click-modal="false" :close-on-press-escape="!quickProcessing" :show-close="!quickProcessing">
       <div v-if="quickProcessing" class="quick-setup-progress" aria-live="polite">
         <p>{{ quickProgressMessage }}</p>
         <el-steps direction="vertical" :active="quickStep" finish-status="success">
-          <el-step title="验证 Base URL 和 API key" />
+          <el-step title="验证渠道凭据" />
           <el-step title="获取上游模型列表" />
           <el-step title="自动映射并按倍率计算价格" />
           <el-step title="保存渠道并刷新列表" />
         </el-steps>
       </div>
       <el-form v-else label-position="top" class="quick-setup-form" @submit.prevent="quickSetup">
-        <el-alert title="快速设置只需要三项信息，模型会自动发现并映射。" type="info" :closable="false" show-icon />
-        <el-form-item label="Base URL" required><el-input v-model="form.baseUrl" placeholder="https://api.openai.com/v1" /></el-form-item>
-        <el-form-item :label="editingId ? '替换 API key（可留空）' : 'API key'" required><el-input v-model="form.apiKey" type="password" show-password autocomplete="new-password" :placeholder="editingId ? '留空则保持当前密钥' : '上游供应商密钥'" /></el-form-item>
-        <el-form-item label="价格倍率"><el-input-number v-model="priceMultiplier" :min="0" :max="100" :precision="2" :step="0.1" controls-position="right" /><small class="field-note">将按官方目录价格乘以该倍率写入模型映射，默认 1 倍。</small></el-form-item>
+        <el-alert class="quick-setup-alert" :title="isChatGPTOAuth ? 'ChatGPT/Codex 订阅渠道会自动使用 Responses API。' : '快速设置只需要三项信息，模型会自动发现并映射。'" type="info" :closable="false" show-icon />
+
+        <section class="quick-config-section" aria-labelledby="quick-auth-heading">
+          <header class="quick-section-heading">
+            <span class="quick-section-index" aria-hidden="true">1</span>
+            <div>
+              <strong id="quick-auth-heading">认证方式</strong>
+              <small>选择渠道使用的上游身份凭据</small>
+            </div>
+          </header>
+          <el-form-item class="quick-control-item">
+            <el-select v-model="form.authType" aria-label="认证方式" aria-required="true" @change="changeAuthType">
+              <el-option label="OpenAI-compatible API key" value="api_key" />
+              <el-option label="ChatGPT / Codex 订阅 OAuth" value="chatgpt_oauth" />
+            </el-select>
+          </el-form-item>
+        </section>
+
+        <section v-if="!isChatGPTOAuth" class="quick-config-section" aria-labelledby="quick-credential-heading">
+          <header class="quick-section-heading">
+            <span class="quick-section-index" aria-hidden="true">2</span>
+            <div>
+              <strong id="quick-credential-heading">连接凭据</strong>
+              <small>填写上游 API 地址和密钥</small>
+            </div>
+          </header>
+          <div class="quick-credential-grid">
+            <el-form-item label="Base URL" required><el-input v-model="form.baseUrl" placeholder="https://api.openai.com/v1" /></el-form-item>
+            <el-form-item :label="editingId ? '替换 API key（可留空）' : 'API key'" required><el-input v-model="form.apiKey" type="password" show-password autocomplete="new-password" :placeholder="editingId ? '留空则保持当前密钥' : '上游供应商密钥'" /></el-form-item>
+          </div>
+        </section>
+
+        <section v-else class="quick-config-section oauth-config-section" aria-labelledby="quick-oauth-heading">
+          <header class="quick-section-heading oauth-section-heading">
+            <span class="quick-section-index" aria-hidden="true">2</span>
+            <div>
+              <strong id="quick-oauth-heading">ChatGPT OAuth 授权</strong>
+              <small>完成授权后，用回调信息兑换渠道凭据</small>
+            </div>
+            <el-tag v-if="oauthCredentialReady" type="success" effect="plain" aria-live="polite">凭据已就绪{{ form.chatgptPlanType ? ` · ${form.chatgptPlanType}` : '' }}</el-tag>
+            <el-tag v-else-if="oauthSessionId" type="warning" effect="plain" aria-live="polite">等待回调</el-tag>
+            <el-tag v-else type="info" effect="plain">未授权</el-tag>
+          </header>
+
+          <div class="oauth-flow">
+            <div class="oauth-flow-step" :class="{ 'is-complete': Boolean(oauthSessionId) }">
+              <span class="oauth-flow-index" aria-hidden="true"><el-icon v-if="oauthSessionId"><CircleCheck /></el-icon><template v-else>1</template></span>
+              <div class="oauth-flow-content">
+                <strong>前往 ChatGPT 授权</strong>
+                <p>授权后浏览器会跳转到以下本地回调地址。</p>
+                <code class="oauth-callback-uri">{{ oauthRedirectUri }}</code>
+                <label class="oauth-proxy-field"><span>代理地址 <small>可选{{ editingId ? '，留空则保持当前代理' : '' }}</small></span><el-input v-model="form.proxyUrl" placeholder="http://127.0.0.1:7890" autocomplete="url" /></label>
+                <el-button type="primary" plain :icon="Link" :loading="oauthBusy" @click="startChatGPTOAuth">打开 ChatGPT 授权页</el-button>
+              </div>
+            </div>
+
+            <div class="oauth-flow-step" :class="{ 'is-complete': oauthCredentialReady }">
+              <span class="oauth-flow-index" aria-hidden="true"><el-icon v-if="oauthCredentialReady"><CircleCheck /></el-icon><template v-else>2</template></span>
+              <div class="oauth-flow-content">
+                <strong>兑换渠道凭据</strong>
+                <p>将回调地址中的 code 粘贴到下方，state 已自动填充。</p>
+                <div class="oauth-code-grid">
+                  <label class="oauth-code-field"><span>回调 code</span><el-input v-model="oauthCode" placeholder="粘贴 code" autocomplete="off" :disabled="!oauthSessionId || oauthBusy" /></label>
+                  <label class="oauth-code-field"><span>state <small>自动填充</small></span><el-input v-model="oauthReturnedState" placeholder="获取授权链接后自动填充" autocomplete="off" :disabled="!oauthSessionId || oauthBusy" /></label>
+                </div>
+                <el-button :icon="CircleCheck" :loading="oauthBusy" :disabled="!oauthSessionId || !oauthCode.trim() || !oauthReturnedState.trim()" @click="exchangeChatGPTOAuth">兑换 OAuth 凭据</el-button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="quick-config-section quick-price-section" aria-labelledby="quick-price-heading">
+          <header class="quick-section-heading">
+            <span class="quick-section-index" aria-hidden="true">3</span>
+            <div>
+              <strong id="quick-price-heading">价格倍率</strong>
+              <small>{{ isChatGPTOAuth ? 'OAuth 渠道固定按 1 倍参考价计算，未匹配模型记为 0' : '按官方目录价格统一调整模型映射' }}</small>
+            </div>
+          </header>
+          <el-form-item class="quick-price-control"><el-input-number v-model="priceMultiplier" :min="0" :max="100" :precision="2" :step="0.1" controls-position="right" :disabled="isChatGPTOAuth" /><small class="field-note">{{ isChatGPTOAuth ? '已固定为 1 倍，保存时会重新校验参考价。' : '默认 1 倍，可在高级设置中逐个模型调整。' }}</small></el-form-item>
+        </section>
         <div v-if="quickError" class="inline-error" role="alert">{{ quickError }}</div>
       </el-form>
       <template #footer>
         <div class="quick-dialog-actions">
-          <el-button :disabled="quickProcessing" @click="openAdvanced">高级设置</el-button>
-          <span />
-          <el-button :disabled="quickProcessing" @click="quickDialogOpen = false">取消</el-button>
-          <el-button v-if="!quickProcessing" type="primary" :loading="saving" @click="quickSetup">设置</el-button>
+          <el-button class="advanced-settings-button" text :disabled="quickProcessing" @click="openAdvanced">高级设置</el-button>
+          <div>
+            <el-button :disabled="quickProcessing" @click="quickDialogOpen = false">取消</el-button>
+            <el-button v-if="!quickProcessing" type="primary" :loading="saving" @click="quickSetup">完成设置</el-button>
+          </div>
         </div>
       </template>
     </el-dialog>
@@ -913,11 +1133,27 @@ onUnmounted(() => {
       <el-form label-position="top" class="drawer-form">
         <div class="form-columns">
           <el-form-item label="渠道名称"><el-input v-model="form.name" placeholder="例如 OpenAI 主渠道" /></el-form-item>
-          <el-form-item label="Base URL"><el-input v-model="form.baseUrl" placeholder="https://api.openai.com/v1" /></el-form-item>
+          <el-form-item label="认证方式">
+            <el-select v-model="form.authType" @change="changeAuthType">
+              <el-option label="OpenAI-compatible API key" value="api_key" />
+              <el-option label="ChatGPT / Codex 订阅 OAuth" value="chatgpt_oauth" />
+            </el-select>
+          </el-form-item>
         </div>
-        <el-form-item :label="editingId ? '替换 API key' : 'API key'">
+        <el-form-item v-if="!isChatGPTOAuth" label="Base URL"><el-input v-model="form.baseUrl" placeholder="https://api.openai.com/v1" /></el-form-item>
+        <el-form-item v-if="!isChatGPTOAuth" :label="editingId ? '替换 API key' : 'API key'">
           <el-input v-model="form.apiKey" type="password" show-password autocomplete="new-password" :placeholder="editingId ? '留空则保持当前密钥' : '上游供应商密钥'" />
         </el-form-item>
+        <el-alert v-else title="OAuth 渠道固定转发到 ChatGPT Codex Responses API，不需要填写 Base URL。" type="info" :closable="false" show-icon />
+        <el-form-item v-if="isChatGPTOAuth" label="代理地址"><el-input v-model="form.proxyUrl" placeholder="http://127.0.0.1:7890（可选）" /></el-form-item>
+        <section v-if="isChatGPTOAuth" class="oauth-setup-box oauth-drawer-box" aria-label="ChatGPT OAuth 设置">
+          <div class="oauth-setup-heading"><strong>ChatGPT / Codex OAuth</strong><el-tag v-if="form.oauthAccessToken" type="success" effect="plain">凭据已就绪</el-tag></div>
+          <small>回调地址需与 OpenAI OAuth 客户端允许的地址一致：{{ oauthRedirectUri }}</small>
+          <el-button type="primary" :loading="oauthBusy" @click="startChatGPTOAuth">获取授权链接</el-button>
+          <div class="oauth-code-grid"><el-input v-model="oauthCode" placeholder="code" autocomplete="off" /><el-input v-model="oauthReturnedState" placeholder="state" autocomplete="off" /></div>
+          <el-button :loading="oauthBusy" :disabled="!oauthSessionId" @click="exchangeChatGPTOAuth">兑换并填充凭据</el-button>
+          <small v-if="form.chatgptAccountId">账号 {{ form.chatgptAccountId }}{{ form.chatgptPlanType ? ` · ${form.chatgptPlanType}` : '' }}</small>
+        </section>
         <div class="toggle-row"><el-checkbox v-model="form.enabled">启用渠道</el-checkbox><el-checkbox v-model="form.supportsStreamUsage">支持流式 usage 参数</el-checkbox></div>
 
         <div class="subsection-heading model-discovery-heading">
@@ -960,7 +1196,7 @@ onUnmounted(() => {
         <div class="mapping-toolbar" aria-label="模型映射筛选与批量价格操作">
           <el-input v-model="mappingSearch" clearable :prefix-icon="Search" placeholder="搜索本站或上游模型" aria-label="搜索模型映射" />
           <div class="mapping-bulk-actions">
-            <label class="multiplier-control"><span>渠道官方价倍率</span><el-input-number v-model="priceMultiplier" :min="0" :max="100" :precision="2" :step="0.1" controls-position="right" /></label>
+            <label class="multiplier-control"><span>{{ isChatGPTOAuth ? 'OAuth 参考价倍率' : '渠道官方价倍率' }}</span><el-input-number v-model="priceMultiplier" :min="0" :max="100" :precision="2" :step="0.1" controls-position="right" :disabled="isChatGPTOAuth" /></label>
             <el-button :icon="RefreshRight" :disabled="discoveredModels.length === 0" @click="applyOfficialPriceMultiplier">应用倍率</el-button>
             <el-button :icon="RefreshLeft" :disabled="discoveredModels.length === 0" @click="restoreAllOfficialPrices">全部恢复默认</el-button>
           </div>
@@ -1007,28 +1243,28 @@ onUnmounted(() => {
 
           <section class="mapping-price-section" aria-label="Token 计费单价">
             <div class="mapping-price-heading">
-              <div class="mapping-price-title"><strong>Token 计费单价</strong><span>USD / 百万 Token</span></div>
+              <div class="mapping-price-title"><strong>Token 计费单价</strong><span>{{ isChatGPTOAuth ? 'OAuth 参考价 · 固定 1 倍' : 'USD / 百万 Token' }}</span></div>
               <div class="mapping-price-actions">
-                <label class="multiplier-control"><span>当前价倍率</span><el-input-number v-model="mapping.adjustmentMultiplier" :min="0" :max="100" :precision="2" :step="0.1" controls-position="right" /></label>
-                <el-button :icon="RefreshRight" @click="applyMappingPriceMultiplier(mapping)">按倍率调整</el-button>
+                <label class="multiplier-control"><span>当前价倍率</span><el-input-number v-model="mapping.adjustmentMultiplier" :min="0" :max="100" :precision="2" :step="0.1" controls-position="right" :disabled="isChatGPTOAuth" /></label>
+                <el-button :icon="RefreshRight" :disabled="isChatGPTOAuth" @click="applyMappingPriceMultiplier(mapping)">按倍率调整</el-button>
                 <el-button :icon="RefreshLeft" :disabled="!officialPriceForMapping(mapping)" @click="restoreMappingOfficialPrice(mapping)">恢复默认</el-button>
               </div>
             </div>
             <div class="mapping-price-grid">
               <el-form-item label="输入价格">
-                <el-input-number v-model="mapping.inputPrice" :min="0" :precision="6" :step="0.1" controls-position="right" />
+                <el-input-number v-model="mapping.inputPrice" :min="0" :precision="6" :step="0.1" controls-position="right" :disabled="isChatGPTOAuth" />
                 <small class="field-note">未使用缓存读写的普通输入 Token</small>
               </el-form-item>
               <el-form-item label="输出价格">
-                <el-input-number v-model="mapping.outputPrice" :min="0" :precision="6" :step="0.1" controls-position="right" />
+                <el-input-number v-model="mapping.outputPrice" :min="0" :precision="6" :step="0.1" controls-position="right" :disabled="isChatGPTOAuth" />
                 <small class="field-note">供应商模型生成的输出 Token</small>
               </el-form-item>
               <el-form-item label="缓存读取价格">
-                <el-input-number v-model="mapping.cachedInputPrice" :min="0" :precision="6" :step="0.1" controls-position="right" placeholder="留空则同输入" />
+                <el-input-number v-model="mapping.cachedInputPrice" :min="0" :precision="6" :step="0.1" controls-position="right" placeholder="留空则同输入" :disabled="isChatGPTOAuth" />
                 <small class="field-note">从供应商上下文缓存读取的输入 Token；留空沿用输入价</small>
               </el-form-item>
               <el-form-item label="缓存写入价格">
-                <el-input-number v-model="mapping.cacheWritePrice" :min="0" :precision="6" :step="0.1" controls-position="right" placeholder="留空则同输入" />
+                <el-input-number v-model="mapping.cacheWritePrice" :min="0" :precision="6" :step="0.1" controls-position="right" placeholder="留空则同输入" :disabled="isChatGPTOAuth" />
                 <small class="field-note">写入供应商上下文缓存的输入 Token；留空沿用输入价</small>
               </el-form-item>
             </div>
@@ -1043,6 +1279,22 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.oauth-setup-box {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--hongfen-border);
+  border-radius: 6px;
+  background: var(--hongfen-surface-muted);
+}
+.oauth-setup-box small { color: var(--hongfen-text-muted); line-height: 1.45; }
+.oauth-drawer-box { margin: 12px 0 16px; }
+.oauth-setup-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.oauth-code-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+:deep(.oauth-setup-box .el-button) { justify-self: start; }
+@media (max-width: 640px) {
+  .oauth-code-grid { grid-template-columns: 1fr; }
+}
 :deep(.el-table__body-wrapper) { container-type: inline-size; }
 :deep(.el-table__body tr.channel-row--enabled > td.el-table__cell) {
   background: transparent;
@@ -1107,8 +1359,45 @@ onUnmounted(() => {
   .channel-page { height: 100%; min-height: 0; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; --channel-table-height: calc(100% - 59px); }
   .channel-page > .table-panel { min-height: 0; }
 }
-.quick-setup-form { display: grid; gap: 8px; }
-.quick-setup-form :deep(.el-input-number) { width: 100%; }
+:global(.quick-setup-dialog .el-dialog__header) { margin-right: 0; padding: 20px 24px 14px; border-bottom: 1px solid var(--hongfen-border); }
+:global(.quick-setup-dialog .el-dialog__title) { color: var(--hongfen-text); font-size: 18px; font-weight: 650; }
+:global(.quick-setup-dialog .el-dialog__body) { max-height: min(720px, calc(100dvh - 156px)); overflow-y: auto; padding: 16px 24px 10px; }
+:global(.quick-setup-dialog .el-dialog__footer) { padding: 14px 24px 18px; border-top: 1px solid var(--hongfen-border); }
+.quick-setup-form { display: grid; }
+.quick-setup-form :deep(.el-input-number), .quick-setup-form :deep(.el-select) { width: 100%; }
+.quick-setup-alert { margin-bottom: 2px; }
+.quick-config-section { padding: 16px 0; border-bottom: 1px solid var(--hongfen-border); }
+.quick-config-section:last-of-type { padding-bottom: 6px; border-bottom: 0; }
+.quick-section-heading { display: flex; min-width: 0; align-items: flex-start; gap: 10px; margin-bottom: 12px; }
+.quick-section-heading > div { display: grid; flex: 1; min-width: 0; gap: 2px; }
+.quick-section-heading strong { color: var(--hongfen-text); font-size: 13px; font-weight: 650; line-height: 1.4; }
+.quick-section-heading small { color: var(--hongfen-text-muted); font-size: 11px; line-height: 1.45; }
+.quick-section-index { display: grid; flex: 0 0 24px; width: 24px; height: 24px; place-items: center; border: 1px solid var(--hongfen-border-strong); border-radius: 50%; color: var(--hongfen-primary-hover); background: var(--hongfen-primary-soft); font-family: var(--hongfen-font-mono); font-size: 11px; font-weight: 700; }
+.quick-control-item, .quick-price-control { margin: 0 0 0 34px; }
+.quick-control-item :deep(.el-form-item__content), .quick-price-control :deep(.el-form-item__content) { display: grid; }
+.quick-control-item :deep(.el-form-item__error) { position: static; margin-top: 4px; }
+.quick-credential-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-left: 34px; }
+.quick-credential-grid :deep(.el-form-item) { margin-bottom: 0; }
+.oauth-section-heading { align-items: center; }
+.oauth-section-heading :deep(.el-tag) { flex-shrink: 0; }
+.oauth-flow { display: grid; margin-left: 34px; }
+.oauth-flow-step { position: relative; display: grid; min-width: 0; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; padding-bottom: 18px; }
+.oauth-flow-step:last-child { padding-bottom: 0; }
+.oauth-flow-step:not(:last-child)::after { position: absolute; top: 25px; bottom: 0; left: 12px; width: 1px; background: var(--hongfen-border-strong); content: ''; }
+.oauth-flow-index { z-index: 1; display: grid; width: 26px; height: 26px; place-items: center; border: 1px solid var(--hongfen-border-strong); border-radius: 50%; color: var(--hongfen-text-muted); background: var(--hongfen-surface); font-family: var(--hongfen-font-mono); font-size: 11px; font-weight: 700; }
+.oauth-flow-step.is-complete .oauth-flow-index { border-color: var(--hongfen-success); color: var(--hongfen-success); background: var(--hongfen-success-soft); }
+.oauth-flow-index :deep(.el-icon) { font-size: 14px; }
+.oauth-flow-content { display: grid; min-width: 0; justify-items: start; gap: 8px; padding-top: 3px; }
+.oauth-flow-content > strong { color: var(--hongfen-text); font-size: 12px; font-weight: 650; line-height: 1.4; }
+.oauth-flow-content > p { margin: -3px 0 0; color: var(--hongfen-text-muted); font-size: 11px; line-height: 1.5; }
+.oauth-callback-uri { box-sizing: border-box; display: block; width: 100%; padding: 8px 10px; overflow-wrap: anywhere; border-left: 2px solid var(--hongfen-primary); color: var(--hongfen-text-muted); background: var(--hongfen-surface-muted); font-family: var(--hongfen-font-mono); font-size: 11px; line-height: 1.45; }
+.oauth-code-grid { display: grid; width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.oauth-code-field, .oauth-proxy-field { display: grid; min-width: 0; gap: 5px; }
+.oauth-proxy-field { width: 100%; }
+.oauth-code-field > span, .oauth-proxy-field > span { color: var(--hongfen-text); font-size: 11px; font-weight: 600; line-height: 1.4; }
+.oauth-code-field > span small, .oauth-proxy-field > span small { margin-left: 4px; color: var(--hongfen-text-subtle); font-size: 10px; font-weight: 400; }
+.quick-price-control :deep(.el-form-item__content) { grid-template-columns: minmax(180px, 230px) minmax(0, 1fr); align-items: start; gap: 12px; }
+.quick-price-control .field-note { min-height: 0; margin-top: 2px; }
 .quick-setup-progress { min-height: 260px; padding: 8px 12px; }
 .quick-setup-progress p { margin: 0 0 18px; color: var(--hongfen-text-muted); font-size: 12px; }
 .quick-setup-progress :deep(.el-step__head.is-process .el-step__icon) { position: relative; border-color: var(--hongfen-primary); color: var(--hongfen-primary-hover); }
@@ -1116,7 +1405,25 @@ onUnmounted(() => {
 .quick-setup-progress :deep(.el-step__title.is-process) { color: var(--hongfen-text); font-weight: 650; }
 @keyframes quick-step-pulse { 0% { opacity: 0; transform: scale(0.72); } 30% { opacity: 0.65; } 100% { opacity: 0; transform: scale(1.08); } }
 .quick-dialog-actions, .drawer-actions { display: flex; align-items: center; gap: 8px; }
-.quick-dialog-actions > span, .drawer-actions > span { flex: 1; }
+.quick-dialog-actions { justify-content: space-between; }
+.quick-dialog-actions > div { display: flex; align-items: center; gap: 8px; }
+.drawer-actions > span { flex: 1; }
+.advanced-settings-button { color: var(--hongfen-text-muted); }
+@media (max-width: 640px) {
+  :global(.quick-setup-dialog .el-dialog__header) { padding: 18px 16px 12px; }
+  :global(.quick-setup-dialog .el-dialog__body) { max-height: calc(100dvh - 146px); padding: 14px 16px 8px; }
+  :global(.quick-setup-dialog .el-dialog__footer) { padding: 12px 16px 16px; }
+  .quick-config-section { padding: 14px 0; }
+  .quick-control-item, .quick-price-control, .quick-credential-grid, .oauth-flow { margin-left: 0; }
+  .quick-credential-grid, .oauth-code-grid, .quick-price-control :deep(.el-form-item__content) { grid-template-columns: 1fr; }
+  .oauth-section-heading { flex-wrap: wrap; }
+  .oauth-section-heading :deep(.el-tag) { margin-left: 34px; }
+  .oauth-flow-content :deep(.el-button) { width: 100%; }
+  .quick-dialog-actions { align-items: stretch; flex-direction: column-reverse; }
+  .quick-dialog-actions > div { width: 100%; }
+  .quick-dialog-actions > div :deep(.el-button) { flex: 1; min-width: 0; margin: 0; }
+  .advanced-settings-button { align-self: flex-start; }
+}
 .channel-list-toolbar { display: flex; min-height: 58px; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--hongfen-border); background: var(--hongfen-surface-muted); }
 .channel-list-toolbar > div { display: grid; min-width: 0; gap: 2px; }
 .channel-list-toolbar strong { color: var(--hongfen-text); font-size: 14px; font-weight: 650; }

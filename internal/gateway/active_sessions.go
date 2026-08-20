@@ -26,6 +26,7 @@ type ActiveSessionQuery struct {
 	Session     string
 	Sources     []string
 	TokenID     uint64
+	TokenIDs    []uint64
 	ActiveSince time.Time
 	Page        int
 	PageSize    int
@@ -80,6 +81,8 @@ func activeSessionRows(db *gorm.DB, query ActiveSessionQuery) *gorm.DB {
 	db = db.Where("session_state.last_activity_at >= ?", utcQueryTime(query.ActiveSince))
 	if query.TokenID > 0 {
 		db = db.Where("session_state.token_id = ?", query.TokenID)
+	} else if len(query.TokenIDs) > 0 {
+		db = db.Where("session_state.token_id IN ?", query.TokenIDs)
 	}
 	if value := strings.TrimSpace(query.Session); value != "" {
 		pattern := "%" + value + "%"
@@ -165,6 +168,7 @@ func (s *ManagementService) ActiveSessions(ctx context.Context, query ActiveSess
 	if hasCutoff {
 		aggregateDB = aggregateDB.Where("created_at >= ?", detailCutoff)
 	}
+	averageTPS, tpsSampleCount := throughputSQL("", "outcome = 'success'")
 	if err := aggregateDB.
 		Select("token_id, codex_session_id AS session_id, COUNT(*) AS request_count, " +
 			"SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS success_count, " +
@@ -178,6 +182,8 @@ func (s *ManagementService) ActiveSessions(ctx context.Context, query ActiveSess
 			"COALESCE(SUM(first_token_ms), 0) AS total_first_token_ms, SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_sample_count, " +
 			"COALESCE(SUM(latency_ms), 0) AS total_latency_ms, SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END) AS latency_sample_count, " +
 			"COALESCE(SUM(duration_ms), 0) AS total_duration_ms, " +
+			averageTPS + " AS average_tokens_per_second, " +
+			tpsSampleCount + " AS tokens_per_second_sample_count, " +
 			"MIN(unixepoch(created_at)) AS first_seen_unix, MAX(unixepoch(created_at)) AS last_seen_unix").
 		Group("token_id, codex_session_id").Scan(&aggregates).Error; err != nil {
 		return nil, err
@@ -207,6 +213,8 @@ func (s *ManagementService) ActiveSessions(ctx context.Context, query ActiveSess
 		items[index].UpstreamCost = aggregate.UpstreamCost
 		items[index].FirstTokenSampleCount = aggregate.FirstTokenSampleCount
 		items[index].LatencySampleCount = aggregate.LatencySampleCount
+		items[index].AverageTokensPerSecond = aggregate.AverageTokensPerSecond
+		items[index].TokensPerSecondSampleCount = aggregate.TokensPerSecondSampleCount
 		items[index].FirstSeenAt = time.Unix(aggregate.FirstSeenUnix, 0).UTC()
 		items[index].LastSeenAt = time.Unix(aggregate.LastSeenUnix, 0).UTC()
 		finishSessionSummary(&items[index], aggregate.TotalFirstTokenMS, aggregate.TotalLatencyMS, aggregate.TotalDurationMS)

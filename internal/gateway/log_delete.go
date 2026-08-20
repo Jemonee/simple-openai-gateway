@@ -25,11 +25,15 @@ func (s *ManagementService) DeleteHistoricalLogsBefore(ctx context.Context, days
 	result := &LogDeleteResult{CutoffAt: cutoff}
 	err := s.store.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		requestIDs := db.Model(&RelayRequestLog{}).Select("id").Where("created_at < ?", cutoff)
+		attemptIDs := db.Model(&RelayAttemptLog{}).Select("id").Where("created_at < ? OR request_id IN (?)", cutoff, requestIDs)
 		var count int64
 		if err := db.Model(&RelayAttemptLog{}).Where("request_id IN (?)", requestIDs).Count(&count).Error; err != nil {
 			return err
 		}
 		result.AttemptLogsDeleted = count
+		if err := db.Where("attempt_id IN (?)", attemptIDs).Delete(&RelayAttemptPayload{}).Error; err != nil {
+			return err
+		}
 		if err := db.Where("request_id IN (?)", requestIDs).Delete(&RelayAttemptLog{}).Error; err != nil {
 			return err
 		}
@@ -51,6 +55,9 @@ func (s *ManagementService) DeleteHistoricalLogsBefore(ctx context.Context, days
 			return err
 		}
 		result.RequestLogsDeleted = count
+		if err := db.Where("request_id IN (?)", requestIDs).Delete(&RelayRequestPayload{}).Error; err != nil {
+			return err
+		}
 		if err := db.Where("created_at < ?", cutoff).Delete(&RelayRequestLog{}).Error; err != nil {
 			return err
 		}

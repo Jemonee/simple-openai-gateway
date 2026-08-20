@@ -101,3 +101,23 @@ func OpenAIOfficialPrice(modelID string) *OfficialModelPrice {
 		UpdatedAt:              OpenAIPriceCatalogUpdatedAt,
 	}
 }
+
+func effectiveChannelModelPricing(channel Channel, mapping ChannelModel) ChannelModel {
+	if channel.AuthType != ChannelTypeChatGPTOAuth {
+		return mapping
+	}
+	mapping.PriceMultiplierBasisPoints = DefaultPriceMultiplierBasisPoints
+	official := OpenAIOfficialPrice(mapping.UpstreamModel)
+	if official == nil {
+		mapping.InputPriceMicros = 0
+		mapping.OutputPriceMicros = 0
+		mapping.CachedInputPriceMicros = nil
+		mapping.CacheWritePriceMicros = nil
+		return mapping
+	}
+	mapping.InputPriceMicros = official.InputPriceMicros
+	mapping.OutputPriceMicros = official.OutputPriceMicros
+	mapping.CachedInputPriceMicros = copyPriceMicros(official.CachedInputPriceMicros)
+	mapping.CacheWritePriceMicros = copyPriceMicros(official.CacheWritePriceMicros)
+	return mapping
+}

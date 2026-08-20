@@ -18,6 +18,7 @@ import (
 type GatewayManagementApi struct {
 	pkgApi.BaseApi
 	management   *gateway.ManagementService
+	oauth        *gateway.ChatGPTOAuthService
 	verification *gateway.VerificationService
 	security     *AdminSecurity
 	access       *gateway.ClientAccessService
@@ -42,8 +43,8 @@ type availableModelView struct {
 	Name string `json:"name"`
 }
 
-func NewGatewayManagementApi(management *gateway.ManagementService, verification *gateway.VerificationService, security *AdminSecurity, access *gateway.ClientAccessService, estimator *gateway.TokenEstimator) *GatewayManagementApi {
-	return &GatewayManagementApi{management: management, verification: verification, security: security, access: access, estimator: estimator}
+func NewGatewayManagementApi(management *gateway.ManagementService, oauth *gateway.ChatGPTOAuthService, verification *gateway.VerificationService, security *AdminSecurity, access *gateway.ClientAccessService, estimator *gateway.TokenEstimator) *GatewayManagementApi {
+	return &GatewayManagementApi{management: management, oauth: oauth, verification: verification, security: security, access: access, estimator: estimator}
 }
 
 func (a *GatewayManagementApi) Register(router *gin.RouterGroup) {
@@ -57,6 +58,23 @@ func (a *GatewayManagementApi) Register(router *gin.RouterGroup) {
 	console.GET("/sessions/detail", a.sessionDetail)
 	console.PUT("/sessions/title", a.renameSession)
 	console.GET("/models/available", a.availableModels)
+	console.POST("/chatgpt/oauth/start", a.startChatGPTOAuth)
+	console.POST("/chatgpt/oauth/exchange", a.exchangeChatGPTOAuth)
+	console.GET("/channels", a.listChannels)
+	console.POST("/channels", a.createChannel)
+	console.POST("/channels/configuration", a.saveChannelConfiguration)
+	console.PUT("/channels/:id", a.updateChannel)
+	console.DELETE("/channels/:id", a.deleteChannel)
+	console.POST("/channels/:id/reset-circuit", a.resetChannelCircuit)
+	console.PUT("/channels/:id/models", a.replaceChannelModels)
+	console.POST("/channels/discover-models", a.discoverChannelModels)
+	console.POST("/channels/:id/test", a.testChannel)
+	console.GET("/models", a.listModels)
+	console.GET("/tokens", a.listTokens)
+	console.POST("/tokens", a.createToken)
+	console.PUT("/tokens/:id", a.updateToken)
+	console.POST("/tokens/:id/rotate", a.rotateToken)
+	console.DELETE("/tokens/:id", a.deleteToken)
 
 	admin := console.Group("")
 	admin.Use(a.security.RequireAdmin)
@@ -73,15 +91,6 @@ func (a *GatewayManagementApi) Register(router *gin.RouterGroup) {
 	admin.GET("/codex-config", a.codexConfiguration)
 	admin.PUT("/codex-config", a.saveCodexConfiguration)
 
-	admin.GET("/channels", a.listChannels)
-	admin.POST("/channels", a.createChannel)
-	admin.POST("/channels/configuration", a.saveChannelConfiguration)
-	admin.PUT("/channels/:id", a.updateChannel)
-	admin.DELETE("/channels/:id", a.deleteChannel)
-	admin.POST("/channels/:id/reset-circuit", a.resetChannelCircuit)
-	admin.PUT("/channels/:id/models", a.replaceChannelModels)
-	admin.POST("/channels/discover-models", a.discoverChannelModels)
-	admin.POST("/channels/:id/test", a.testChannel)
 	admin.GET("/verifications", a.verificationReports)
 	admin.GET("/verification-sessions", a.verificationSessions)
 	admin.GET("/verification-sessions/:id", a.verificationSession)
@@ -89,16 +98,44 @@ func (a *GatewayManagementApi) Register(router *gin.RouterGroup) {
 	admin.GET("/verifications/:id", a.verificationReport)
 	admin.POST("/verifications", a.verifyChannel)
 
-	admin.GET("/models", a.listModels)
 	admin.POST("/models", a.createModel)
 	admin.PUT("/models/:id", a.updateModel)
 	admin.DELETE("/models/:id", a.deleteModel)
 
-	admin.GET("/tokens", a.listTokens)
-	admin.POST("/tokens", a.createToken)
-	admin.PUT("/tokens/:id", a.updateToken)
-	admin.POST("/tokens/:id/rotate", a.rotateToken)
-	admin.DELETE("/tokens/:id", a.deleteToken)
+}
+
+func (a *GatewayManagementApi) startChatGPTOAuth(c *gin.Context) {
+	if a.oauth == nil {
+		managementError(c, errors.New("ChatGPT OAuth is unavailable"))
+		return
+	}
+	var input gateway.ChatGPTOAuthStartInput
+	if !bindManagementJSON(c, &input) {
+		return
+	}
+	view, err := a.oauth.Start(input)
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, common.S(view))
+}
+
+func (a *GatewayManagementApi) exchangeChatGPTOAuth(c *gin.Context) {
+	if a.oauth == nil {
+		managementError(c, errors.New("ChatGPT OAuth is unavailable"))
+		return
+	}
+	var input gateway.ChatGPTOAuthExchangeInput
+	if !bindManagementJSON(c, &input) {
+		return
+	}
+	credential, err := a.oauth.Exchange(c.Request.Context(), input)
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, common.S(credential))
 }
 
 func consoleTokenID(c *gin.Context) uint64 {
@@ -107,6 +144,33 @@ func consoleTokenID(c *gin.Context) uint64 {
 		return 0
 	}
 	return token.ID
+}
+
+func consoleUserScope(c *gin.Context) uint64 {
+	principal, ok := currentConsole(c)
+	if !ok || principal.IsAdmin() {
+		return 0
+	}
+	return principal.UserID()
+}
+
+func (a *GatewayManagementApi) consoleScopeTokenIDs(c *gin.Context) ([]uint64, error) {
+	if tokenID := consoleTokenID(c); tokenID > 0 {
+		return []uint64{tokenID}, nil
+	}
+	if userID := consoleUserScope(c); userID > 0 {
+		return a.management.TokenIDsForUser(c.Request.Context(), userID)
+	}
+	return nil, nil
+}
+
+func containsTokenID(ids []uint64, id uint64) bool {
+	for _, candidate := range ids {
+		if candidate == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *GatewayManagementApi) availableModels(c *gin.Context) {
@@ -120,7 +184,7 @@ func (a *GatewayManagementApi) availableModels(c *gin.Context) {
 	if principal.AccessToken != nil {
 		models, err = a.access.ListModels(c.Request.Context(), principal.AccessToken)
 	} else {
-		views, listErr := a.management.ListModels(c.Request.Context())
+		views, listErr := a.management.ListModels(c.Request.Context(), consoleUserScope(c))
 		err = listErr
 		for _, view := range views {
 			models = append(models, view.GatewayModel)
@@ -293,7 +357,7 @@ func bindManagementJSON(c *gin.Context, value any) bool {
 }
 
 func (a *GatewayManagementApi) listChannels(c *gin.Context) {
-	items, err := a.management.ListChannels(c.Request.Context())
+	items, err := a.management.ListChannels(c.Request.Context(), consoleUserScope(c))
 	if err != nil {
 		managementError(c, err)
 		return
@@ -306,7 +370,7 @@ func (a *GatewayManagementApi) createChannel(c *gin.Context) {
 	if !bindManagementJSON(c, &input) {
 		return
 	}
-	item, err := a.management.CreateChannel(c.Request.Context(), input)
+	item, err := a.management.CreateChannel(c.Request.Context(), input, consoleUserScope(c))
 	if err != nil {
 		managementError(c, err)
 		return
@@ -319,7 +383,7 @@ func (a *GatewayManagementApi) saveChannelConfiguration(c *gin.Context) {
 	if !bindManagementJSON(c, &input) {
 		return
 	}
-	item, err := a.management.SaveChannelConfiguration(c.Request.Context(), input)
+	item, err := a.management.SaveChannelConfiguration(c.Request.Context(), input, consoleUserScope(c))
 	if err != nil {
 		managementError(c, err)
 		return
@@ -336,7 +400,7 @@ func (a *GatewayManagementApi) updateChannel(c *gin.Context) {
 	if !bindManagementJSON(c, &input) {
 		return
 	}
-	item, err := a.management.UpdateChannel(c.Request.Context(), id, input)
+	item, err := a.management.UpdateChannel(c.Request.Context(), id, input, consoleUserScope(c))
 	if err != nil {
 		managementError(c, err)
 		return
@@ -349,7 +413,7 @@ func (a *GatewayManagementApi) deleteChannel(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := a.management.DeleteChannel(c.Request.Context(), id); err != nil {
+	if err := a.management.DeleteChannel(c.Request.Context(), id, consoleUserScope(c)); err != nil {
 		managementError(c, err)
 		return
 	}
@@ -361,7 +425,7 @@ func (a *GatewayManagementApi) resetChannelCircuit(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := a.management.ResetChannelCircuit(c.Request.Context(), id); err != nil {
+	if err := a.management.ResetChannelCircuit(c.Request.Context(), id, consoleUserScope(c)); err != nil {
 		managementError(c, err)
 		return
 	}
@@ -403,7 +467,7 @@ func (a *GatewayManagementApi) replaceChannelModels(c *gin.Context) {
 	if !bindManagementJSON(c, &inputs) {
 		return
 	}
-	items, err := a.management.ReplaceChannelModels(c.Request.Context(), id, inputs)
+	items, err := a.management.ReplaceChannelModels(c.Request.Context(), id, inputs, consoleUserScope(c))
 	if err != nil {
 		managementError(c, err)
 		return
@@ -416,7 +480,7 @@ func (a *GatewayManagementApi) discoverChannelModels(c *gin.Context) {
 	if !bindManagementJSON(c, &input) {
 		return
 	}
-	result, err := a.management.DiscoverChannelModels(c.Request.Context(), input)
+	result, err := a.management.DiscoverChannelModels(c.Request.Context(), input, consoleUserScope(c))
 	if err != nil {
 		managementError(c, err)
 		return
@@ -429,7 +493,7 @@ func (a *GatewayManagementApi) testChannel(c *gin.Context) {
 	if !ok {
 		return
 	}
-	latency, status, err := a.management.TestChannel(c.Request.Context(), id)
+	latency, status, err := a.management.TestChannel(c.Request.Context(), id, consoleUserScope(c))
 	if err != nil {
 		managementError(c, err)
 		return
@@ -439,7 +503,7 @@ func (a *GatewayManagementApi) testChannel(c *gin.Context) {
 }
 
 func (a *GatewayManagementApi) listModels(c *gin.Context) {
-	items, err := a.management.ListModels(c.Request.Context())
+	items, err := a.management.ListModels(c.Request.Context(), consoleUserScope(c))
 	if err != nil {
 		managementError(c, err)
 		return
@@ -490,7 +554,7 @@ func (a *GatewayManagementApi) deleteModel(c *gin.Context) {
 }
 
 func (a *GatewayManagementApi) listTokens(c *gin.Context) {
-	items, err := a.management.ListTokens(c.Request.Context())
+	items, err := a.management.ListTokens(c.Request.Context(), consoleUserScope(c))
 	if err != nil {
 		managementError(c, err)
 		return
@@ -503,7 +567,7 @@ func (a *GatewayManagementApi) createToken(c *gin.Context) {
 	if !bindManagementJSON(c, &input) {
 		return
 	}
-	item, err := a.management.CreateToken(c.Request.Context(), input)
+	item, err := a.management.CreateToken(c.Request.Context(), input, consoleUserScope(c))
 	if err != nil {
 		managementError(c, err)
 		return
@@ -520,7 +584,7 @@ func (a *GatewayManagementApi) updateToken(c *gin.Context) {
 	if !bindManagementJSON(c, &input) {
 		return
 	}
-	item, err := a.management.UpdateToken(c.Request.Context(), id, input)
+	item, err := a.management.UpdateToken(c.Request.Context(), id, input, consoleUserScope(c))
 	if err != nil {
 		managementError(c, err)
 		return
@@ -533,7 +597,7 @@ func (a *GatewayManagementApi) rotateToken(c *gin.Context) {
 	if !ok {
 		return
 	}
-	item, err := a.management.RotateToken(c.Request.Context(), id)
+	item, err := a.management.RotateToken(c.Request.Context(), id, consoleUserScope(c))
 	if err != nil {
 		managementError(c, err)
 		return
@@ -546,7 +610,7 @@ func (a *GatewayManagementApi) deleteToken(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := a.management.DeleteToken(c.Request.Context(), id); err != nil {
+	if err := a.management.DeleteToken(c.Request.Context(), id, consoleUserScope(c)); err != nil {
 		managementError(c, err)
 		return
 	}
@@ -563,7 +627,12 @@ func (a *GatewayManagementApi) dashboard(c *gin.Context) {
 		}
 		days = parsed
 	}
-	item, err := a.management.Dashboard(c.Request.Context(), days, consoleTokenID(c))
+	tokenIDs, err := a.consoleScopeTokenIDs(c)
+	if err != nil {
+		managementError(c, err)
+		return
+	}
+	item, err := a.management.Dashboard(c.Request.Context(), days, tokenIDs...)
 	if err != nil {
 		managementError(c, err)
 		return
@@ -589,8 +658,17 @@ func (a *GatewayManagementApi) logs(c *gin.Context) {
 		query.To, _ = time.Parse(time.RFC3339, value)
 		query.To = query.To.UTC()
 	}
-	if tokenID := consoleTokenID(c); tokenID > 0 {
-		query.TokenID = tokenID
+	tokenIDs, scopeErr := a.consoleScopeTokenIDs(c)
+	if scopeErr != nil {
+		managementError(c, scopeErr)
+		return
+	}
+	if len(tokenIDs) == 1 {
+		query.TokenID = tokenIDs[0]
+		query.ChannelID = 0
+	} else if len(tokenIDs) > 1 {
+		query.TokenIDs = tokenIDs
+		query.TokenID = 0
 		query.ChannelID = 0
 	}
 	item, err := a.management.Logs(c.Request.Context(), query)
@@ -598,7 +676,7 @@ func (a *GatewayManagementApi) logs(c *gin.Context) {
 		managementError(c, err)
 		return
 	}
-	if tokenID := consoleTokenID(c); tokenID > 0 {
+	if len(tokenIDs) > 0 {
 		gateway.RedactTokenScopedLogPage(item)
 	}
 	c.JSON(http.StatusOK, common.S(item))
@@ -640,12 +718,17 @@ func (a *GatewayManagementApi) deleteLogs(c *gin.Context) {
 }
 
 func (a *GatewayManagementApi) logDetail(c *gin.Context) {
-	item, err := a.management.LogDetail(c.Request.Context(), c.Param("requestId"), consoleTokenID(c))
+	tokenIDs, scopeErr := a.consoleScopeTokenIDs(c)
+	if scopeErr != nil {
+		managementError(c, scopeErr)
+		return
+	}
+	item, err := a.management.LogDetail(c.Request.Context(), c.Param("requestId"), tokenIDs...)
 	if err != nil {
 		managementError(c, err)
 		return
 	}
-	if consoleTokenID(c) > 0 {
+	if len(tokenIDs) > 0 {
 		gateway.RedactTokenScopedLogView(item)
 	}
 	c.JSON(http.StatusOK, common.S(item))
@@ -668,8 +751,17 @@ func (a *GatewayManagementApi) sessions(c *gin.Context) {
 		query.To, _ = time.Parse(time.RFC3339, value)
 		query.To = query.To.UTC()
 	}
-	if tokenID := consoleTokenID(c); tokenID > 0 {
-		query.TokenID = tokenID
+	tokenIDs, scopeErr := a.consoleScopeTokenIDs(c)
+	if scopeErr != nil {
+		managementError(c, scopeErr)
+		return
+	}
+	if len(tokenIDs) == 1 {
+		query.TokenID = tokenIDs[0]
+		query.ChannelID = 0
+	} else if len(tokenIDs) > 1 {
+		query.TokenIDs = tokenIDs
+		query.TokenID = 0
 		query.ChannelID = 0
 	}
 	item, err := a.management.SessionLogs(c.Request.Context(), query)
@@ -677,7 +769,7 @@ func (a *GatewayManagementApi) sessions(c *gin.Context) {
 		managementError(c, err)
 		return
 	}
-	if consoleTokenID(c) > 0 {
+	if len(tokenIDs) > 0 {
 		gateway.RedactTokenScopedSessionPage(item)
 	}
 	c.JSON(http.StatusOK, common.S(item))
@@ -691,13 +783,22 @@ func (a *GatewayManagementApi) activeSessions(c *gin.Context) {
 	}
 	query.Page, _ = strconv.Atoi(c.Query("page"))
 	query.PageSize, _ = strconv.Atoi(c.Query("pageSize"))
-	query.TokenID = consoleTokenID(c)
+	tokenIDs, scopeErr := a.consoleScopeTokenIDs(c)
+	if scopeErr != nil {
+		managementError(c, scopeErr)
+		return
+	}
+	if len(tokenIDs) == 1 {
+		query.TokenID = tokenIDs[0]
+	} else if len(tokenIDs) > 1 {
+		query.TokenIDs = tokenIDs
+	}
 	item, err := a.management.ActiveSessions(c.Request.Context(), query)
 	if err != nil {
 		managementError(c, err)
 		return
 	}
-	if consoleTokenID(c) > 0 {
+	if len(tokenIDs) > 0 {
 		gateway.RedactTokenScopedActiveSessionPage(item)
 	}
 	c.JSON(http.StatusOK, common.S(item))
@@ -712,15 +813,25 @@ func (a *GatewayManagementApi) sessionDetail(c *gin.Context) {
 	query.TokenID, _ = strconv.ParseUint(c.Query("tokenId"), 10, 64)
 	query.Page, _ = strconv.Atoi(c.Query("page"))
 	query.PageSize, _ = strconv.Atoi(c.Query("pageSize"))
-	if tokenID := consoleTokenID(c); tokenID > 0 {
-		query.TokenID = tokenID
+	tokenIDs, scopeErr := a.consoleScopeTokenIDs(c)
+	if scopeErr != nil {
+		managementError(c, scopeErr)
+		return
+	}
+	if len(tokenIDs) == 1 {
+		query.TokenID = tokenIDs[0]
+	} else if len(tokenIDs) > 1 {
+		if query.TokenID == 0 || !containsTokenID(tokenIDs, query.TokenID) {
+			c.JSON(http.StatusNotFound, common.F[any](http.StatusNotFound, "会话不存在"))
+			return
+		}
 	}
 	item, err := a.management.SessionLogDetail(c.Request.Context(), query)
 	if err != nil {
 		managementError(c, err)
 		return
 	}
-	if consoleTokenID(c) > 0 {
+	if len(tokenIDs) > 0 {
 		gateway.RedactTokenScopedSessionDetail(item)
 	}
 	c.JSON(http.StatusOK, common.S(item))
@@ -731,8 +842,16 @@ func (a *GatewayManagementApi) renameSession(c *gin.Context) {
 	if !bindManagementJSON(c, &input) {
 		return
 	}
-	if tokenID := consoleTokenID(c); tokenID > 0 {
-		input.TokenID = tokenID
+	tokenIDs, scopeErr := a.consoleScopeTokenIDs(c)
+	if scopeErr != nil {
+		managementError(c, scopeErr)
+		return
+	}
+	if len(tokenIDs) == 1 {
+		input.TokenID = tokenIDs[0]
+	} else if len(tokenIDs) > 1 && !containsTokenID(tokenIDs, input.TokenID) {
+		c.JSON(http.StatusNotFound, common.F[any](http.StatusNotFound, "会话不存在"))
+		return
 	}
 	if err := a.management.RenameSession(c.Request.Context(), input); err != nil {
 		managementError(c, err)

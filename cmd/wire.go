@@ -24,6 +24,7 @@ func InitializeApp() *app.ApplicationHolder {
 		gateway.NewStore,
 		gateway.NewAdminAuthService,
 		gateway.NewManagementService,
+		gateway.NewChatGPTOAuthService,
 		gateway.NewClientAccessService,
 		gateway.NewTokenEstimator,
 		gateway.NewVerificationService,

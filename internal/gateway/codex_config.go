@@ -349,6 +349,7 @@ func (s *ManagementService) SaveCodexConfiguration(ctx context.Context, input Co
 	if err := s.store.db.WithContext(ctx).Where("name = ? AND enabled = ?", input.Model, true).First(&model).Error; err != nil {
 		return nil, errors.New("选择的模型不存在或未启用")
 	}
+	access := NewClientAccessService(s.store)
 	if input.TokenMode == codexTokenModeExisting {
 		apiKey = codexString(authDocument.value["OPENAI_API_KEY"])
 		if apiKey == "" {
@@ -364,17 +365,29 @@ func (s *ManagementService) SaveCodexConfiguration(ctx context.Context, input Co
 		if token.KeyHash != hashSecret(apiKey) {
 			return nil, errors.New("现有令牌明文不可恢复，仅可复用 auth.json 当前已配置的匹配令牌")
 		}
-		if !token.AllowAllModels {
-			var permissionCount int64
-			if err := s.store.db.WithContext(ctx).Model(&ClientTokenModel{}).
-				Where("token_id = ? AND model_id = ?", token.ID, model.ID).Count(&permissionCount).Error; err != nil {
-				return nil, err
-			}
-			if permissionCount == 0 {
+		if err := access.AuthorizeModel(ctx, &token, model.ID); err != nil {
+			if errors.Is(err, ErrModelNotAllowed) {
 				return nil, errors.New("选择的现有访问令牌没有该模型权限，请新增令牌或先调整令牌策略")
 			}
+			return nil, err
+		}
+		available, err := tokenCanAccessModel(ctx, access, &token, model.ID)
+		if err != nil {
+			return nil, err
+		}
+		if !available {
+			return nil, errors.New("选择的现有访问令牌没有可用于该模型的渠道，请新增令牌或先调整令牌策略")
 		}
 	} else {
+		available, err := tokenCanAccessModel(ctx, access, &ClientToken{
+			Enabled: true, AllowAllModels: true, AllowAllChannels: true,
+		}, model.ID)
+		if err != nil {
+			return nil, err
+		}
+		if !available {
+			return nil, errors.New("选择的模型当前没有可用渠道，请先配置渠道与模型映射")
+		}
 		issued, err := s.issueToken(ctx, ClientTokenInput{
 			Name:           input.NewTokenName,
 			Enabled:        true,
@@ -382,7 +395,7 @@ func (s *ManagementService) SaveCodexConfiguration(ctx context.Context, input Co
 			RPM:            60,
 			MaxConcurrency: 10,
 			ModelIDs:       []uint64{model.ID},
-		}, nil)
+		}, nil, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -415,4 +428,17 @@ func (s *ManagementService) SaveCodexConfiguration(ctx context.Context, input Co
 		return nil, err
 	}
 	return s.CodexConfiguration(ctx)
+}
+
+func tokenCanAccessModel(ctx context.Context, access *ClientAccessService, token *ClientToken, modelID uint64) (bool, error) {
+	models, err := access.ListModels(ctx, token)
+	if err != nil {
+		return false, err
+	}
+	for _, model := range models {
+		if model.ID == modelID {
+			return true, nil
+		}
+	}
+	return false, nil
 }

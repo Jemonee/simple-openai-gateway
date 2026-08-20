@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/textproto"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +59,7 @@ type RelayService struct {
 	configManager *config.ApplicationConfigManager
 	client        *http.Client
 	circuitLocks  sync.Map
+	oauthLocks    sync.Map
 }
 
 // dynamicResponseHeaderTransport keeps the upstream connection pool while
@@ -116,6 +119,8 @@ type relayExecution struct {
 	firstResponseMS          int64
 	latencyMS                int64
 	durationMS               int64
+	generationDurationMS     int64
+	tokensPerSecond          float64
 	responseBody             []byte
 	responseBodyTruncated    bool
 	payloadLogDetail         string
@@ -124,24 +129,26 @@ type relayExecution struct {
 }
 
 type attemptResult struct {
-	response         *http.Response
-	body             []byte
-	requestBody      []byte
-	bodyTruncated    bool
-	usage            Usage
-	sentTokens       int64
-	estimatedCost    int64
-	upstreamCost     int64
-	costSource       string
-	firstTokenMS     int64
-	firstResponseMS  int64
-	latencyMS        int64
-	durationMS       int64
-	streamError      error
-	outcome          string
-	retryReason      string
-	retryDetail      string
-	circuitOpenUntil *time.Time
+	response             *http.Response
+	body                 []byte
+	requestBody          []byte
+	bodyTruncated        bool
+	usage                Usage
+	sentTokens           int64
+	estimatedCost        int64
+	upstreamCost         int64
+	costSource           string
+	firstTokenMS         int64
+	firstResponseMS      int64
+	latencyMS            int64
+	durationMS           int64
+	generationDurationMS int64
+	tokensPerSecond      float64
+	streamError          error
+	outcome              string
+	retryReason          string
+	retryDetail          string
+	circuitOpenUntil     *time.Time
 }
 
 func NewRelayService(store *Store, router *Router, estimator *TokenEstimator, configManager *config.ApplicationConfigManager) *RelayService {
@@ -171,6 +178,30 @@ func NewRelayService(store *Store, router *Router, estimator *TokenEstimator, co
 			},
 		},
 	}
+}
+
+func (s *RelayService) clientForChannel(channel Channel) (*http.Client, error) {
+	if strings.TrimSpace(channel.ProxyURLCipher) == "" {
+		return s.client, nil
+	}
+	proxyURL, err := s.store.secretBox.Decrypt(channel.ProxyURLCipher)
+	if err != nil {
+		return nil, err
+	}
+	client, err := httpClientWithProxy(proxyURL, 0)
+	if err != nil {
+		return nil, err
+	}
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		timeout := 120 * time.Second
+		if s.configManager != nil {
+			if cfg := s.configManager.GetConfig(); cfg != nil && cfg.GatewayConfig.ResponseHeaderTimeoutSeconds > 0 {
+				timeout = time.Duration(cfg.GatewayConfig.ResponseHeaderTimeoutSeconds) * time.Second
+			}
+		}
+		transport.ResponseHeaderTimeout = timeout
+	}
+	return client, nil
 }
 
 func (s *RelayService) Relay(ctx context.Context, writer http.ResponseWriter, headers http.Header, rawQuery string, endpoint string, token *ClientToken, payload *RelayPayload, rawBody []byte) *PublicError {
@@ -414,22 +445,38 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	execution.firstResponseMS = 0
 	execution.latencyMS = 0
 	execution.durationMS = 0
+	execution.generationDurationMS = 0
+	execution.tokensPerSecond = 0
 	attempt := execution.attempts
 	payloadTransformStarted := time.Now()
-	body, contentType, err := execution.payload.UpstreamRequestBody(candidate.Mapping.UpstreamModel, execution.endpoint, candidate.Channel.SupportsStreamUsage)
+	var body []byte
+	var contentType string
+	var err error
+	if candidate.Channel.AuthType == ChannelTypeChatGPTOAuth {
+		body, err = execution.payload.ChatGPTOAuthRequestBody(candidate.Mapping.UpstreamModel, execution.endpoint)
+		contentType = "application/json"
+	} else {
+		body, contentType, err = execution.payload.UpstreamRequestBody(candidate.Mapping.UpstreamModel, execution.endpoint, candidate.Channel.SupportsStreamUsage)
+	}
 	execution.trace.Record(RelayStagePayloadTransform, RelayStepCategoryGateway, attempt, payloadTransformStarted, err,
 		fmt.Sprintf("channel=%s model=%s", candidate.Channel.Name, candidate.Mapping.UpstreamModel))
 	if err != nil {
 		return s.recordPreparationFailure(ctx, execution, candidate, selection, "payload_transform", nil, err)
 	}
 	credentialStarted := time.Now()
-	apiKey, err := s.store.secretBox.Decrypt(candidate.Channel.APIKeyCipher)
+	apiKey, err := s.channelAccessToken(ctx, candidate.Channel)
 	execution.trace.Record(RelayStageCredentialDecrypt, RelayStepCategoryGateway, attempt, credentialStarted, err, "channel="+candidate.Channel.Name)
 	if err != nil {
 		return s.recordPreparationFailure(ctx, execution, candidate, selection, "credential_decrypt", body, err)
 	}
 	requestBuildStarted := time.Now()
-	upstreamURL := candidate.Channel.BaseURL + "/" + endpointPath(execution.endpoint)
+	upstreamBaseURL := candidate.Channel.BaseURL
+	upstreamEndpoint := execution.endpoint
+	if candidate.Channel.AuthType == ChannelTypeChatGPTOAuth {
+		upstreamBaseURL = ChatGPTCodexBaseURL
+		upstreamEndpoint = "responses"
+	}
+	upstreamURL := upstreamBaseURL + "/" + endpointPath(upstreamEndpoint)
 	if rawQuery != "" {
 		upstreamURL += "?" + rawQuery
 	}
@@ -442,6 +489,18 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	request.Header.Set("Authorization", "Bearer "+apiKey)
 	request.Header.Set("Content-Type", contentType)
 	request.Header.Set("X-Gateway-Request-Id", execution.requestID)
+	if candidate.Channel.AuthType == ChannelTypeChatGPTOAuth {
+		request.Header.Set("originator", chatGPTCanonicalOrigin)
+		request.Header.Set("version", chatGPTCanonicalVersion)
+		request.Header.Set("User-Agent", chatGPTCanonicalUA)
+		request.Header.Set("Accept", "text/event-stream")
+		if candidate.Channel.ChatGPTAccountID != "" {
+			request.Header.Set("chatgpt-account-id", candidate.Channel.ChatGPTAccountID)
+		}
+		if request.URL.Hostname() == "chatgpt.com" {
+			request.Host = "chatgpt.com"
+		}
+	}
 	execution.trace.Record(RelayStageUpstreamRequestBuild, RelayStepCategoryGateway, attempt, requestBuildStarted, nil,
 		fmt.Sprintf("channel=%s bytes=%d", candidate.Channel.Name, len(body)))
 
@@ -451,7 +510,11 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	if execution.attempts == 1 {
 		execution.gatewayPreparationMS = elapsedMilliseconds(execution.startedAt, started)
 	}
-	response, requestErr := s.client.Do(request)
+	upstreamClient, clientErr := s.clientForChannel(candidate.Channel)
+	if clientErr != nil {
+		return s.recordPreparationFailure(ctx, execution, candidate, selection, "proxy_config", body, clientErr)
+	}
+	response, requestErr := upstreamClient.Do(request)
 	responseReceivedAt := time.Now()
 	latency := elapsedMilliseconds(started, responseReceivedAt)
 	statusDetail := "channel=" + candidate.Channel.Name
@@ -486,6 +549,11 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	execution.latencyMS = latency
 
 	response.Body = s.withIdleTimeout(response.Body)
+	if candidate.Channel.AuthType == ChannelTypeChatGPTOAuth && execution.endpoint == "chat" && isEventStream(response.Header) && response.StatusCode >= 200 && response.StatusCode < 300 && execution.payload.Stream {
+		response.Body = newChatGPTOAuthChatSSEReadCloser(response.Body, execution.payload.Model, chatStreamIncludesUsage(execution.payload))
+		response.Header.Del("Content-Length")
+		response.Header.Set("Content-Type", "text/event-stream")
+	}
 	if execution.payload.Stream && isEventStream(response.Header) && response.StatusCode >= 200 && response.StatusCode < 300 {
 		return s.streamResponse(ctx, writer, execution, candidate, selection, response, started, latency, sentTokens, body)
 	}
@@ -494,6 +562,22 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	responseBody, readErr := readUpstreamResponseBody(response.Body)
 	responseFinishedAt := time.Now()
 	_ = response.Body.Close()
+	if candidate.Channel.AuthType == ChannelTypeChatGPTOAuth && !execution.payload.Stream && isEventStream(response.Header) && readErr == nil {
+		var converted []byte
+		var convertErr error
+		if execution.endpoint == "chat" {
+			converted, convertErr = chatGPTResponsesSSEToChatCompletion(responseBody, execution.payload.Model)
+		} else {
+			converted, convertErr = chatGPTResponsesSSEToJSON(responseBody)
+		}
+		if convertErr == nil {
+			responseBody = converted
+			response.Header.Del("Content-Length")
+			response.Header.Set("Content-Type", "application/json")
+		} else if response.StatusCode >= 200 && response.StatusCode < 300 {
+			readErr = convertErr
+		}
+	}
 	execution.trace.Record(RelayStageResponseBodyRead, RelayStepCategoryUpstream, attempt, responseReadStarted, readErr,
 		fmt.Sprintf("status=%d bytes=%d", response.StatusCode, len(responseBody)))
 	execution.durationMS = elapsedMilliseconds(started, responseFinishedAt)
@@ -684,6 +768,9 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 			if execution.endpoint == "responses" && sseEventHasUsableResponseOutput(event) {
 				hasUsableOutput = true
 			}
+			if candidate.Channel.AuthType == ChannelTypeChatGPTOAuth && execution.endpoint == "chat" && hasOutput {
+				hasUsableOutput = true
+			}
 			if isImagesEndpoint(execution.endpoint) && sseEventHasUsableImageOutput(event) {
 				hasOutput = true
 				hasUsableOutput = true
@@ -711,7 +798,7 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 					return &result, appErr
 				}
 				if hasOutput {
-					recordFirstToken(event, &result, execution, started)
+					recordOutputToken(event, &result, execution, started)
 				}
 				if writeErr := commit(event); writeErr != nil {
 					streamErr = writeErr
@@ -723,7 +810,7 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 					break
 				}
 			} else {
-				recordFirstToken(event, &result, execution, started)
+				recordOutputToken(event, &result, execution, started)
 				extendStreamWriteDeadline(responseController)
 				if _, writeErr := writer.Write(event); writeErr != nil {
 					streamErr = writeErr
@@ -760,7 +847,7 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 	if !terminalSuccess && streamErr == nil && receivedEvent {
 		streamErr = io.ErrUnexpectedEOF
 	}
-	if terminalSuccess && streamErr == nil && (execution.endpoint == "responses" || isImagesEndpoint(execution.endpoint)) && !hasUsableOutput {
+	if terminalSuccess && streamErr == nil && (execution.endpoint == "responses" || candidate.Channel.AuthType == ChannelTypeChatGPTOAuth && execution.endpoint == "chat" || isImagesEndpoint(execution.endpoint)) && !hasUsableOutput {
 		streamErr = emptyUpstreamResponseFailure()
 	}
 	if !committed && streamErr != nil {
@@ -832,19 +919,9 @@ func (s *RelayService) finishStream(ctx context.Context, execution *relayExecuti
 	} else {
 		result.outcome = RelayOutcomeFailed
 	}
-	estimatedCost := int64(0)
-	upstreamCost := int64(0)
-	costSource := CostSourceFailedZero
-	if success {
-		estimatedCost = CalculateCostMicros(candidate.Mapping, usage)
-		upstreamCost = estimatedCost
-		costSource = CostSourceFallback
-		if upstreamSnapshot.valid {
-			upstreamCost = upstreamSnapshot.micros
-			costSource = CostSourceUpstream
-		}
-	}
+	estimatedCost, upstreamCost, costSource := streamAttemptCosts(candidate.Mapping, usage, upstreamSnapshot, success)
 	result.usage = usage
+	finalizeTokensPerSecond(&result, execution, usage.OutputTokens)
 	result.estimatedCost = estimatedCost
 	result.upstreamCost = upstreamCost
 	result.costSource = costSource
@@ -924,13 +1001,30 @@ func recordFirstResponse(event []byte, result *attemptResult, execution *relayEx
 	execution.firstResponseMS = result.firstResponseMS
 }
 
-func recordFirstToken(event []byte, result *attemptResult, execution *relayExecution, attemptStarted time.Time) {
+func recordOutputToken(event []byte, result *attemptResult, execution *relayExecution, attemptStarted time.Time) {
 	if result.firstTokenMS > 0 || !sseEventHasOutputToken(event) {
 		return
 	}
 	now := time.Now()
 	result.firstTokenMS = elapsedMilliseconds(attemptStarted, now)
 	execution.firstTokenMS = result.firstTokenMS
+}
+
+func finalizeTokensPerSecond(result *attemptResult, execution *relayExecution, outputTokens int64) {
+	if outputTokens <= 0 || result.firstTokenMS <= 0 || result.durationMS <= result.firstTokenMS {
+		return
+	}
+	// Use the complete generation window. SSE chunk arrival timestamps are
+	// transport-dependent: buffering can make the first/last chunk appear
+	// adjacent even when the upstream spent much longer generating the body.
+	generationDurationMS := result.durationMS - result.firstTokenMS
+	tokensPerSecond := float64(outputTokens) * 1000 / float64(generationDurationMS)
+	if !math.IsInf(tokensPerSecond, 0) && !math.IsNaN(tokensPerSecond) && tokensPerSecond > 0 {
+		result.generationDurationMS = generationDurationMS
+		result.tokensPerSecond = tokensPerSecond
+		execution.generationDurationMS = generationDurationMS
+		execution.tokensPerSecond = tokensPerSecond
+	}
 }
 
 func endpointPath(endpoint string) string {
@@ -1790,6 +1884,47 @@ func generatedDeltaHasContent(value any) bool {
 	return false
 }
 
+func estimateSSEGeneratedTokens(payload map[string]any, estimator *TokenEstimator) int64 {
+	if estimator == nil {
+		return 0
+	}
+	var builder strings.Builder
+	if delta, ok := payload["delta"]; ok {
+		appendGeneratedDeltaText(&builder, delta)
+	}
+	choices, _ := payload["choices"].([]any)
+	for _, item := range choices {
+		choice, _ := item.(map[string]any)
+		if delta, ok := choice["delta"]; ok {
+			appendGeneratedDeltaText(&builder, delta)
+		}
+	}
+	return estimator.EstimateText(builder.String())
+}
+
+func appendGeneratedDeltaText(builder *strings.Builder, value any) {
+	switch typed := value.(type) {
+	case string:
+		builder.WriteString(typed)
+	case []any:
+		for _, item := range typed {
+			appendGeneratedDeltaText(builder, item)
+		}
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			if key == "role" || key == "index" || key == "type" {
+				continue
+			}
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			appendGeneratedDeltaText(builder, typed[key])
+		}
+	}
+}
+
 type upstreamCostSnapshot struct {
 	micros int64
 	valid  bool
@@ -1812,7 +1947,10 @@ func consumeSSEEvent(event []byte, estimator *TokenEstimator, usage *Usage, upst
 			upstreamCost.micros = micros
 			upstreamCost.valid = true
 		}
-		*outputEstimate += estimator.EstimateJSON(data)
+		var payload map[string]any
+		if json.Unmarshal(data, &payload) == nil {
+			*outputEstimate += estimateSSEGeneratedTokens(payload, estimator)
+		}
 		if *responseID == "" {
 			*responseID = ResponseID(data)
 		}
@@ -1940,6 +2078,20 @@ func attemptCosts(mapping ChannelModel, usage Usage, responseBody []byte, succes
 	return estimatedCost, estimatedCost, CostSourceFallback
 }
 
+func streamAttemptCosts(mapping ChannelModel, usage Usage, upstreamSnapshot upstreamCostSnapshot, success bool) (int64, int64, string) {
+	if !success {
+		return 0, 0, CostSourceFailedZero
+	}
+	estimatedCost := CalculateCostMicros(mapping, usage)
+	upstreamCost := estimatedCost
+	costSource := CostSourceFallback
+	if upstreamSnapshot.valid {
+		upstreamCost = upstreamSnapshot.micros
+		costSource = CostSourceUpstream
+	}
+	return estimatedCost, upstreamCost, costSource
+}
+
 func (s *RelayService) addUsage(execution *relayExecution, usage Usage, estimatedCost int64, upstreamCost int64, costSource string, billable bool) {
 	execution.usage.InputTokens += usage.InputTokens
 	execution.normalInputTokens += normalInputTokens(usage)
@@ -2019,6 +2171,8 @@ func (s *RelayService) recordAttempt(_ context.Context, execution *relayExecutio
 		FirstResponseMS:       result.firstResponseMS,
 		LatencyMS:             result.latencyMS,
 		DurationMS:            upstreamAttemptDuration(result.durationMS),
+		GenerationDurationMS:  result.generationDurationMS,
+		TokensPerSecond:       result.tokensPerSecond,
 		Success:               success,
 		ErrorMessage:          message,
 		CreatedAt:             time.Now().UTC(),
@@ -2050,7 +2204,9 @@ func (s *RelayService) recordRequestStarted(ctx context.Context, execution *rela
 		Stream:                execution.payload.Stream,
 		CreatedAt:             createdAt,
 	}
-	err := s.store.db.WithContext(ctx).Create(&log).Error
+	err := s.store.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		return saveRelayRequestLog(db, &log, false)
+	})
 	execution.trace.Record(RelayStageRequestLogStart, RelayStepCategoryStorage, 0, started, err, "")
 }
 
@@ -2140,6 +2296,8 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 		FirstResponseMS:       execution.firstResponseMS,
 		LatencyMS:             execution.latencyMS,
 		DurationMS:            durationMS,
+		GenerationDurationMS:  execution.generationDurationMS,
+		TokensPerSecond:       execution.tokensPerSecond,
 		Stream:                execution.payload.Stream,
 		ErrorCode:             errorCode,
 		CreatedAt:             createdAt,
@@ -2246,19 +2404,18 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 			log.SessionName = sessionName
 		}
 		log.RequestBody, log.RequestBodyTruncated = retainLoggedPayload(execution.payloadLogDetail, compactedRequestBody, len(execution.rawBody) > maxDetailedPayloadBytes)
-		if err := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "id"}},
-			UpdateAll: true,
-		}).Create(&log).Error; err != nil {
+		if err := saveRelayRequestLog(db, &log, true); err != nil {
 			return err
 		}
 		if err := persistRequestResources(db, log.ID, execution.token.ID, loggedSessionID, execution.rawBody, now); err != nil {
 			return err
 		}
 		if len(execution.attemptLogs) > 0 {
-			if err := db.CreateInBatches(execution.attemptLogs, len(execution.attemptLogs)).Error; err != nil {
+			storedAttempts, err := saveRelayAttemptLogs(db, execution.attemptLogs)
+			if err != nil {
 				return err
 			}
+			execution.attemptLogs = storedAttempts
 			if err := upsertChannelModelDailyStats(db, execution.attemptLogs, now); err != nil {
 				return err
 			}
@@ -2289,6 +2446,11 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 		if log.CodexSessionID != "" {
 			if err := updateSessionContextWindow(db, log, execution.payload.ClientFingerprint, !previousLog.IsCompaction, now); err != nil {
 				return err
+			}
+			if outcome == RelayOutcomeSuccess && log.TokensPerSecond > 0 {
+				if err := recordSessionTokensPerSecond(db, log.TokenID, log.CodexSessionID, log.TokensPerSecond, now); err != nil {
+					return err
+				}
 			}
 		}
 		return db.Clauses(clause.OnConflict{
@@ -2324,6 +2486,30 @@ func (s *RelayService) recordRequest(ctx context.Context, execution *relayExecut
 		}
 	}
 	execution.trace.LogCompletion(status, errorCode, persistErr)
+}
+
+func recordSessionTokensPerSecond(db *gorm.DB, tokenID uint64, sessionID string, tokensPerSecond float64, now time.Time) error {
+	sessionID = truncateRunes(strings.TrimSpace(sessionID), 512)
+	if tokenID == 0 || sessionID == "" || tokensPerSecond <= 0 {
+		return nil
+	}
+	sample := RelaySessionState{
+		TokenID:                    tokenID,
+		SessionID:                  sessionID,
+		AverageTokensPerSecond:     tokensPerSecond,
+		TokensPerSecondSampleCount: 1,
+		CreatedAt:                  now,
+		UpdatedAt:                  now,
+	}
+	return db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "token_id"}, {Name: "session_id"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"average_tokens_per_second": gorm.Expr(
+				"(average_tokens_per_second * tokens_per_second_sample_count + excluded.average_tokens_per_second) / (tokens_per_second_sample_count + 1)",
+			),
+			"tokens_per_second_sample_count": gorm.Expr("tokens_per_second_sample_count + 1"),
+		}),
+	}).Create(&sample).Error
 }
 
 func relayRequestOutcome(status int, errorCode string) string {

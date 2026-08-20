@@ -1,12 +1,17 @@
 package gateway
 
 import (
+	"errors"
 	"time"
 
 	"gorm.io/gorm"
 )
 
 const (
+	// ChannelTypeAPIKey is the default OpenAI-compatible provider channel.
+	ChannelTypeAPIKey = "api_key"
+	// ChannelTypeChatGPTOAuth routes through the ChatGPT Codex subscription API.
+	ChannelTypeChatGPTOAuth                       = "chatgpt_oauth"
 	RoutingPriorityWeighted                       = "priority_weighted"
 	RoutingLowestCost                             = "lowest_cost"
 	RoutingLowestLatency                          = "lowest_latency"
@@ -45,6 +50,7 @@ type AdminUser struct {
 	ID           uint64 `gorm:"primaryKey;autoIncrement"`
 	Username     string `gorm:"size:80;uniqueIndex;not null"`
 	PasswordHash string `gorm:"size:255;not null"`
+	Role         string `gorm:"size:16;not null;default:admin;index"`
 	Enabled      bool   `gorm:"not null;default:true"`
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -65,7 +71,16 @@ type Channel struct {
 	ID                         uint64     `gorm:"primaryKey;autoIncrement" json:"id"`
 	Name                       string     `gorm:"size:120;not null" json:"name"`
 	BaseURL                    string     `gorm:"size:1024;not null" json:"baseUrl"`
+	OwnerUserID                uint64     `gorm:"index;not null;default:0" json:"-"`
+	OwnerTokenID               uint64     `gorm:"index;not null;default:0" json:"-"`
+	AuthType                   string     `gorm:"size:24;not null;default:api_key;index" json:"authType"`
 	APIKeyCipher               string     `gorm:"type:text;not null" json:"-"`
+	ProxyURLCipher             string     `gorm:"type:text" json:"-"`
+	RefreshTokenCipher         string     `gorm:"type:text" json:"-"`
+	ChatGPTAccountID           string     `gorm:"size:160;index" json:"chatgptAccountId"`
+	ChatGPTUserID              string     `gorm:"size:160" json:"chatgptUserId"`
+	ChatGPTPlanType            string     `gorm:"size:80" json:"chatgptPlanType"`
+	OAuthExpiresAt             *time.Time `gorm:"index" json:"oauthExpiresAt"`
 	Enabled                    bool       `gorm:"not null;default:true" json:"enabled"`
 	SupportsStreamUsage        bool       `gorm:"not null;default:true" json:"supportsStreamUsage"`
 	PriceMultiplierBasisPoints int64      `gorm:"not null;default:10000" json:"priceMultiplierBasisPoints"`
@@ -128,22 +143,29 @@ type CircuitRecord struct {
 }
 
 type ClientToken struct {
-	ID             uint64     `gorm:"primaryKey;autoIncrement" json:"id"`
-	Name           string     `gorm:"size:120;not null" json:"name"`
-	KeyHash        string     `gorm:"size:64;uniqueIndex;not null" json:"-"`
-	KeyPrefix      string     `gorm:"size:24;not null" json:"keyPrefix"`
-	Enabled        bool       `gorm:"not null;default:true" json:"enabled"`
-	AllowAllModels bool       `gorm:"not null;default:false" json:"allowAllModels"`
-	RPM            int        `gorm:"not null;default:60" json:"rpm"`
-	MaxConcurrency int        `gorm:"not null;default:10" json:"maxConcurrency"`
-	LastUsedAt     *time.Time `json:"lastUsedAt"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	ID               uint64     `gorm:"primaryKey;autoIncrement" json:"id"`
+	Name             string     `gorm:"size:120;not null" json:"name"`
+	KeyHash          string     `gorm:"size:64;uniqueIndex;not null" json:"-"`
+	KeyPrefix        string     `gorm:"size:24;not null" json:"keyPrefix"`
+	OwnerUserID      uint64     `gorm:"index;not null;default:0" json:"-"`
+	Enabled          bool       `gorm:"not null;default:true" json:"enabled"`
+	AllowAllModels   bool       `gorm:"not null;default:false" json:"allowAllModels"`
+	AllowAllChannels bool       `gorm:"not null;default:true" json:"allowAllChannels"`
+	RPM              int        `gorm:"not null;default:60" json:"rpm"`
+	MaxConcurrency   int        `gorm:"not null;default:10" json:"maxConcurrency"`
+	LastUsedAt       *time.Time `json:"lastUsedAt"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
 }
 
 type ClientTokenModel struct {
 	TokenID uint64 `gorm:"primaryKey"`
 	ModelID uint64 `gorm:"primaryKey;index"`
+}
+
+type ClientTokenChannel struct {
+	TokenID   uint64 `gorm:"primaryKey"`
+	ChannelID uint64 `gorm:"primaryKey;index"`
 }
 
 type RelayRequestLog struct {
@@ -186,9 +208,23 @@ type RelayRequestLog struct {
 	FirstResponseMS       int64     `gorm:"not null;default:0" json:"firstResponseMs"`
 	LatencyMS             int64     `gorm:"not null;default:0" json:"latencyMs"`
 	DurationMS            int64     `gorm:"not null;default:0" json:"durationMs"`
+	GenerationDurationMS  int64     `gorm:"not null;default:0" json:"generationDurationMs"`
+	TokensPerSecond       float64   `gorm:"not null;default:0" json:"tokensPerSecond"`
 	Stream                bool      `gorm:"not null;default:false" json:"stream"`
 	ErrorCode             string    `gorm:"size:80" json:"errorCode"`
 	CreatedAt             time.Time `gorm:"index;index:idx_relay_request_token_created,priority:2,sort:desc;index:idx_relay_request_session_created,priority:3,sort:desc" json:"createdAt"`
+}
+
+// RelayRequestPayload keeps large request/response data out of the request
+// metadata table. The legacy payload columns on RelayRequestLog remain as an
+// empty compatibility bridge for resumable upgrades from older databases.
+type RelayRequestPayload struct {
+	RequestID             string `gorm:"size:36;primaryKey"`
+	RequestParametersJSON string `gorm:"type:text"`
+	RequestBody           string `gorm:"type:text"`
+	RequestBodyTruncated  bool   `gorm:"not null;default:false"`
+	ResponseBody          string `gorm:"type:text"`
+	ResponseBodyTruncated bool   `gorm:"not null;default:false"`
 }
 
 // VerificationReport stores detector evidence without retaining probe prompts,
@@ -316,30 +352,55 @@ func (log *RelayRequestLog) BeforeCreate(_ *gorm.DB) error {
 	return nil
 }
 
+// AfterFind preserves the historical Go-model contract for callers that ask
+// for a complete log record directly. Hot paths use Select/Omit and hydrate
+// payloads explicitly, so ordinary metadata queries never load large bodies.
+func (log *RelayRequestLog) AfterFind(tx *gorm.DB) error {
+	if len(tx.Statement.Selects) > 0 || len(tx.Statement.Omits) > 0 || log.ID == "" {
+		return nil
+	}
+	var payload RelayRequestPayload
+	err := tx.Session(&gorm.Session{NewDB: true}).Where("request_id = ?", log.ID).First(&payload).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	log.RequestParametersJSON = payload.RequestParametersJSON
+	log.RequestBody = payload.RequestBody
+	log.RequestBodyTruncated = payload.RequestBodyTruncated
+	log.ResponseBody = payload.ResponseBody
+	log.ResponseBodyTruncated = payload.ResponseBodyTruncated
+	return nil
+}
+
 // RelaySessionState keeps the small amount of state needed to name a session
 // and remove context already retained by its preceding request logs.
 type RelaySessionState struct {
-	TokenID              uint64     `gorm:"primaryKey;autoIncrement:false;index:idx_relay_session_client_recent,priority:1;index:idx_relay_session_parent,priority:1" json:"tokenId"`
-	SessionID            string     `gorm:"size:512;primaryKey" json:"sessionId"`
-	Title                string     `gorm:"size:80;index" json:"title"`
-	TitleCustomized      bool       `gorm:"not null;default:false" json:"titleCustomized"`
-	ThreadSource         string     `gorm:"size:48;index;index:idx_relay_session_active,priority:1" json:"threadSource"`
-	ParentSessionID      string     `gorm:"size:512;index:idx_relay_session_parent,priority:2" json:"parentSessionId"`
-	SessionSource        string     `gorm:"size:48;index" json:"sessionSource"`
-	ClientKind           string     `gorm:"size:32;index" json:"clientKind"`
-	ClientFingerprint    string     `gorm:"size:64;index;index:idx_relay_session_client_recent,priority:2" json:"-"`
-	LatestRequestID      string     `gorm:"size:36" json:"latestRequestId"`
-	LastActivityAt       *time.Time `gorm:"index:idx_relay_session_active,priority:2,sort:desc" json:"lastActivityAt"`
-	CompactionCount      int64      `gorm:"not null;default:0" json:"compactionCount"`
-	PrimaryModel         string     `gorm:"size:200;index" json:"primaryModel"`
-	ContextWindowTokens  int64      `gorm:"not null;default:0" json:"contextWindowTokens"`
-	ContextWindowSource  string     `gorm:"size:24;index" json:"contextWindowSource"`
-	ContextWindowSamples int64      `gorm:"not null;default:0" json:"contextWindowSampleCount"`
-	ContextSamplesJSON   string     `gorm:"type:text" json:"-"`
-	RequestManifestJSON  string     `gorm:"type:text" json:"-"`
-	PayloadManifestJSON  string     `gorm:"type:text" json:"-"`
-	CreatedAt            time.Time  `json:"createdAt"`
-	UpdatedAt            time.Time  `gorm:"index;index:idx_relay_session_client_recent,priority:3,sort:desc" json:"updatedAt"`
+	TokenID                    uint64     `gorm:"primaryKey;autoIncrement:false;index:idx_relay_session_client_recent,priority:1;index:idx_relay_session_parent,priority:1" json:"tokenId"`
+	SessionID                  string     `gorm:"size:512;primaryKey" json:"sessionId"`
+	Title                      string     `gorm:"size:80;index" json:"title"`
+	TitleCustomized            bool       `gorm:"not null;default:false" json:"titleCustomized"`
+	ThreadSource               string     `gorm:"size:48;index;index:idx_relay_session_active,priority:1" json:"threadSource"`
+	ParentSessionID            string     `gorm:"size:512;index:idx_relay_session_parent,priority:2" json:"parentSessionId"`
+	SessionSource              string     `gorm:"size:48;index" json:"sessionSource"`
+	ClientKind                 string     `gorm:"size:32;index" json:"clientKind"`
+	ClientFingerprint          string     `gorm:"size:64;index;index:idx_relay_session_client_recent,priority:2" json:"-"`
+	LatestRequestID            string     `gorm:"size:36" json:"latestRequestId"`
+	LastActivityAt             *time.Time `gorm:"index:idx_relay_session_active,priority:2,sort:desc" json:"lastActivityAt"`
+	CompactionCount            int64      `gorm:"not null;default:0" json:"compactionCount"`
+	PrimaryModel               string     `gorm:"size:200;index" json:"primaryModel"`
+	ContextWindowTokens        int64      `gorm:"not null;default:0" json:"contextWindowTokens"`
+	ContextWindowSource        string     `gorm:"size:24;index" json:"contextWindowSource"`
+	ContextWindowSamples       int64      `gorm:"not null;default:0" json:"contextWindowSampleCount"`
+	AverageTokensPerSecond     float64    `gorm:"not null;default:0" json:"averageTokensPerSecond"`
+	TokensPerSecondSampleCount int64      `gorm:"not null;default:0" json:"tokensPerSecondSampleCount"`
+	ContextSamplesJSON         string     `gorm:"type:text" json:"-"`
+	RequestManifestJSON        string     `gorm:"type:text" json:"-"`
+	PayloadManifestJSON        string     `gorm:"type:text" json:"-"`
+	CreatedAt                  time.Time  `json:"createdAt"`
+	UpdatedAt                  time.Time  `gorm:"index;index:idx_relay_session_client_recent,priority:3,sort:desc" json:"updatedAt"`
 }
 
 // ModelAgentContextWindow retains a learned context-window profile after detailed request logs expire.
@@ -407,10 +468,23 @@ type RelayAttemptLog struct {
 	FirstResponseMS       int64          `gorm:"not null;default:0" json:"firstResponseMs"`
 	LatencyMS             int64          `gorm:"not null;default:0" json:"latencyMs"`
 	DurationMS            int64          `gorm:"not null;default:0" json:"durationMs"`
+	GenerationDurationMS  int64          `gorm:"not null;default:0" json:"generationDurationMs"`
+	TokensPerSecond       float64        `gorm:"not null;default:0" json:"tokensPerSecond"`
 	Success               bool           `gorm:"not null;default:false" json:"success"`
 	Outcome               string         `gorm:"size:16;index;not null;default:failed" json:"outcome"`
 	ErrorMessage          string         `gorm:"type:text" json:"errorMessage"`
 	CreatedAt             time.Time      `gorm:"index;index:idx_relay_attempt_request_created,priority:2;index:idx_relay_attempt_channel_created,priority:2,sort:desc;index:idx_relay_attempt_model_created,priority:2,sort:desc" json:"createdAt"`
+}
+
+// RelayAttemptPayload keeps per-attempt bodies out of the attempt metadata
+// table. RequestID is indexed for detail loading and cascading cleanup.
+type RelayAttemptPayload struct {
+	AttemptID             uint64 `gorm:"primaryKey;autoIncrement:false"`
+	RequestID             string `gorm:"size:36;index;not null"`
+	RequestBody           string `gorm:"type:text"`
+	RequestBodyTruncated  bool   `gorm:"not null;default:false"`
+	ResponseBody          string `gorm:"type:text"`
+	ResponseBodyTruncated bool   `gorm:"not null;default:false"`
 }
 
 // RelayStepLog is one measured stage in a relayed API request. Durations use
@@ -439,6 +513,25 @@ func (log *RelayAttemptLog) BeforeCreate(_ *gorm.DB) error {
 			log.Outcome = RelayOutcomeFailed
 		}
 	}
+	return nil
+}
+
+func (log *RelayAttemptLog) AfterFind(tx *gorm.DB) error {
+	if len(tx.Statement.Selects) > 0 || len(tx.Statement.Omits) > 0 || log.ID == 0 {
+		return nil
+	}
+	var payload RelayAttemptPayload
+	err := tx.Session(&gorm.Session{NewDB: true}).Where("attempt_id = ?", log.ID).First(&payload).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	log.RequestBody = payload.RequestBody
+	log.RequestBodyTruncated = payload.RequestBodyTruncated
+	log.ResponseBody = payload.ResponseBody
+	log.ResponseBodyTruncated = payload.ResponseBodyTruncated
 	return nil
 }
 

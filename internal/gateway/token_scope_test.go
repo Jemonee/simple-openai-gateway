@@ -151,3 +151,82 @@ func TestTokenScopedResponsesRemoveGlobalRoutingAndResources(t *testing.T) {
 		t.Fatalf("live channel state was not redacted: %+v", channel)
 	}
 }
+
+func TestTokenOwnershipScopesModelsAndRoutingForRegularUsers(t *testing.T) {
+	store := newTestStore(t)
+	management := NewManagementService(store)
+	ctx := context.Background()
+	const ownerA uint64 = 7
+	const ownerB uint64 = 8
+
+	channels := []Channel{
+		{Name: "owner-a", BaseURL: "http://owner-a.invalid/v1", OwnerUserID: ownerA, APIKeyCipher: "cipher-a", Enabled: true},
+		{Name: "owner-b", BaseURL: "http://owner-b.invalid/v1", OwnerUserID: ownerB, APIKeyCipher: "cipher-b", Enabled: true},
+	}
+	if err := store.db.Create(&channels).Error; err != nil {
+		t.Fatal(err)
+	}
+	models := []GatewayModel{
+		{Name: "owner-a-model", RoutingStrategy: RoutingPriorityWeighted, Enabled: true},
+		{Name: "owner-b-model", RoutingStrategy: RoutingPriorityWeighted, Enabled: true},
+		{Name: "shared-model", RoutingStrategy: RoutingPriorityWeighted, Enabled: true},
+	}
+	if err := store.db.Create(&models).Error; err != nil {
+		t.Fatal(err)
+	}
+	mappings := []ChannelModel{
+		{ChannelID: channels[0].ID, ModelID: models[0].ID, UpstreamModel: "owner-a-model", Weight: 100, Enabled: true},
+		{ChannelID: channels[1].ID, ModelID: models[1].ID, UpstreamModel: "owner-b-model", Weight: 100, Enabled: true},
+		{ChannelID: channels[0].ID, ModelID: models[2].ID, UpstreamModel: "shared-a", Weight: 100, Enabled: true},
+		{ChannelID: channels[1].ID, ModelID: models[2].ID, UpstreamModel: "shared-b", Weight: 100, Enabled: true},
+	}
+	if err := store.db.Create(&mappings).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	foreignModelInput := ClientTokenInput{
+		Name: "foreign-model", Enabled: true, AllowAllModels: false,
+		ModelIDs: []uint64{models[1].ID}, RPM: 60, MaxConcurrency: 4,
+	}
+	if _, err := management.CreateToken(ctx, foreignModelInput, ownerA); err == nil || err.Error() != "a token may only include models from your own channels" {
+		t.Fatalf("cross-user model create error = %v", err)
+	}
+
+	ownedInput := ClientTokenInput{
+		Name: "owned-model", Enabled: true, AllowAllModels: false,
+		ModelIDs: []uint64{models[0].ID}, RPM: 60, MaxConcurrency: 4,
+	}
+	owned, err := management.CreateToken(ctx, ownedInput, ownerA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := management.UpdateToken(ctx, owned.Token.ID, ClientTokenInput{
+		Name: ownedInput.Name, Enabled: true, AllowAllModels: false,
+		ModelIDs: []uint64{models[1].ID}, RPM: 60, MaxConcurrency: 4,
+	}, ownerA); err == nil || err.Error() != "a token may only include models from your own channels" {
+		t.Fatalf("cross-user model update error = %v", err)
+	}
+	var links []ClientTokenModel
+	if err := store.db.Where("token_id = ?", owned.Token.ID).Find(&links).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || links[0].ModelID != models[0].ID {
+		t.Fatalf("cross-user update changed model scope = %+v", links)
+	}
+
+	allModels, err := management.CreateToken(ctx, ClientTokenInput{
+		Name: "all-owned-models", Enabled: true, AllowAllModels: true,
+		RPM: 60, MaxConcurrency: 4,
+	}, ownerA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter(store, NewClientAccessService(store), nil)
+	plan, err := router.Plan(ctx, &allModels.Token.ClientToken, models[2].Name, 10, 10, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Candidates) != 1 || plan.Candidates[0].Channel.ID != channels[0].ID {
+		t.Fatalf("owner-scoped all-model candidates = %+v", plan.Candidates)
+	}
+}

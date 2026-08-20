@@ -15,6 +15,7 @@ var (
 	ErrRateLimitExceeded  = errors.New("API token RPM limit exceeded")
 	ErrConcurrencyLimit   = errors.New("API token concurrency limit exceeded")
 	ErrModelNotAllowed    = errors.New("API token is not allowed to use this model")
+	ErrChannelNotAllowed  = errors.New("API token is not allowed to use this channel")
 )
 
 type tokenWindow struct {
@@ -102,6 +103,35 @@ func (s *ClientAccessService) AuthorizeModel(ctx context.Context, token *ClientT
 	return nil
 }
 
+func (s *ClientAccessService) AuthorizeChannel(ctx context.Context, token *ClientToken, channelID uint64) error {
+	if token == nil || !token.Enabled {
+		return ErrInvalidClientToken
+	}
+	if token.AllowAllChannels {
+		if token.OwnerUserID == 0 {
+			return nil
+		}
+		var count int64
+		if err := s.store.db.WithContext(ctx).Model(&Channel{}).Where("id = ? AND owner_user_id = ?", channelID, token.OwnerUserID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return ErrChannelNotAllowed
+		}
+		return nil
+	}
+	var count int64
+	err := s.store.db.WithContext(ctx).Model(&ClientTokenChannel{}).
+		Where("token_id = ? AND channel_id = ?", token.ID, channelID).Count(&count).Error
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrChannelNotAllowed
+	}
+	return nil
+}
+
 func (s *ClientAccessService) Touch(ctx context.Context, tokenID uint64) {
 	_ = s.store.db.WithContext(ctx).Model(&ClientToken{}).Where("id = ?", tokenID).Update("last_used_at", time.Now()).Error
 }
@@ -116,11 +146,15 @@ func (s *ClientAccessService) ListModels(ctx context.Context, token *ClientToken
 			SELECT 1
 			FROM channel_models AS mapping
 			JOIN channels AS channel ON channel.id = mapping.channel_id
-			WHERE mapping.model_id = gateway_models.id
-				AND mapping.enabled = ?
-				AND channel.enabled = ?
-				AND (channel.circuit_open_until IS NULL OR channel.circuit_open_until <= ?)
-		)`, true, true, time.Now())
+				WHERE mapping.model_id = gateway_models.id
+					AND mapping.enabled = ?
+					AND channel.enabled = ?
+					AND (channel.circuit_open_until IS NULL OR channel.circuit_open_until <= ?)
+					AND ((? AND (? = 0 OR channel.owner_user_id = ?)) OR EXISTS (
+						SELECT 1 FROM client_token_channels tc
+						WHERE tc.token_id = ? AND tc.channel_id = channel.id
+					))
+			)`, true, true, time.Now(), token.AllowAllChannels, token.OwnerUserID, token.OwnerUserID, token.ID)
 	if !token.AllowAllModels {
 		db = db.Where("EXISTS (SELECT 1 FROM client_token_models tm WHERE tm.model_id = gateway_models.id AND tm.token_id = ?)", token.ID)
 	}

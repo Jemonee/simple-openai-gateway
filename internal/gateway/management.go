@@ -23,12 +23,20 @@ const (
 )
 
 type ChannelInput struct {
-	Name                       string `json:"name"`
-	BaseURL                    string `json:"baseUrl"`
-	APIKey                     string `json:"apiKey"`
-	Enabled                    bool   `json:"enabled"`
-	SupportsStreamUsage        bool   `json:"supportsStreamUsage"`
-	PriceMultiplierBasisPoints *int64 `json:"priceMultiplierBasisPoints"`
+	Name                       string     `json:"name"`
+	BaseURL                    string     `json:"baseUrl"`
+	APIKey                     string     `json:"apiKey"`
+	AuthType                   string     `json:"authType"`
+	OAuthAccessToken           string     `json:"oauthAccessToken"`
+	OAuthRefreshToken          string     `json:"oauthRefreshToken"`
+	ChatGPTAccountID           string     `json:"chatgptAccountId"`
+	ChatGPTUserID              string     `json:"chatgptUserId"`
+	ChatGPTPlanType            string     `json:"chatgptPlanType"`
+	OAuthExpiresAt             *time.Time `json:"oauthExpiresAt"`
+	ProxyURL                   string     `json:"proxyUrl"`
+	Enabled                    bool       `json:"enabled"`
+	SupportsStreamUsage        bool       `json:"supportsStreamUsage"`
+	PriceMultiplierBasisPoints *int64     `json:"priceMultiplierBasisPoints"`
 }
 
 type ChannelConfigurationInput struct {
@@ -38,9 +46,13 @@ type ChannelConfigurationInput struct {
 }
 
 type ChannelModelDiscoveryInput struct {
-	ChannelID uint64 `json:"channelId"`
-	BaseURL   string `json:"baseUrl"`
-	APIKey    string `json:"apiKey"`
+	ChannelID        uint64 `json:"channelId"`
+	BaseURL          string `json:"baseUrl"`
+	APIKey           string `json:"apiKey"`
+	AuthType         string `json:"authType"`
+	OAuthAccessToken string `json:"oauthAccessToken"`
+	ChatGPTAccountID string `json:"chatgptAccountId"`
+	ProxyURL         string `json:"proxyUrl"`
 }
 
 type UpstreamModelView struct {
@@ -62,6 +74,7 @@ type ChannelModelDiscovery struct {
 type ChannelView struct {
 	Channel
 	APIKeyConfigured       bool           `json:"apiKeyConfigured"`
+	ProxyConfigured        bool           `json:"proxyConfigured"`
 	CumulativeUpstreamCost int64          `json:"cumulativeUpstreamCostMicros"`
 	Models                 []ChannelModel `json:"models"`
 	Metrics                ChannelMetrics `json:"metrics"`
@@ -78,21 +91,23 @@ type ChannelLatencyPoint struct {
 }
 
 type ChannelMetrics struct {
-	LatencySeries         []ChannelLatencyPoint `json:"latencySeries"`
-	LatestLatencyMS       int64                 `json:"latestLatencyMs"`
-	AverageFirstTokenMS   float64               `json:"averageFirstTokenMs"`
-	FirstTokenSampleCount int64                 `json:"firstTokenSampleCount"`
-	AverageLatencyMS      float64               `json:"averageLatencyMs"`
-	LatencySampleCount    int64                 `json:"latencySampleCount"`
-	AverageDurationMS     float64               `json:"averageDurationMs"`
-	DurationSampleCount   int64                 `json:"durationSampleCount"`
-	InputTokens           int64                 `json:"inputTokens"`
-	CachedTokens          int64                 `json:"cachedTokens"`
-	CacheHitRate          float64               `json:"cacheHitRate"`
-	RecentSuccessRate     float64               `json:"recentSuccessRate"`
-	RecentSuccessCount    int64                 `json:"recentSuccessCount"`
-	RecentAttemptCount    int64                 `json:"recentAttemptCount"`
-	TodayAttemptCount     int64                 `json:"todayAttemptCount"`
+	LatencySeries              []ChannelLatencyPoint `json:"latencySeries"`
+	LatestLatencyMS            int64                 `json:"latestLatencyMs"`
+	AverageFirstTokenMS        float64               `json:"averageFirstTokenMs"`
+	FirstTokenSampleCount      int64                 `json:"firstTokenSampleCount"`
+	AverageLatencyMS           float64               `json:"averageLatencyMs"`
+	LatencySampleCount         int64                 `json:"latencySampleCount"`
+	AverageDurationMS          float64               `json:"averageDurationMs"`
+	DurationSampleCount        int64                 `json:"durationSampleCount"`
+	AverageTokensPerSecond     float64               `json:"averageTokensPerSecond"`
+	TokensPerSecondSampleCount int64                 `json:"tokensPerSecondSampleCount"`
+	InputTokens                int64                 `json:"inputTokens"`
+	CachedTokens               int64                 `json:"cachedTokens"`
+	CacheHitRate               float64               `json:"cacheHitRate"`
+	RecentSuccessRate          float64               `json:"recentSuccessRate"`
+	RecentSuccessCount         int64                 `json:"recentSuccessCount"`
+	RecentAttemptCount         int64                 `json:"recentAttemptCount"`
+	TodayAttemptCount          int64                 `json:"todayAttemptCount"`
 }
 
 type GatewayModelInput struct {
@@ -115,17 +130,20 @@ type ChannelModelInput struct {
 }
 
 type ClientTokenInput struct {
-	Name           string   `json:"name"`
-	Enabled        bool     `json:"enabled"`
-	AllowAllModels bool     `json:"allowAllModels"`
-	RPM            int      `json:"rpm"`
-	MaxConcurrency int      `json:"maxConcurrency"`
-	ModelIDs       []uint64 `json:"modelIds"`
+	Name             string   `json:"name"`
+	Enabled          bool     `json:"enabled"`
+	AllowAllModels   bool     `json:"allowAllModels"`
+	AllowAllChannels *bool    `json:"allowAllChannels"`
+	RPM              int      `json:"rpm"`
+	MaxConcurrency   int      `json:"maxConcurrency"`
+	ModelIDs         []uint64 `json:"modelIds"`
+	ChannelIDs       []uint64 `json:"channelIds"`
 }
 
 type ClientTokenView struct {
 	ClientToken
 	ModelIDs   []uint64        `json:"modelIds"`
+	ChannelIDs []uint64        `json:"channelIds"`
 	Statistics TokenStatistics `json:"statistics"`
 }
 
@@ -155,31 +173,33 @@ type IssuedClientToken struct {
 }
 
 type DashboardSummary struct {
-	Requests              int64                `json:"requests"`
-	CanceledCount         int64                `json:"canceledCount"`
-	SuccessRate           float64              `json:"successRate"`
-	InputTokens           int64                `json:"inputTokens"`
-	NormalInputTokens     int64                `json:"normalInputTokens"`
-	OutputTokens          int64                `json:"outputTokens"`
-	CachedTokens          int64                `json:"cachedTokens"`
-	CacheWriteTokens      int64                `json:"cacheWriteTokens"`
-	CacheHitRate          float64              `json:"cacheHitRate"`
-	EstimatedCost         int64                `json:"estimatedCostMicros"`
-	UpstreamCost          int64                `json:"upstreamCostMicros"`
-	OfficialCost          int64                `json:"officialCostMicros"`
-	EstimatedCostRatio    float64              `json:"estimatedCostRatio"`
-	UpstreamCostRatio     float64              `json:"upstreamCostRatio"`
-	AverageFirstTokenMS   float64              `json:"averageFirstTokenMs"`
-	FirstTokenSampleCount int64                `json:"firstTokenSampleCount"`
-	AverageLatency        float64              `json:"averageLatencyMs"`
-	LatencySampleCount    int64                `json:"latencySampleCount"`
-	AverageDurationMS     float64              `json:"averageDurationMs"`
-	DurationSampleCount   int64                `json:"durationSampleCount"`
-	Daily                 []DashboardDaily     `json:"daily"`
-	Hourly                []DashboardHourly    `json:"hourly"`
-	CostRatios            []DashboardCostRatio `json:"costRatios"`
-	Channels              []DashboardBreakdown `json:"channels"`
-	Models                []DashboardBreakdown `json:"models"`
+	Requests                   int64                `json:"requests"`
+	CanceledCount              int64                `json:"canceledCount"`
+	SuccessRate                float64              `json:"successRate"`
+	InputTokens                int64                `json:"inputTokens"`
+	NormalInputTokens          int64                `json:"normalInputTokens"`
+	OutputTokens               int64                `json:"outputTokens"`
+	CachedTokens               int64                `json:"cachedTokens"`
+	CacheWriteTokens           int64                `json:"cacheWriteTokens"`
+	CacheHitRate               float64              `json:"cacheHitRate"`
+	EstimatedCost              int64                `json:"estimatedCostMicros"`
+	UpstreamCost               int64                `json:"upstreamCostMicros"`
+	OfficialCost               int64                `json:"officialCostMicros"`
+	EstimatedCostRatio         float64              `json:"estimatedCostRatio"`
+	UpstreamCostRatio          float64              `json:"upstreamCostRatio"`
+	AverageFirstTokenMS        float64              `json:"averageFirstTokenMs"`
+	FirstTokenSampleCount      int64                `json:"firstTokenSampleCount"`
+	AverageLatency             float64              `json:"averageLatencyMs"`
+	LatencySampleCount         int64                `json:"latencySampleCount"`
+	AverageDurationMS          float64              `json:"averageDurationMs"`
+	DurationSampleCount        int64                `json:"durationSampleCount"`
+	AverageTokensPerSecond     float64              `json:"averageTokensPerSecond"`
+	TokensPerSecondSampleCount int64                `json:"tokensPerSecondSampleCount"`
+	Daily                      []DashboardDaily     `json:"daily"`
+	Hourly                     []DashboardHourly    `json:"hourly"`
+	CostRatios                 []DashboardCostRatio `json:"costRatios"`
+	Channels                   []DashboardBreakdown `json:"channels"`
+	Models                     []DashboardBreakdown `json:"models"`
 }
 
 type DashboardDaily struct {
@@ -212,17 +232,19 @@ type DashboardCostRatio struct {
 }
 
 type DashboardBreakdown struct {
-	Name          string  `json:"name"`
-	Requests      int64   `json:"requests"`
-	Successes     int64   `json:"successes"`
-	CanceledCount int64   `json:"canceledCount"`
-	SuccessRate   float64 `json:"successRate"`
-	InputTokens   int64   `json:"inputTokens"`
-	CachedTokens  int64   `json:"cachedTokens"`
-	CacheHitRate  float64 `json:"cacheHitRate"`
-	OutputTokens  int64   `json:"outputTokens"`
-	EstimatedCost int64   `json:"estimatedCostMicros"`
-	UpstreamCost  int64   `json:"upstreamCostMicros"`
+	Name                       string  `json:"name"`
+	Requests                   int64   `json:"requests"`
+	Successes                  int64   `json:"successes"`
+	CanceledCount              int64   `json:"canceledCount"`
+	SuccessRate                float64 `json:"successRate"`
+	InputTokens                int64   `json:"inputTokens"`
+	CachedTokens               int64   `json:"cachedTokens"`
+	CacheHitRate               float64 `json:"cacheHitRate"`
+	OutputTokens               int64   `json:"outputTokens"`
+	EstimatedCost              int64   `json:"estimatedCostMicros"`
+	UpstreamCost               int64   `json:"upstreamCostMicros"`
+	AverageTokensPerSecond     float64 `json:"averageTokensPerSecond"`
+	TokensPerSecondSampleCount int64   `json:"tokensPerSecondSampleCount"`
 }
 
 type LogQuery struct {
@@ -230,6 +252,7 @@ type LogQuery struct {
 	Outcome    string
 	StatusCode int
 	TokenID    uint64
+	TokenIDs   []uint64
 	ChannelID  uint64
 	From       time.Time
 	To         time.Time
@@ -238,25 +261,27 @@ type LogQuery struct {
 }
 
 type LogAggregateSummary struct {
-	RequestCount          int64   `json:"requestCount"`
-	SuccessCount          int64   `json:"successCount"`
-	CanceledCount         int64   `json:"canceledCount"`
-	SuccessRate           float64 `json:"successRate"`
-	AttemptCount          int64   `json:"attemptCount"`
-	InputTokens           int64   `json:"inputTokens"`
-	NormalInputTokens     int64   `json:"normalInputTokens"`
-	OutputTokens          int64   `json:"outputTokens"`
-	CachedTokens          int64   `json:"cachedTokens"`
-	CacheWriteTokens      int64   `json:"cacheWriteTokens"`
-	SentTokens            int64   `json:"sentTokens"`
-	EstimatedCost         int64   `json:"estimatedCostMicros"`
-	UpstreamCost          int64   `json:"upstreamCostMicros"`
-	AverageFirstTokenMS   float64 `json:"averageFirstTokenMs"`
-	FirstTokenSampleCount int64   `json:"firstTokenSampleCount"`
-	AverageLatencyMS      float64 `json:"averageLatencyMs"`
-	LatencySampleCount    int64   `json:"latencySampleCount"`
-	AverageDurationMS     float64 `json:"averageDurationMs"`
-	DurationSampleCount   int64   `json:"durationSampleCount"`
+	RequestCount               int64   `json:"requestCount"`
+	SuccessCount               int64   `json:"successCount"`
+	CanceledCount              int64   `json:"canceledCount"`
+	SuccessRate                float64 `json:"successRate"`
+	AttemptCount               int64   `json:"attemptCount"`
+	InputTokens                int64   `json:"inputTokens"`
+	NormalInputTokens          int64   `json:"normalInputTokens"`
+	OutputTokens               int64   `json:"outputTokens"`
+	CachedTokens               int64   `json:"cachedTokens"`
+	CacheWriteTokens           int64   `json:"cacheWriteTokens"`
+	SentTokens                 int64   `json:"sentTokens"`
+	EstimatedCost              int64   `json:"estimatedCostMicros"`
+	UpstreamCost               int64   `json:"upstreamCostMicros"`
+	AverageFirstTokenMS        float64 `json:"averageFirstTokenMs"`
+	FirstTokenSampleCount      int64   `json:"firstTokenSampleCount"`
+	AverageLatencyMS           float64 `json:"averageLatencyMs"`
+	LatencySampleCount         int64   `json:"latencySampleCount"`
+	AverageDurationMS          float64 `json:"averageDurationMs"`
+	DurationSampleCount        int64   `json:"durationSampleCount"`
+	AverageTokensPerSecond     float64 `json:"averageTokensPerSecond"`
+	TokensPerSecondSampleCount int64   `json:"tokensPerSecondSampleCount"`
 }
 
 type RelayRequestView struct {
@@ -286,6 +311,20 @@ func NewManagementService(store *Store) *ManagementService {
 	return &ManagementService{store: store}
 }
 
+func (s *ManagementService) TokenIDsForUser(ctx context.Context, userID uint64) ([]uint64, error) {
+	if userID == 0 {
+		return nil, nil
+	}
+	var ids []uint64
+	if err := s.store.db.WithContext(ctx).Model(&ClientToken{}).Where("owner_user_id = ?", userID).Pluck("id", &ids).Error; err != nil {
+		return nil, err
+	}
+	ids = append(ids, webChatTokenIDForUser(userID))
+	return ids, nil
+}
+
+func webChatTokenIDForUser(userID uint64) uint64 { return 4_294_000_000 + userID }
+
 func (s *ManagementService) detailedLogCutoff(now time.Time) (time.Time, bool) {
 	return s.store.detailedLogCutoff(now)
 }
@@ -305,17 +344,55 @@ func normalizeBaseURL(value string) (string, error) {
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
+func normalizeProxyURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", errors.New("proxy URL must be an absolute HTTP or HTTPS URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", errors.New("proxy URL must use HTTP or HTTPS")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("proxy URL cannot contain query parameters or fragments")
+	}
+	return parsed.String(), nil
+}
+
 func validateChannelInput(input ChannelInput, requireKey bool) (ChannelInput, error) {
 	input.Name = strings.TrimSpace(input.Name)
 	if input.Name == "" {
 		return input, errors.New("channel name is required")
+	}
+	if input.AuthType == "" {
+		input.AuthType = ChannelTypeAPIKey
+	}
+	if input.AuthType != ChannelTypeAPIKey && input.AuthType != ChannelTypeChatGPTOAuth {
+		return input, errors.New("unsupported channel auth type")
+	}
+	normalizedProxy, err := normalizeProxyURL(input.ProxyURL)
+	if err != nil {
+		return input, err
+	}
+	input.ProxyURL = normalizedProxy
+	if input.AuthType == ChannelTypeChatGPTOAuth {
+		input.BaseURL = ChatGPTCodexBaseURL
+		priceMultiplier := DefaultPriceMultiplierBasisPoints
+		input.PriceMultiplierBasisPoints = &priceMultiplier
 	}
 	baseURL, err := normalizeBaseURL(input.BaseURL)
 	if err != nil {
 		return input, err
 	}
 	input.BaseURL = baseURL
-	if requireKey && strings.TrimSpace(input.APIKey) == "" {
+	if input.AuthType == ChannelTypeChatGPTOAuth {
+		if requireKey && strings.TrimSpace(input.OAuthAccessToken) == "" && strings.TrimSpace(input.APIKey) == "" {
+			return input, errors.New("OAuth access token is required")
+		}
+	} else if requireKey && strings.TrimSpace(input.APIKey) == "" {
 		return input, errors.New("channel API key is required")
 	}
 	if input.PriceMultiplierBasisPoints != nil && (*input.PriceMultiplierBasisPoints < 0 || *input.PriceMultiplierBasisPoints > MaxPriceMultiplierBasisPoints) {
@@ -324,9 +401,24 @@ func validateChannelInput(input ChannelInput, requireKey bool) (ChannelInput, er
 	return input, nil
 }
 
-func (s *ManagementService) ListChannels(ctx context.Context) ([]ChannelView, error) {
+func ownerID(scope []uint64) uint64 {
+	if len(scope) == 0 {
+		return 0
+	}
+	return scope[0]
+}
+
+func ownedChannels(db *gorm.DB, userID uint64) *gorm.DB {
+	if userID > 0 {
+		return db.Where("owner_user_id = ?", userID)
+	}
+	return db
+}
+
+func (s *ManagementService) ListChannels(ctx context.Context, scope ...uint64) ([]ChannelView, error) {
+	userID := ownerID(scope)
 	var channels []Channel
-	if err := s.store.db.WithContext(ctx).Order("id desc").Find(&channels).Error; err != nil {
+	if err := ownedChannels(s.store.db.WithContext(ctx), userID).Order("id desc").Find(&channels).Error; err != nil {
 		return nil, err
 	}
 	channelIDs := make([]uint64, 0, len(channels))
@@ -364,11 +456,6 @@ func (s *ManagementService) ListChannels(ctx context.Context) ([]ChannelView, er
 	if err != nil {
 		return nil, err
 	}
-	costsByChannel, err := loadChannelCumulativeCosts(ctx, s.store.db, channelIDs)
-	if err != nil {
-		return nil, err
-	}
-	views := make([]ChannelView, 0, len(channels))
 	for _, channel := range channels {
 		metrics := metricsByChannel[channel.ID]
 		recentMetric := recentSuccess.ByChannel[channel.ID]
@@ -376,11 +463,31 @@ func (s *ManagementService) ListChannels(ctx context.Context) ([]ChannelView, er
 		metrics.RecentSuccessCount = recentMetric.Successes
 		metrics.RecentAttemptCount = recentMetric.Attempts
 		metrics.TodayAttemptCount = todayAttempts[channel.ID]
+		metricsByChannel[channel.ID] = metrics
+	}
+	if err := s.overrideWithVerificationMetrics(ctx, channelIDs, metricsByChannel); err != nil {
+		return nil, err
+	}
+	costsByChannel, err := loadChannelCumulativeCosts(ctx, s.store.db, channelIDs)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]ChannelView, 0, len(channels))
+	for _, channel := range channels {
+		metrics := metricsByChannel[channel.ID]
+		channelModels := modelsByChannel[channel.ID]
+		if channel.AuthType == ChannelTypeChatGPTOAuth {
+			channel.PriceMultiplierBasisPoints = DefaultPriceMultiplierBasisPoints
+			for index := range channelModels {
+				channelModels[index] = effectiveChannelModelPricing(channel, channelModels[index])
+			}
+		}
 		views = append(views, ChannelView{
 			Channel:                channel,
 			APIKeyConfigured:       channel.APIKeyCipher != "",
+			ProxyConfigured:        channel.ProxyURLCipher != "",
 			CumulativeUpstreamCost: costsByChannel[channel.ID],
-			Models:                 modelsByChannel[channel.ID],
+			Models:                 channelModels,
 			Metrics:                metrics,
 		})
 	}
@@ -398,17 +505,20 @@ func (s *ManagementService) channelMetrics(ctx context.Context, channelIDs []uin
 
 	cutoff, hasCutoff := s.detailedLogCutoff(time.Now())
 	type channelAggregate struct {
-		ChannelID             uint64
-		AverageFirstTokenMS   float64
-		FirstTokenSampleCount int64
-		AverageLatencyMS      float64
-		LatencySampleCount    int64
-		AverageDurationMS     float64
-		DurationSampleCount   int64
-		InputTokens           int64
-		CachedTokens          int64
+		ChannelID                  uint64
+		AverageFirstTokenMS        float64
+		FirstTokenSampleCount      int64
+		AverageLatencyMS           float64
+		LatencySampleCount         int64
+		AverageDurationMS          float64
+		DurationSampleCount        int64
+		AverageTokensPerSecond     float64
+		TokensPerSecondSampleCount int64
+		InputTokens                int64
+		CachedTokens               int64
 	}
 	var aggregates []channelAggregate
+	averageTPS, tpsSampleCount := throughputSQL("", "success = 1")
 	db := s.store.db.WithContext(ctx).Model(&RelayAttemptLog{}).
 		Select("channel_id, COALESCE(AVG(CASE WHEN first_token_ms > 0 THEN first_token_ms END), 0) AS average_first_token_ms, "+
 			"SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) AS first_token_sample_count, "+
@@ -416,6 +526,8 @@ func (s *ManagementService) channelMetrics(ctx context.Context, channelIDs []uin
 			"SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END) AS latency_sample_count, "+
 			"COALESCE(AVG(CASE WHEN duration_ms > 0 THEN duration_ms END), 0) AS average_duration_ms, "+
 			"SUM(CASE WHEN duration_ms > 0 THEN 1 ELSE 0 END) AS duration_sample_count, "+
+			averageTPS+" AS average_tokens_per_second, "+
+			tpsSampleCount+" AS tokens_per_second_sample_count, "+
 			"COALESCE(SUM(CASE WHEN usage_source = 'upstream' THEN input_tokens ELSE 0 END), 0) AS input_tokens, "+
 			"COALESCE(SUM(CASE WHEN usage_source = 'upstream' THEN cached_tokens ELSE 0 END), 0) AS cached_tokens").
 		Where("channel_id IN ? AND success = ?", channelIDs, true)
@@ -434,6 +546,8 @@ func (s *ManagementService) channelMetrics(ctx context.Context, channelIDs []uin
 		metrics.LatencySampleCount = aggregate.LatencySampleCount
 		metrics.AverageDurationMS = aggregate.AverageDurationMS
 		metrics.DurationSampleCount = aggregate.DurationSampleCount
+		metrics.AverageTokensPerSecond = aggregate.AverageTokensPerSecond
+		metrics.TokensPerSecondSampleCount = aggregate.TokensPerSecondSampleCount
 		metrics.InputTokens = max(aggregate.InputTokens, 0)
 		metrics.CachedTokens = min(max(aggregate.CachedTokens, 0), metrics.InputTokens)
 		if metrics.InputTokens > 0 {
@@ -482,20 +596,134 @@ func (s *ManagementService) channelMetrics(ctx context.Context, channelIDs []uin
 	return metricsByChannel, nil
 }
 
-func (s *ManagementService) CreateChannel(ctx context.Context, input ChannelInput) (*ChannelView, error) {
-	channel, err := s.createChannel(s.store.db.WithContext(ctx), input)
+// overrideWithVerificationMetrics makes the channel health panel describe the
+// active verification run, or the most recent completed run when idle. This
+// keeps a verification result from being diluted by unrelated production calls.
+func (s *ManagementService) overrideWithVerificationMetrics(ctx context.Context, channelIDs []uint64, metricsByChannel map[uint64]ChannelMetrics) error {
+	if len(channelIDs) == 0 {
+		return nil
+	}
+	// Older test fixtures and databases created before channel verification do
+	// not have the optional verification tables yet.
+	if !s.store.db.Migrator().HasTable(&VerificationSession{}) {
+		return nil
+	}
+	var sessions []VerificationSession
+	if err := s.store.db.WithContext(ctx).
+		Where("channel_id IN ?", channelIDs).
+		Order("CASE WHEN status IN ('running', 'stopping') THEN 0 ELSE 1 END ASC, started_at DESC, id DESC").
+		Find(&sessions).Error; err != nil {
+		return err
+	}
+	selected := make(map[uint64]string, len(channelIDs))
+	for _, session := range sessions {
+		if _, exists := selected[session.ChannelID]; !exists {
+			selected[session.ChannelID] = session.ID
+		}
+	}
+	if len(selected) == 0 {
+		return nil
+	}
+	sessionIDs := make([]string, 0, len(selected))
+	for _, sessionID := range selected {
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	var attempts []VerificationAttempt
+	if err := s.store.db.WithContext(ctx).Where("session_id IN ?", sessionIDs).Order("finished_at ASC, id ASC").Find(&attempts).Error; err != nil {
+		return err
+	}
+	sessionChannels := make(map[string]uint64, len(selected))
+	for channelID, sessionID := range selected {
+		sessionChannels[sessionID] = channelID
+	}
+	type aggregate struct {
+		attempts, successes, firstTokenSamples, latencySamples, durationSamples, totalLatency int64
+		inputTokens, cachedTokens                                                             int64
+		totalTokensPerSecond                                                                  float64
+		tokensPerSecondSamples                                                                int64
+		points                                                                                []ChannelLatencyPoint
+	}
+	aggregates := make(map[string]*aggregate, len(selected))
+	for _, sessionID := range sessionIDs {
+		aggregates[sessionID] = &aggregate{points: []ChannelLatencyPoint{}}
+	}
+	for _, attempt := range attempts {
+		aggregate := aggregates[attempt.SessionID]
+		if aggregate == nil {
+			continue
+		}
+		aggregate.attempts++
+		if attempt.Outcome != RelayOutcomeSuccess {
+			continue
+		}
+		aggregate.successes++
+		aggregate.inputTokens += max(attempt.InputTokens, 0)
+		aggregate.cachedTokens += max(attempt.CachedTokens, 0)
+		if attempt.LatencyMS > 0 {
+			aggregate.latencySamples++
+			aggregate.durationSamples++
+			aggregate.totalLatency += attempt.LatencyMS
+			aggregate.points = append(aggregate.points, ChannelLatencyPoint{RecordedAt: attempt.FinishedAt, LatencyMS: attempt.LatencyMS})
+		}
+		if tokensPerSecond := verificationAttemptTokensPerSecond(attempt.OutputTokens, attempt.LatencyMS); tokensPerSecond > 0 {
+			aggregate.totalTokensPerSecond += tokensPerSecond
+			aggregate.tokensPerSecondSamples++
+		}
+	}
+	for sessionID, aggregate := range aggregates {
+		channelID := sessionChannels[sessionID]
+		metrics := ChannelMetrics{
+			LatencySeries:      aggregate.points,
+			RecentSuccessRate:  1,
+			RecentSuccessCount: aggregate.successes,
+			RecentAttemptCount: aggregate.attempts,
+			TodayAttemptCount:  metricsByChannel[channelID].TodayAttemptCount,
+		}
+		if aggregate.attempts > 0 {
+			metrics.RecentSuccessRate = float64(aggregate.successes) / float64(aggregate.attempts)
+		}
+		if len(metrics.LatencySeries) > channelLatencyPointLimit {
+			metrics.LatencySeries = metrics.LatencySeries[len(metrics.LatencySeries)-channelLatencyPointLimit:]
+		}
+		if len(metrics.LatencySeries) > 0 {
+			metrics.LatestLatencyMS = metrics.LatencySeries[len(metrics.LatencySeries)-1].LatencyMS
+		}
+		metrics.LatencySampleCount = aggregate.latencySamples
+		metrics.DurationSampleCount = aggregate.durationSamples
+		if aggregate.latencySamples > 0 {
+			average := float64(aggregate.totalLatency) / float64(aggregate.latencySamples)
+			metrics.AverageLatencyMS = average
+			metrics.AverageDurationMS = average
+		}
+		if aggregate.tokensPerSecondSamples > 0 {
+			metrics.AverageTokensPerSecond = aggregate.totalTokensPerSecond / float64(aggregate.tokensPerSecondSamples)
+			metrics.TokensPerSecondSampleCount = aggregate.tokensPerSecondSamples
+		}
+		metrics.InputTokens = aggregate.inputTokens
+		metrics.CachedTokens = min(aggregate.cachedTokens, aggregate.inputTokens)
+		if metrics.InputTokens > 0 {
+			metrics.CacheHitRate = float64(metrics.CachedTokens) / float64(metrics.InputTokens)
+		}
+		metricsByChannel[channelID] = metrics
+	}
+	return nil
+}
+
+func (s *ManagementService) CreateChannel(ctx context.Context, input ChannelInput, scope ...uint64) (*ChannelView, error) {
+	channel, err := s.createChannel(s.store.db.WithContext(ctx), input, ownerID(scope))
 	if err != nil {
 		return nil, err
 	}
 	return &ChannelView{
 		Channel:          channel,
 		APIKeyConfigured: true,
+		ProxyConfigured:  channel.ProxyURLCipher != "",
 		Models:           []ChannelModel{},
 		Metrics:          ChannelMetrics{LatencySeries: []ChannelLatencyPoint{}, RecentSuccessRate: 1},
 	}, nil
 }
 
-func (s *ManagementService) createChannel(db *gorm.DB, input ChannelInput) (Channel, error) {
+func (s *ManagementService) createChannel(db *gorm.DB, input ChannelInput, userID uint64) (Channel, error) {
 	input, err := validateChannelInput(input, true)
 	if err != nil {
 		return Channel{}, err
@@ -511,10 +739,38 @@ func (s *ManagementService) createChannel(db *gorm.DB, input ChannelInput) (Chan
 	channel := Channel{
 		Name:                       input.Name,
 		BaseURL:                    input.BaseURL,
+		OwnerUserID:                userID,
+		AuthType:                   input.AuthType,
 		APIKeyCipher:               cipherText,
+		ChatGPTAccountID:           strings.TrimSpace(input.ChatGPTAccountID),
+		ChatGPTUserID:              strings.TrimSpace(input.ChatGPTUserID),
+		ChatGPTPlanType:            strings.TrimSpace(input.ChatGPTPlanType),
+		OAuthExpiresAt:             input.OAuthExpiresAt,
 		Enabled:                    input.Enabled,
 		SupportsStreamUsage:        input.SupportsStreamUsage,
 		PriceMultiplierBasisPoints: priceMultiplierBasisPoints,
+	}
+	if strings.TrimSpace(input.ProxyURL) != "" {
+		channel.ProxyURLCipher, err = s.store.secretBox.Encrypt(strings.TrimSpace(input.ProxyURL))
+		if err != nil {
+			return Channel{}, err
+		}
+	}
+	if input.AuthType == ChannelTypeChatGPTOAuth {
+		accessToken := strings.TrimSpace(input.OAuthAccessToken)
+		if accessToken == "" {
+			accessToken = strings.TrimSpace(input.APIKey)
+		}
+		channel.APIKeyCipher, err = s.store.secretBox.Encrypt(accessToken)
+		if err != nil {
+			return Channel{}, err
+		}
+		if strings.TrimSpace(input.OAuthRefreshToken) != "" {
+			channel.RefreshTokenCipher, err = s.store.secretBox.Encrypt(strings.TrimSpace(input.OAuthRefreshToken))
+			if err != nil {
+				return Channel{}, err
+			}
+		}
 	}
 	if err := db.Create(&channel).Error; err != nil {
 		return Channel{}, err
@@ -522,25 +778,59 @@ func (s *ManagementService) createChannel(db *gorm.DB, input ChannelInput) (Chan
 	return channel, nil
 }
 
-func (s *ManagementService) UpdateChannel(ctx context.Context, id uint64, input ChannelInput) (*ChannelView, error) {
-	channel, err := s.updateChannel(s.store.db.WithContext(ctx), id, input)
+func (s *ManagementService) UpdateChannel(ctx context.Context, id uint64, input ChannelInput, scope ...uint64) (*ChannelView, error) {
+	channel, err := s.updateChannel(s.store.db.WithContext(ctx), id, input, ownerID(scope))
 	if err != nil {
 		return nil, err
 	}
 	return s.channelView(ctx, channel)
 }
 
-func (s *ManagementService) updateChannel(db *gorm.DB, id uint64, input ChannelInput) (Channel, error) {
+func (s *ManagementService) updateChannel(db *gorm.DB, id uint64, input ChannelInput, userID uint64) (Channel, error) {
 	input, err := validateChannelInput(input, false)
 	if err != nil {
 		return Channel{}, err
 	}
 	var channel Channel
-	if err := db.First(&channel, id).Error; err != nil {
+	query := db.Where("id = ?", id)
+	if userID > 0 {
+		query = query.Where("owner_user_id = ?", userID)
+	}
+	if err := query.First(&channel).Error; err != nil {
 		return Channel{}, err
+	}
+	previousAuthType := channel.AuthType
+	if previousAuthType == "" {
+		previousAuthType = ChannelTypeAPIKey
+	}
+	if previousAuthType != input.AuthType {
+		if input.AuthType == ChannelTypeChatGPTOAuth && strings.TrimSpace(input.OAuthAccessToken) == "" && strings.TrimSpace(input.APIKey) == "" {
+			return Channel{}, errors.New("OAuth access token is required when changing channel authentication")
+		}
+		if input.AuthType == ChannelTypeAPIKey && strings.TrimSpace(input.APIKey) == "" {
+			return Channel{}, errors.New("channel API key is required when changing channel authentication")
+		}
 	}
 	channel.Name = input.Name
 	channel.BaseURL = input.BaseURL
+	channel.AuthType = input.AuthType
+	channel.ChatGPTAccountID = strings.TrimSpace(input.ChatGPTAccountID)
+	channel.ChatGPTUserID = strings.TrimSpace(input.ChatGPTUserID)
+	channel.ChatGPTPlanType = strings.TrimSpace(input.ChatGPTPlanType)
+	channel.OAuthExpiresAt = input.OAuthExpiresAt
+	if strings.TrimSpace(input.ProxyURL) != "" {
+		channel.ProxyURLCipher, err = s.store.secretBox.Encrypt(strings.TrimSpace(input.ProxyURL))
+		if err != nil {
+			return Channel{}, err
+		}
+	}
+	if channel.AuthType != ChannelTypeChatGPTOAuth {
+		channel.RefreshTokenCipher = ""
+		channel.ChatGPTAccountID = ""
+		channel.ChatGPTUserID = ""
+		channel.ChatGPTPlanType = ""
+		channel.OAuthExpiresAt = nil
+	}
 	if channel.CircuitLevel == CircuitLevelManual && input.Enabled {
 		channel.ConsecutiveFailures = 0
 		channel.CircuitLevel = CircuitLevelClosed
@@ -552,8 +842,18 @@ func (s *ManagementService) updateChannel(db *gorm.DB, id uint64, input ChannelI
 	if input.PriceMultiplierBasisPoints != nil {
 		channel.PriceMultiplierBasisPoints = *input.PriceMultiplierBasisPoints
 	}
-	if strings.TrimSpace(input.APIKey) != "" {
-		channel.APIKeyCipher, err = s.store.secretBox.Encrypt(strings.TrimSpace(input.APIKey))
+	credential := strings.TrimSpace(input.APIKey)
+	if channel.AuthType == ChannelTypeChatGPTOAuth && strings.TrimSpace(input.OAuthAccessToken) != "" {
+		credential = strings.TrimSpace(input.OAuthAccessToken)
+	}
+	if credential != "" {
+		channel.APIKeyCipher, err = s.store.secretBox.Encrypt(credential)
+		if err != nil {
+			return Channel{}, err
+		}
+	}
+	if strings.TrimSpace(input.OAuthRefreshToken) != "" {
+		channel.RefreshTokenCipher, err = s.store.secretBox.Encrypt(strings.TrimSpace(input.OAuthRefreshToken))
 		if err != nil {
 			return Channel{}, err
 		}
@@ -598,6 +898,11 @@ func (s *ManagementService) channelView(ctx context.Context, channel Channel) (*
 	metrics.RecentSuccessCount = recentMetric.Successes
 	metrics.RecentAttemptCount = recentMetric.Attempts
 	metrics.TodayAttemptCount = todayAttempts[channel.ID]
+	metricsByChannel[channel.ID] = metrics
+	if err := s.overrideWithVerificationMetrics(ctx, []uint64{channel.ID}, metricsByChannel); err != nil {
+		return nil, err
+	}
+	metrics = metricsByChannel[channel.ID]
 	costsByChannel, err := loadChannelCumulativeCosts(ctx, s.store.db, []uint64{channel.ID})
 	if err != nil {
 		return nil, err
@@ -605,21 +910,23 @@ func (s *ManagementService) channelView(ctx context.Context, channel Channel) (*
 	return &ChannelView{
 		Channel:                channel,
 		APIKeyConfigured:       channel.APIKeyCipher != "",
+		ProxyConfigured:        channel.ProxyURLCipher != "",
 		CumulativeUpstreamCost: costsByChannel[channel.ID],
 		Models:                 models,
 		Metrics:                metrics,
 	}, nil
 }
 
-func (s *ManagementService) SaveChannelConfiguration(ctx context.Context, input ChannelConfigurationInput) (*ChannelView, error) {
+func (s *ManagementService) SaveChannelConfiguration(ctx context.Context, input ChannelConfigurationInput, scope ...uint64) (*ChannelView, error) {
+	userID := ownerID(scope)
 	var view ChannelView
 	err := s.store.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		var channel Channel
 		var err error
 		if input.ID == 0 {
-			channel, err = s.createChannel(db, input.Channel)
+			channel, err = s.createChannel(db, input.Channel, userID)
 		} else {
-			channel, err = s.updateChannel(db, input.ID, input.Channel)
+			channel, err = s.updateChannel(db, input.ID, input.Channel, userID)
 		}
 		if err != nil {
 			return err
@@ -632,6 +939,7 @@ func (s *ManagementService) SaveChannelConfiguration(ctx context.Context, input 
 		view = ChannelView{
 			Channel:          channel,
 			APIKeyConfigured: channel.APIKeyCipher != "",
+			ProxyConfigured:  channel.ProxyURLCipher != "",
 			Models:           models,
 			Metrics:          ChannelMetrics{LatencySeries: []ChannelLatencyPoint{}, RecentSuccessRate: 1},
 		}
@@ -643,8 +951,21 @@ func (s *ManagementService) SaveChannelConfiguration(ctx context.Context, input 
 	return &view, nil
 }
 
-func (s *ManagementService) DeleteChannel(ctx context.Context, id uint64) error {
+func (s *ManagementService) DeleteChannel(ctx context.Context, id uint64, scope ...uint64) error {
+	userID := ownerID(scope)
 	return s.store.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		if userID > 0 {
+			var count int64
+			if err := db.Model(&Channel{}).Where("id = ? AND owner_user_id = ?", id, userID).Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 0 {
+				return gorm.ErrRecordNotFound
+			}
+		}
+		if err := db.Where("channel_id = ?", id).Delete(&ClientTokenChannel{}).Error; err != nil {
+			return err
+		}
 		if err := resolveCircuitRecords(db, id, 0, 0, CircuitResolutionMappingRemoved, time.Now()); err != nil {
 			return err
 		}
@@ -662,9 +983,14 @@ func (s *ManagementService) DeleteChannel(ctx context.Context, id uint64) error 
 	})
 }
 
-func (s *ManagementService) ResetChannelCircuit(ctx context.Context, id uint64) error {
+func (s *ManagementService) ResetChannelCircuit(ctx context.Context, id uint64, scope ...uint64) error {
+	userID := ownerID(scope)
 	return s.store.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		result := db.Model(&Channel{}).Where("id = ?", id).Updates(map[string]any{
+		channelQuery := db.Model(&Channel{}).Where("id = ?", id)
+		if userID > 0 {
+			channelQuery = channelQuery.Where("owner_user_id = ?", userID)
+		}
+		result := channelQuery.Updates(map[string]any{
 			"enabled":              true,
 			"consecutive_failures": 0,
 			"circuit_level":        CircuitLevelClosed,
@@ -687,14 +1013,42 @@ func (s *ManagementService) ResetChannelCircuit(ctx context.Context, id uint64) 
 	})
 }
 
-func (s *ManagementService) ReplaceChannelModels(ctx context.Context, channelID uint64, inputs []ChannelModelInput) ([]ChannelModel, error) {
+func (s *ManagementService) ReplaceChannelModels(ctx context.Context, channelID uint64, inputs []ChannelModelInput, scope ...uint64) ([]ChannelModel, error) {
+	userID := ownerID(scope)
 	var models []ChannelModel
 	err := s.store.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		if userID > 0 {
+			var count int64
+			if err := db.Model(&Channel{}).Where("id = ? AND owner_user_id = ?", channelID, userID).Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 0 {
+				return gorm.ErrRecordNotFound
+			}
+		}
 		var err error
 		models, err = s.replaceChannelModels(db, channelID, inputs)
 		return err
 	})
 	return models, err
+}
+
+func chatGPTOAuthModelPricing(input ChannelModelInput) ChannelModelInput {
+	priceMultiplier := DefaultPriceMultiplierBasisPoints
+	input.PriceMultiplierBasisPoints = &priceMultiplier
+	official := OpenAIOfficialPrice(input.UpstreamModel)
+	if official == nil {
+		input.InputPriceMicros = 0
+		input.OutputPriceMicros = 0
+		input.CachedInputPriceMicros = nil
+		input.CacheWritePriceMicros = nil
+		return input
+	}
+	input.InputPriceMicros = official.InputPriceMicros
+	input.OutputPriceMicros = official.OutputPriceMicros
+	input.CachedInputPriceMicros = copyPriceMicros(official.CachedInputPriceMicros)
+	input.CacheWritePriceMicros = copyPriceMicros(official.CacheWritePriceMicros)
+	return input
 }
 
 func (s *ManagementService) replaceChannelModels(db *gorm.DB, channelID uint64, inputs []ChannelModelInput) ([]ChannelModel, error) {
@@ -709,8 +1063,12 @@ func (s *ManagementService) replaceChannelModels(db *gorm.DB, channelID uint64, 
 			return nil, fmt.Errorf("model %d is duplicated", input.ModelID)
 		}
 		seen[input.ModelID] = struct{}{}
-		if strings.TrimSpace(input.UpstreamModel) == "" {
+		input.UpstreamModel = strings.TrimSpace(input.UpstreamModel)
+		if input.UpstreamModel == "" {
 			return nil, errors.New("upstream model is required")
+		}
+		if channel.AuthType == ChannelTypeChatGPTOAuth {
+			input = chatGPTOAuthModelPricing(input)
 		}
 		if input.Weight < 1 || input.Weight > 10000 {
 			return nil, errors.New("weight must be between 1 and 10000")
@@ -737,7 +1095,7 @@ func (s *ManagementService) replaceChannelModels(db *gorm.DB, channelID uint64, 
 		models = append(models, ChannelModel{
 			ChannelID:                  channelID,
 			ModelID:                    input.ModelID,
-			UpstreamModel:              strings.TrimSpace(input.UpstreamModel),
+			UpstreamModel:              input.UpstreamModel,
 			Priority:                   input.Priority,
 			Weight:                     input.Weight,
 			InputPriceMicros:           input.InputPriceMicros,
@@ -799,9 +1157,14 @@ func validRoutingStrategy(value string) bool {
 	return value == RoutingPriorityWeighted || value == RoutingLowestCost || value == RoutingLowestLatency
 }
 
-func (s *ManagementService) ListModels(ctx context.Context) ([]GatewayModelView, error) {
+func (s *ManagementService) ListModels(ctx context.Context, scope ...uint64) ([]GatewayModelView, error) {
+	userID := ownerID(scope)
 	var models []GatewayModel
-	if err := s.store.db.WithContext(ctx).Order("name asc").Find(&models).Error; err != nil {
+	modelQuery := s.store.db.WithContext(ctx).Order("name asc")
+	if userID > 0 {
+		modelQuery = modelQuery.Where("EXISTS (SELECT 1 FROM channel_models cm JOIN channels c ON c.id = cm.channel_id WHERE cm.model_id = gateway_models.id AND c.owner_user_id = ?)", userID)
+	}
+	if err := modelQuery.Find(&models).Error; err != nil {
 		return nil, err
 	}
 	type modelRequestCount struct {
@@ -809,7 +1172,11 @@ func (s *ManagementService) ListModels(ctx context.Context) ([]GatewayModelView,
 		RequestCount int64
 	}
 	var counts []modelRequestCount
-	if err := s.store.db.WithContext(ctx).Model(&RelayRequestLog{}).
+	logQuery := s.store.db.WithContext(ctx).Model(&RelayRequestLog{})
+	if userID > 0 {
+		logQuery = logQuery.Where("EXISTS (SELECT 1 FROM relay_attempt_logs a JOIN channels c ON c.id = a.channel_id WHERE a.request_id = relay_request_logs.id AND c.owner_user_id = ?)", userID)
+	}
+	if err := logQuery.
 		Select("requested_model AS name, COUNT(*) AS request_count").
 		Group("requested_model").Scan(&counts).Error; err != nil {
 		return nil, err
@@ -877,28 +1244,29 @@ func (s *ManagementService) DeleteModel(ctx context.Context, id uint64) error {
 	})
 }
 
-func (s *ManagementService) ListTokens(ctx context.Context) ([]ClientTokenView, error) {
+func (s *ManagementService) ListTokens(ctx context.Context, scope ...uint64) ([]ClientTokenView, error) {
+	userID := ownerID(scope)
 	var tokens []ClientToken
-	if err := s.store.db.WithContext(ctx).Order("id desc").Find(&tokens).Error; err != nil {
+	tokenQuery := s.store.db.WithContext(ctx).Order("id desc")
+	if userID > 0 {
+		tokenQuery = tokenQuery.Where("owner_user_id = ?", userID)
+	}
+	if err := tokenQuery.Find(&tokens).Error; err != nil {
 		return nil, err
 	}
 	views := make([]ClientTokenView, 0, len(tokens))
 	for _, token := range tokens {
-		var links []ClientTokenModel
-		if err := s.store.db.WithContext(ctx).Where("token_id = ?", token.ID).Find(&links).Error; err != nil {
-			return nil, err
-		}
-		ids := make([]uint64, 0, len(links))
-		for _, link := range links {
-			ids = append(ids, link.ModelID)
-		}
-		statistics, err := s.tokenStatistics(ctx, token.ID)
+		view, err := s.tokenView(ctx, token)
 		if err != nil {
 			return nil, err
 		}
-		views = append(views, ClientTokenView{ClientToken: token, ModelIDs: ids, Statistics: statistics})
+		views = append(views, *view)
 	}
 	return views, nil
+}
+
+func (s *ManagementService) TokensForUser(ctx context.Context, userID uint64) ([]ClientTokenView, error) {
+	return s.ListTokens(ctx, userID)
 }
 
 func (s *ManagementService) tokenStatistics(ctx context.Context, tokenID uint64) (TokenStatistics, error) {
@@ -951,27 +1319,57 @@ func validateTokenInput(input ClientTokenInput) (ClientTokenInput, error) {
 	if !input.AllowAllModels && len(input.ModelIDs) == 0 {
 		return input, errors.New("select at least one model or allow all models")
 	}
+	if !allowAllChannels(input) && len(input.ChannelIDs) == 0 {
+		return input, errors.New("select at least one channel or allow all channels")
+	}
 	sort.Slice(input.ModelIDs, func(i, j int) bool { return input.ModelIDs[i] < input.ModelIDs[j] })
+	sort.Slice(input.ChannelIDs, func(i, j int) bool { return input.ChannelIDs[i] < input.ChannelIDs[j] })
 	return input, nil
 }
 
-func (s *ManagementService) issueToken(ctx context.Context, input ClientTokenInput, existing *ClientToken) (*IssuedClientToken, error) {
+func allowAllChannels(input ClientTokenInput) bool {
+	return input.AllowAllChannels == nil || *input.AllowAllChannels
+}
+
+func (s *ManagementService) issueToken(ctx context.Context, input ClientTokenInput, existing *ClientToken, ownerUserID uint64) (*IssuedClientToken, error) {
 	input, err := validateTokenInput(input)
 	if err != nil {
 		return nil, err
+	}
+	if ownerUserID > 0 {
+		if !allowAllChannels(input) && len(input.ChannelIDs) > 0 {
+			var allowed int64
+			if err := s.store.db.WithContext(ctx).Model(&Channel{}).Where("owner_user_id = ? AND id IN ?", ownerUserID, input.ChannelIDs).Count(&allowed).Error; err != nil {
+				return nil, err
+			}
+			if allowed != int64(len(input.ChannelIDs)) {
+				return nil, errors.New("a token may only include your own channels")
+			}
+		}
+		if !input.AllowAllModels && len(input.ModelIDs) > 0 {
+			var allowed int64
+			if err := s.store.db.WithContext(ctx).Model(&GatewayModel{}).Where("id IN (?) AND EXISTS (SELECT 1 FROM channel_models cm JOIN channels c ON c.id = cm.channel_id WHERE cm.model_id = gateway_models.id AND c.owner_user_id = ?)", input.ModelIDs, ownerUserID).Count(&allowed).Error; err != nil {
+				return nil, err
+			}
+			if allowed != int64(len(input.ModelIDs)) {
+				return nil, errors.New("a token may only include models from your own channels")
+			}
+		}
 	}
 	secret, err := generateSecret("sk-")
 	if err != nil {
 		return nil, err
 	}
 	token := ClientToken{
-		Name:           input.Name,
-		KeyHash:        hashSecret(secret),
-		KeyPrefix:      visibleKeyPrefix(secret),
-		Enabled:        input.Enabled,
-		AllowAllModels: input.AllowAllModels,
-		RPM:            input.RPM,
-		MaxConcurrency: input.MaxConcurrency,
+		Name:             input.Name,
+		KeyHash:          hashSecret(secret),
+		KeyPrefix:        visibleKeyPrefix(secret),
+		Enabled:          input.Enabled,
+		AllowAllModels:   input.AllowAllModels,
+		AllowAllChannels: allowAllChannels(input),
+		RPM:              input.RPM,
+		MaxConcurrency:   input.MaxConcurrency,
+		OwnerUserID:      ownerUserID,
 	}
 	if existing != nil {
 		token.ID = existing.ID
@@ -982,10 +1380,19 @@ func (s *ManagementService) issueToken(ctx context.Context, input ClientTokenInp
 			if err := db.Create(&token).Error; err != nil {
 				return err
 			}
+			if !allowAllChannels(input) {
+				if err := db.Model(&token).Update("allow_all_channels", false).Error; err != nil {
+					return err
+				}
+				token.AllowAllChannels = false
+			}
 		} else if err := db.Save(&token).Error; err != nil {
 			return err
 		}
 		if err := replaceTokenModels(db, token.ID, input); err != nil {
+			return err
+		}
+		if err := replaceTokenChannels(db, token.ID, input); err != nil {
 			return err
 		}
 		if existing != nil {
@@ -1017,22 +1424,89 @@ func replaceTokenModels(db *gorm.DB, tokenID uint64, input ClientTokenInput) err
 	return db.Create(&links).Error
 }
 
-func (s *ManagementService) CreateToken(ctx context.Context, input ClientTokenInput) (*IssuedClientToken, error) {
-	return s.issueToken(ctx, input, nil)
+func replaceTokenChannels(db *gorm.DB, tokenID uint64, input ClientTokenInput) error {
+	if err := db.Where("token_id = ?", tokenID).Delete(&ClientTokenChannel{}).Error; err != nil {
+		return err
+	}
+	if allowAllChannels(input) {
+		return nil
+	}
+	links := make([]ClientTokenChannel, 0, len(input.ChannelIDs))
+	for _, channelID := range input.ChannelIDs {
+		links = append(links, ClientTokenChannel{TokenID: tokenID, ChannelID: channelID})
+	}
+	return db.Create(&links).Error
 }
 
-func (s *ManagementService) UpdateToken(ctx context.Context, id uint64, input ClientTokenInput) (*ClientTokenView, error) {
+func (s *ManagementService) CreateToken(ctx context.Context, input ClientTokenInput, scope ...uint64) (*IssuedClientToken, error) {
+	return s.issueToken(ctx, input, nil, ownerID(scope))
+}
+
+func (s *ManagementService) UpdateToken(ctx context.Context, id uint64, input ClientTokenInput, scope ...uint64) (*ClientTokenView, error) {
+	userID := ownerID(scope)
+	var token ClientToken
+	query := s.store.db.WithContext(ctx).Where("id = ?", id)
+	if userID > 0 {
+		query = query.Where("owner_user_id = ?", userID)
+	}
+	if err := query.First(&token).Error; err != nil {
+		return nil, err
+	}
+	if userID > 0 && token.OwnerUserID != userID {
+		return nil, gorm.ErrRecordNotFound
+	}
+	if input.AllowAllChannels == nil {
+		input.AllowAllChannels = boolPointer(token.AllowAllChannels)
+		if !token.AllowAllChannels {
+			var channelLinks []ClientTokenChannel
+			if err := s.store.db.WithContext(ctx).Where("token_id = ?", token.ID).Find(&channelLinks).Error; err != nil {
+				return nil, err
+			}
+			input.ChannelIDs = make([]uint64, 0, len(channelLinks))
+			for _, link := range channelLinks {
+				input.ChannelIDs = append(input.ChannelIDs, link.ChannelID)
+			}
+		}
+	}
 	input, err := validateTokenInput(input)
 	if err != nil {
 		return nil, err
 	}
-	var token ClientToken
-	if err := s.store.db.WithContext(ctx).First(&token, id).Error; err != nil {
-		return nil, err
+	if userID > 0 {
+		if !allowAllChannels(input) {
+			var allowed int64
+			if err := s.store.db.WithContext(ctx).Model(&Channel{}).Where("owner_user_id = ? AND id IN ?", userID, input.ChannelIDs).Count(&allowed).Error; err != nil {
+				return nil, err
+			}
+			if allowed != int64(len(input.ChannelIDs)) {
+				return nil, errors.New("a token may only include your own channels")
+			}
+		}
+		if !input.AllowAllModels && len(input.ModelIDs) > 0 {
+			var allowed int64
+			if err := s.store.db.WithContext(ctx).
+				Model(&GatewayModel{}).
+				Where(
+					"id IN (?) AND EXISTS ("+
+						"SELECT 1 FROM channel_models cm "+
+						"JOIN channels c ON c.id = cm.channel_id "+
+						"WHERE cm.model_id = gateway_models.id "+
+						"AND c.owner_user_id = ?)",
+					input.ModelIDs,
+					userID,
+				).
+				Count(&allowed).Error; err != nil {
+				return nil, err
+			}
+			if allowed != int64(len(input.ModelIDs)) {
+				return nil, errors.New("a token may only include models from your own channels")
+			}
+		}
 	}
 	token.Name = input.Name
 	token.Enabled = input.Enabled
 	token.AllowAllModels = input.AllowAllModels
+	token.AllowAllChannels = allowAllChannels(input)
 	token.RPM = input.RPM
 	token.MaxConcurrency = input.MaxConcurrency
 	err = s.store.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
@@ -1040,6 +1514,9 @@ func (s *ManagementService) UpdateToken(ctx context.Context, id uint64, input Cl
 			return err
 		}
 		if err := replaceTokenModels(db, token.ID, input); err != nil {
+			return err
+		}
+		if err := replaceTokenChannels(db, token.ID, input); err != nil {
 			return err
 		}
 		if !token.Enabled {
@@ -1053,9 +1530,14 @@ func (s *ManagementService) UpdateToken(ctx context.Context, id uint64, input Cl
 	return s.tokenView(ctx, token)
 }
 
-func (s *ManagementService) RotateToken(ctx context.Context, id uint64) (*IssuedClientToken, error) {
+func (s *ManagementService) RotateToken(ctx context.Context, id uint64, scope ...uint64) (*IssuedClientToken, error) {
+	userID := ownerID(scope)
 	var token ClientToken
-	if err := s.store.db.WithContext(ctx).First(&token, id).Error; err != nil {
+	query := s.store.db.WithContext(ctx).Where("id = ?", id)
+	if userID > 0 {
+		query = query.Where("owner_user_id = ?", userID)
+	}
+	if err := query.First(&token).Error; err != nil {
 		return nil, err
 	}
 	view, err := s.tokenView(ctx, token)
@@ -1063,31 +1545,56 @@ func (s *ManagementService) RotateToken(ctx context.Context, id uint64) (*Issued
 		return nil, err
 	}
 	input := ClientTokenInput{
-		Name: token.Name, Enabled: token.Enabled, AllowAllModels: token.AllowAllModels,
-		RPM: token.RPM, MaxConcurrency: token.MaxConcurrency, ModelIDs: view.ModelIDs,
+		Name: token.Name, Enabled: token.Enabled, AllowAllModels: token.AllowAllModels, AllowAllChannels: boolPointer(token.AllowAllChannels),
+		RPM: token.RPM, MaxConcurrency: token.MaxConcurrency, ModelIDs: view.ModelIDs, ChannelIDs: view.ChannelIDs,
 	}
-	return s.issueToken(ctx, input, &token)
+	return s.issueToken(ctx, input, &token, token.OwnerUserID)
 }
 
 func (s *ManagementService) tokenView(ctx context.Context, token ClientToken) (*ClientTokenView, error) {
-	var links []ClientTokenModel
-	if err := s.store.db.WithContext(ctx).Where("token_id = ?", token.ID).Find(&links).Error; err != nil {
+	var modelLinks []ClientTokenModel
+	if err := s.store.db.WithContext(ctx).Where("token_id = ?", token.ID).Order("model_id asc").Find(&modelLinks).Error; err != nil {
 		return nil, err
 	}
-	ids := make([]uint64, 0, len(links))
-	for _, link := range links {
-		ids = append(ids, link.ModelID)
+	modelIDs := make([]uint64, 0, len(modelLinks))
+	for _, link := range modelLinks {
+		modelIDs = append(modelIDs, link.ModelID)
+	}
+	var channelLinks []ClientTokenChannel
+	if err := s.store.db.WithContext(ctx).Where("token_id = ?", token.ID).Order("channel_id asc").Find(&channelLinks).Error; err != nil {
+		return nil, err
+	}
+	channelIDs := make([]uint64, 0, len(channelLinks))
+	for _, link := range channelLinks {
+		channelIDs = append(channelIDs, link.ChannelID)
 	}
 	statistics, err := s.tokenStatistics(ctx, token.ID)
 	if err != nil {
 		return nil, err
 	}
-	return &ClientTokenView{ClientToken: token, ModelIDs: ids, Statistics: statistics}, nil
+	return &ClientTokenView{ClientToken: token, ModelIDs: modelIDs, ChannelIDs: channelIDs, Statistics: statistics}, nil
 }
 
-func (s *ManagementService) DeleteToken(ctx context.Context, id uint64) error {
+func boolPointer(value bool) *bool {
+	return &value
+}
+
+func (s *ManagementService) DeleteToken(ctx context.Context, id uint64, scope ...uint64) error {
+	userID := ownerID(scope)
 	return s.store.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		if userID > 0 {
+			var count int64
+			if err := db.Model(&ClientToken{}).Where("id = ? AND owner_user_id = ?", id, userID).Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 0 {
+				return gorm.ErrRecordNotFound
+			}
+		}
 		if err := db.Where("token_id = ?", id).Delete(&ClientTokenModel{}).Error; err != nil {
+			return err
+		}
+		if err := db.Where("token_id = ?", id).Delete(&ClientTokenChannel{}).Error; err != nil {
 			return err
 		}
 		if err := revokeClientTokenConsoleSessions(db, id); err != nil {
@@ -1104,7 +1611,16 @@ func (s *ManagementService) DeleteToken(ctx context.Context, id uint64) error {
 	})
 }
 
-func (s *ManagementService) TestChannel(ctx context.Context, id uint64) (int64, int, error) {
+func (s *ManagementService) TestChannel(ctx context.Context, id uint64, scope ...uint64) (int64, int, error) {
+	if userID := ownerID(scope); userID > 0 {
+		var count int64
+		if err := s.store.db.WithContext(ctx).Model(&Channel{}).Where("id = ? AND owner_user_id = ?", id, userID).Count(&count).Error; err != nil {
+			return 0, 0, err
+		}
+		if count == 0 {
+			return 0, 0, gorm.ErrRecordNotFound
+		}
+	}
 	discovery, err := s.discoverChannelModels(ctx, ChannelModelDiscoveryInput{ChannelID: id}, false)
 	if discovery == nil {
 		return 0, 0, err
@@ -1112,7 +1628,16 @@ func (s *ManagementService) TestChannel(ctx context.Context, id uint64) (int64, 
 	return discovery.LatencyMS, discovery.Status, err
 }
 
-func (s *ManagementService) DiscoverChannelModels(ctx context.Context, input ChannelModelDiscoveryInput) (*ChannelModelDiscovery, error) {
+func (s *ManagementService) DiscoverChannelModels(ctx context.Context, input ChannelModelDiscoveryInput, scope ...uint64) (*ChannelModelDiscovery, error) {
+	if userID := ownerID(scope); userID > 0 && input.ChannelID > 0 {
+		var count int64
+		if err := s.store.db.WithContext(ctx).Model(&Channel{}).Where("id = ? AND owner_user_id = ?", input.ChannelID, userID).Count(&count).Error; err != nil {
+			return nil, err
+		}
+		if count == 0 {
+			return nil, gorm.ErrRecordNotFound
+		}
+	}
 	return s.discoverChannelModels(ctx, input, true)
 }
 
@@ -1129,13 +1654,25 @@ func (s *ManagementService) discoverChannelModels(ctx context.Context, input Cha
 		if baseURL == "" {
 			baseURL = stored.BaseURL
 		}
-		if apiKey == "" {
+		if input.AuthType == "" {
+			input.AuthType = stored.AuthType
+		}
+		if input.ChatGPTAccountID == "" {
+			input.ChatGPTAccountID = stored.ChatGPTAccountID
+		}
+		if input.ProxyURL == "" && stored.ProxyURLCipher != "" {
+			input.ProxyURL, _ = s.store.secretBox.Decrypt(stored.ProxyURLCipher)
+		}
+		if apiKey == "" && (input.AuthType != ChannelTypeChatGPTOAuth || strings.TrimSpace(input.OAuthAccessToken) == "") {
 			decrypted, err := s.store.secretBox.Decrypt(stored.APIKeyCipher)
 			if err != nil {
 				return nil, err
 			}
 			apiKey = decrypted
 		}
+	}
+	if input.AuthType == ChannelTypeChatGPTOAuth {
+		return s.discoverChatGPTOAuthModels(ctx, channel)
 	}
 	normalizedBaseURL, err := normalizeBaseURL(baseURL)
 	if err != nil {
@@ -1144,7 +1681,7 @@ func (s *ManagementService) discoverChannelModels(ctx context.Context, input Cha
 	if apiKey == "" {
 		return nil, errors.New("channel API key is required to discover models")
 	}
-	discovery, discoverErr := fetchUpstreamModels(ctx, normalizedBaseURL, apiKey)
+	discovery, discoverErr := fetchUpstreamModelsWithHeaders(ctx, normalizedBaseURL, apiKey, input.AuthType, input.ChatGPTAccountID, input.ProxyURL)
 	if channel != nil {
 		s.updateDiscoveryHealth(channel.ID, discovery, discoverErr)
 	}
@@ -1155,6 +1692,21 @@ func (s *ManagementService) discoverChannelModels(ctx context.Context, input Cha
 		if err := s.registerDiscoveredPublicModels(ctx, discovery); err != nil {
 			return discovery, fmt.Errorf("register discovered public models: %w", err)
 		}
+	}
+	return discovery, nil
+}
+
+func (s *ManagementService) discoverChatGPTOAuthModels(ctx context.Context, channel *Channel) (*ChannelModelDiscovery, error) {
+	discovery := &ChannelModelDiscovery{Models: []UpstreamModelView{}, Status: http.StatusOK, FetchedAt: time.Now()}
+	var models []GatewayModel
+	if err := s.store.db.WithContext(ctx).Where("enabled = ?", true).Order("name asc").Find(&models).Error; err != nil {
+		return discovery, err
+	}
+	for _, model := range models {
+		discovery.Models = append(discovery.Models, UpstreamModelView{ID: model.Name, OwnedBy: "ChatGPT Codex", Created: model.CreatedAt.Unix(), PublicModelID: model.ID, OfficialPrice: OpenAIOfficialPrice(model.Name)})
+	}
+	if channel != nil {
+		s.updateDiscoveryHealth(channel.ID, discovery, nil)
 	}
 	return discovery, nil
 }
@@ -1202,6 +1754,10 @@ func (s *ManagementService) registerDiscoveredPublicModels(ctx context.Context, 
 }
 
 func fetchUpstreamModels(ctx context.Context, baseURL string, apiKey string) (*ChannelModelDiscovery, error) {
+	return fetchUpstreamModelsWithHeaders(ctx, baseURL, apiKey, ChannelTypeAPIKey, "")
+}
+
+func fetchUpstreamModelsWithHeaders(ctx context.Context, baseURL string, apiKey string, authType string, accountID string, proxyURLs ...string) (*ChannelModelDiscovery, error) {
 	discovery := &ChannelModelDiscovery{Models: []UpstreamModelView{}, FetchedAt: time.Now()}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
 	if err != nil {
@@ -1209,11 +1765,24 @@ func fetchUpstreamModels(ctx context.Context, baseURL string, apiKey string) (*C
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Accept", "application/json")
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	if authType == ChannelTypeChatGPTOAuth {
+		req.Header.Set("originator", chatGPTCanonicalOrigin)
+		req.Header.Set("version", chatGPTCanonicalVersion)
+		req.Header.Set("User-Agent", chatGPTCanonicalUA)
+		if accountID != "" {
+			req.Header.Set("chatgpt-account-id", accountID)
+		}
+		if req.URL.Hostname() == "chatgpt.com" {
+			req.Host = "chatgpt.com"
+		}
+	}
+	proxyURL := ""
+	if len(proxyURLs) > 0 {
+		proxyURL = proxyURLs[0]
+	}
+	client, clientErr := httpClientWithProxy(proxyURL, 15*time.Second)
+	if clientErr != nil {
+		return discovery, clientErr
 	}
 	started := time.Now()
 	resp, err := client.Do(req)
@@ -1329,30 +1898,35 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int, tokenIDs ..
 		Models:     []DashboardBreakdown{},
 	}
 	type totals struct {
-		Requests              int64
-		Successes             int64
-		CanceledCount         int64
-		InputTokens           int64
-		NormalInputTokens     int64
-		OutputTokens          int64
-		CachedTokens          int64
-		CacheWriteTokens      int64
-		EstimatedCost         int64
-		UpstreamCost          int64
-		FirstTokenMS          int64
-		FirstTokenSampleCount int64
-		LatencyMS             int64
-		LatencySampleCount    int64
-		DurationMS            int64
+		Requests                   int64
+		Successes                  int64
+		CanceledCount              int64
+		InputTokens                int64
+		NormalInputTokens          int64
+		OutputTokens               int64
+		CachedTokens               int64
+		CacheWriteTokens           int64
+		EstimatedCost              int64
+		UpstreamCost               int64
+		FirstTokenMS               int64
+		FirstTokenSampleCount      int64
+		LatencyMS                  int64
+		LatencySampleCount         int64
+		DurationMS                 int64
+		AverageTokensPerSecond     float64
+		TokensPerSecondSampleCount int64
 	}
 	var total totals
-	err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenID).Where("created_at >= ? AND created_at < ?", startTime, endTime).Select(
+	averageTPS, tpsSampleCount := throughputSQL("", "outcome = 'success'")
+	err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenIDs...).Where("created_at >= ? AND created_at < ?", startTime, endTime).Select(
 		"COUNT(*) AS requests, COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),0) AS successes, COALESCE(SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END),0) AS canceled_count, " +
 			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN normal_input_tokens ELSE 0 END),0) AS normal_input_tokens, " +
 			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END),0) AS output_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cached_tokens ELSE 0 END),0) AS cached_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cache_write_tokens ELSE 0 END),0) AS cache_write_tokens, " +
 			"COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(upstream_cost),0) AS upstream_cost, " +
 			"COALESCE(SUM(first_token_ms),0) AS first_token_ms, COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END),0) AS first_token_sample_count, " +
-			"COALESCE(SUM(latency_ms),0) AS latency_ms, COALESCE(SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END),0) AS latency_sample_count, COALESCE(SUM(duration_ms),0) AS duration_ms",
+			"COALESCE(SUM(latency_ms),0) AS latency_ms, COALESCE(SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END),0) AS latency_sample_count, COALESCE(SUM(duration_ms),0) AS duration_ms, " +
+			averageTPS + " AS average_tokens_per_second, " +
+			tpsSampleCount + " AS tokens_per_second_sample_count",
 	).Scan(&total).Error
 	if err != nil {
 		return nil, err
@@ -1369,6 +1943,8 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int, tokenIDs ..
 	summary.FirstTokenSampleCount = total.FirstTokenSampleCount
 	summary.LatencySampleCount = total.LatencySampleCount
 	summary.DurationSampleCount = total.Requests
+	summary.AverageTokensPerSecond = total.AverageTokensPerSecond
+	summary.TokensPerSecondSampleCount = total.TokensPerSecondSampleCount
 	if total.InputTokens > 0 {
 		summary.CacheHitRate = float64(total.CachedTokens) / float64(total.InputTokens)
 	}
@@ -1382,7 +1958,7 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int, tokenIDs ..
 		UpstreamCost      int64
 	}
 	var officialUsage []officialUsageRow
-	if err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenID).
+	if err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenIDs...).
 		Select("requested_model, input_tokens, normal_input_tokens, output_tokens, cached_tokens, cache_write_tokens, upstream_cost").
 		Where("created_at >= ? AND created_at < ? AND outcome IN ?", startTime, endTime, []string{RelayOutcomeSuccess, RelayOutcomeCanceled}).Find(&officialUsage).Error; err != nil {
 		return nil, err
@@ -1430,7 +2006,7 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int, tokenIDs ..
 	if total.Requests > 0 {
 		summary.AverageDurationMS = float64(total.DurationMS) / float64(total.Requests)
 	}
-	if err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenID).
+	if err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenIDs...).
 		Select(sqliteEastEightCreatedDate+" AS date, COUNT(*) AS requests, COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),0) AS successes, COALESCE(SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END),0) AS canceled_count, "+
 			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END),0) AS output_tokens, "+
 			"COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(upstream_cost),0) AS upstream_cost, "+
@@ -1455,7 +2031,7 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int, tokenIDs ..
 		}
 		summary.Daily = append(summary.Daily, daily)
 	}
-	if err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenID).
+	if err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenIDs...).
 		Select(sqliteEastEightCreatedHour+" AS hour, COUNT(*) AS requests, COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),0) AS successes").
 		Where("created_at >= ? AND created_at < ?", startTime, endTime).Group(sqliteEastEightCreatedHour).Order("hour asc").Scan(&summary.Hourly).Error; err != nil {
 		return nil, err
@@ -1478,14 +2054,21 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int, tokenIDs ..
 	}
 	channelBreakdownDB := s.store.db.WithContext(ctx).Table("relay_request_logs AS request")
 	if tokenID > 0 {
-		channelBreakdownDB = channelBreakdownDB.Where("request.token_id = ?", tokenID)
+		if len(tokenIDs) > 1 {
+			channelBreakdownDB = channelBreakdownDB.Where("request.token_id IN ?", tokenIDs)
+		} else {
+			channelBreakdownDB = channelBreakdownDB.Where("request.token_id = ?", tokenID)
+		}
 	}
+	channelAverageTPS, channelTPSSampleCount := throughputSQL("request.", "request.outcome = 'success'")
 	if err := channelBreakdownDB.
 		Select("COALESCE(NULLIF(final_attempt.channel_name, ''), c.name, '未归属渠道') AS name, COUNT(*) AS requests, "+
 			"COALESCE(SUM(CASE WHEN request.outcome = 'success' THEN 1 ELSE 0 END),0) AS successes, COALESCE(SUM(CASE WHEN request.outcome = 'canceled' THEN 1 ELSE 0 END),0) AS canceled_count, "+
 			"COALESCE(1.0 * SUM(CASE WHEN request.outcome = 'success' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN request.outcome <> 'canceled' THEN 1 ELSE 0 END),0),0) AS success_rate, "+
 			"COALESCE(SUM(CASE WHEN request.outcome = 'success' THEN request.input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN request.outcome = 'success' THEN request.cached_tokens ELSE 0 END),0) AS cached_tokens, "+
-			"COALESCE(SUM(CASE WHEN request.outcome = 'success' THEN request.output_tokens ELSE 0 END),0) AS output_tokens, COALESCE(SUM(request.estimated_cost),0) AS estimated_cost, COALESCE(SUM(request.upstream_cost),0) AS upstream_cost").
+			"COALESCE(SUM(CASE WHEN request.outcome = 'success' THEN request.output_tokens ELSE 0 END),0) AS output_tokens, COALESCE(SUM(request.estimated_cost),0) AS estimated_cost, COALESCE(SUM(request.upstream_cost),0) AS upstream_cost, "+
+			channelAverageTPS+" AS average_tokens_per_second, "+
+			channelTPSSampleCount+" AS tokens_per_second_sample_count").
 		Joins("LEFT JOIN relay_attempt_logs AS final_attempt ON final_attempt.id = (SELECT a.id FROM relay_attempt_logs AS a WHERE a.request_id = request.id ORDER BY a.id DESC LIMIT 1)").
 		Joins("LEFT JOIN channels AS c ON c.id = final_attempt.channel_id").
 		Where("request.created_at >= ? AND request.created_at < ?", startTime, endTime).
@@ -1497,12 +2080,15 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int, tokenIDs ..
 			summary.Channels[index].CacheHitRate = float64(summary.Channels[index].CachedTokens) / float64(summary.Channels[index].InputTokens)
 		}
 	}
-	if err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenID).
+	modelAverageTPS, modelTPSSampleCount := throughputSQL("", "outcome = 'success'")
+	if err := dashboardRequestLogs(s.store.db.WithContext(ctx).Model(&RelayRequestLog{}), tokenIDs...).
 		Select("requested_model AS name, COUNT(*) AS requests, "+
 			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END),0) AS successes, COALESCE(SUM(CASE WHEN outcome = 'canceled' THEN 1 ELSE 0 END),0) AS canceled_count, "+
 			"COALESCE(1.0 * SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN outcome <> 'canceled' THEN 1 ELSE 0 END),0),0) AS success_rate, "+
 			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN input_tokens ELSE 0 END),0) AS input_tokens, COALESCE(SUM(CASE WHEN outcome = 'success' THEN cached_tokens ELSE 0 END),0) AS cached_tokens, "+
-			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END),0) AS output_tokens, COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(upstream_cost),0) AS upstream_cost").
+			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN output_tokens ELSE 0 END),0) AS output_tokens, COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(upstream_cost),0) AS upstream_cost, "+
+			modelAverageTPS+" AS average_tokens_per_second, "+
+			modelTPSSampleCount+" AS tokens_per_second_sample_count").
 		Where("created_at >= ? AND created_at < ?", startTime, endTime).Group("requested_model").Order("upstream_cost desc").Scan(&summary.Models).Error; err != nil {
 		return nil, err
 	}
@@ -1514,9 +2100,12 @@ func (s *ManagementService) Dashboard(ctx context.Context, days int, tokenIDs ..
 	return summary, nil
 }
 
-func dashboardRequestLogs(db *gorm.DB, tokenID uint64) *gorm.DB {
-	if tokenID > 0 {
-		return db.Where("token_id = ?", tokenID)
+func dashboardRequestLogs(db *gorm.DB, tokenIDs ...uint64) *gorm.DB {
+	if len(tokenIDs) == 1 && tokenIDs[0] > 0 {
+		return db.Where("token_id = ?", tokenIDs[0])
+	}
+	if len(tokenIDs) > 1 {
+		return db.Where("token_id IN ?", tokenIDs)
 	}
 	return db
 }
@@ -1544,13 +2133,9 @@ func (s *ManagementService) Logs(ctx context.Context, query LogQuery) (*LogPage,
 	if err := filteredLogs().Omit("request_body", "response_body").Order("created_at desc, id desc").Offset((query.Page - 1) * query.PageSize).Limit(query.PageSize).Find(&logs).Error; err != nil {
 		return nil, err
 	}
-	items := make([]RelayRequestView, 0, len(logs))
-	for _, log := range logs {
-		view, err := s.relayRequestView(ctx, log, false, false)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, view)
+	items, err := s.relayRequestViews(ctx, logs, false, false)
+	if err != nil {
+		return nil, err
 	}
 	return &LogPage{Items: items, Summary: summary, Total: total, Page: query.Page, PageSize: query.PageSize}, nil
 }
@@ -1571,6 +2156,8 @@ func applyLogFilters(db *gorm.DB, query LogQuery, detailCutoff time.Time, hasCut
 	}
 	if query.TokenID > 0 {
 		db = db.Where("token_id = ?", query.TokenID)
+	} else if len(query.TokenIDs) > 0 {
+		db = db.Where("token_id IN ?", query.TokenIDs)
 	}
 	if query.ChannelID > 0 {
 		db = db.Where("(SELECT a.channel_id FROM relay_attempt_logs a WHERE a.request_id = relay_request_logs.id ORDER BY a.id DESC LIMIT 1) = ?", query.ChannelID)
@@ -1586,25 +2173,28 @@ func applyLogFilters(db *gorm.DB, query LogQuery, detailCutoff time.Time, hasCut
 
 func aggregateLogSummary(db *gorm.DB) (LogAggregateSummary, error) {
 	type aggregateRow struct {
-		RequestCount          int64
-		SuccessCount          int64
-		CanceledCount         int64
-		AttemptCount          int64
-		InputTokens           int64
-		NormalInputTokens     int64
-		OutputTokens          int64
-		CachedTokens          int64
-		CacheWriteTokens      int64
-		SentTokens            int64
-		EstimatedCost         int64
-		UpstreamCost          int64
-		TotalFirstTokenMS     int64
-		FirstTokenSampleCount int64
-		TotalLatencyMS        int64
-		LatencySampleCount    int64
-		TotalDurationMS       int64
+		RequestCount               int64
+		SuccessCount               int64
+		CanceledCount              int64
+		AttemptCount               int64
+		InputTokens                int64
+		NormalInputTokens          int64
+		OutputTokens               int64
+		CachedTokens               int64
+		CacheWriteTokens           int64
+		SentTokens                 int64
+		EstimatedCost              int64
+		UpstreamCost               int64
+		TotalFirstTokenMS          int64
+		FirstTokenSampleCount      int64
+		TotalLatencyMS             int64
+		LatencySampleCount         int64
+		TotalDurationMS            int64
+		AverageTokensPerSecond     float64
+		TokensPerSecondSampleCount int64
 	}
 	var row aggregateRow
+	averageTPS, tpsSampleCount := throughputSQL("", "outcome = 'success'")
 	if err := db.Select(
 		"COUNT(*) AS request_count, " +
 			"COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END), 0) AS success_count, " +
@@ -1616,25 +2206,29 @@ func aggregateLogSummary(db *gorm.DB) (LogAggregateSummary, error) {
 			"COALESCE(SUM(upstream_cost), 0) AS upstream_cost, COALESCE(SUM(first_token_ms), 0) AS total_first_token_ms, " +
 			"COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END), 0) AS first_token_sample_count, " +
 			"COALESCE(SUM(latency_ms), 0) AS total_latency_ms, COALESCE(SUM(CASE WHEN latency_ms > 0 THEN 1 ELSE 0 END), 0) AS latency_sample_count, " +
-			"COALESCE(SUM(duration_ms), 0) AS total_duration_ms").Scan(&row).Error; err != nil {
+			"COALESCE(SUM(duration_ms), 0) AS total_duration_ms, " +
+			averageTPS + " AS average_tokens_per_second, " +
+			tpsSampleCount + " AS tokens_per_second_sample_count").Scan(&row).Error; err != nil {
 		return LogAggregateSummary{}, err
 	}
 	summary := LogAggregateSummary{
-		RequestCount:          row.RequestCount,
-		SuccessCount:          row.SuccessCount,
-		CanceledCount:         row.CanceledCount,
-		AttemptCount:          row.AttemptCount,
-		InputTokens:           row.InputTokens,
-		NormalInputTokens:     row.NormalInputTokens,
-		OutputTokens:          row.OutputTokens,
-		CachedTokens:          row.CachedTokens,
-		CacheWriteTokens:      row.CacheWriteTokens,
-		SentTokens:            row.SentTokens,
-		EstimatedCost:         row.EstimatedCost,
-		UpstreamCost:          row.UpstreamCost,
-		FirstTokenSampleCount: row.FirstTokenSampleCount,
-		LatencySampleCount:    row.LatencySampleCount,
-		DurationSampleCount:   row.RequestCount,
+		RequestCount:               row.RequestCount,
+		SuccessCount:               row.SuccessCount,
+		CanceledCount:              row.CanceledCount,
+		AttemptCount:               row.AttemptCount,
+		InputTokens:                row.InputTokens,
+		NormalInputTokens:          row.NormalInputTokens,
+		OutputTokens:               row.OutputTokens,
+		CachedTokens:               row.CachedTokens,
+		CacheWriteTokens:           row.CacheWriteTokens,
+		SentTokens:                 row.SentTokens,
+		EstimatedCost:              row.EstimatedCost,
+		UpstreamCost:               row.UpstreamCost,
+		FirstTokenSampleCount:      row.FirstTokenSampleCount,
+		LatencySampleCount:         row.LatencySampleCount,
+		DurationSampleCount:        row.RequestCount,
+		AverageTokensPerSecond:     row.AverageTokensPerSecond,
+		TokensPerSecondSampleCount: row.TokensPerSecondSampleCount,
 	}
 	summary.SuccessRate = attemptSuccessRate(row.SuccessCount, row.AttemptCount)
 	if row.RequestCount > 0 {
@@ -1657,13 +2251,15 @@ func (s *ManagementService) LogDetail(ctx context.Context, requestID string, tok
 	cutoff, hasCutoff := s.detailedLogCutoff(time.Now())
 	var log RelayRequestLog
 	query := s.store.db.WithContext(ctx).Where("id = ?", requestID)
-	if len(tokenIDs) > 0 && tokenIDs[0] > 0 {
+	if len(tokenIDs) == 1 && tokenIDs[0] > 0 {
 		query = query.Where("token_id = ?", tokenIDs[0])
+	} else if len(tokenIDs) > 1 {
+		query = query.Where("token_id IN ?", tokenIDs)
 	}
 	if hasCutoff {
 		query = query.Where("created_at >= ?", cutoff)
 	}
-	if err := query.First(&log).Error; err != nil {
+	if err := query.Omit("request_parameters_json", "request_body", "response_body").First(&log).Error; err != nil {
 		return nil, err
 	}
 	view, err := s.relayRequestView(ctx, log, true, true)
