@@ -33,7 +33,9 @@ const (
 )
 
 type codexDelegation struct {
-	SourceThreadID string `xml:"source_thread_id"`
+	SourceThreadID  string `xml:"source_thread_id"`
+	ParentThreadID  string `xml:"parent_thread_id"`
+	ParentSessionID string `xml:"parent_session_id"`
 }
 
 var codexAuxiliarySessionSources = []string{codexTitleSessionSource, codexGuardianSessionSource}
@@ -155,16 +157,57 @@ func codexParentSessionIDFromBody(body []byte, currentSessionID string, threadSo
 	if !ok {
 		return ""
 	}
-	input, _ := payload["input"].([]any)
-	for _, item := range input {
-		message, _ := item.(map[string]any)
-		if message == nil {
-			continue
+	if parentID := codexParentSessionIDFromMetadata(payload, currentSessionID); parentID != "" {
+		return parentID
+	}
+	for _, key := range []string{"input", "messages"} {
+		if parentID := codexParentSessionIDFromValue(payload[key], currentSessionID); parentID != "" {
+			return parentID
 		}
-		content, _ := message["content"].([]any)
-		for _, part := range content {
-			contentPart, _ := part.(map[string]any)
-			if parentID := codexParentSessionIDFromText(stringValue(contentPart["text"]), currentSessionID); parentID != "" {
+	}
+	return ""
+}
+
+func codexParentSessionIDFromMetadata(payload map[string]any, currentSessionID string) string {
+	for _, containerKey := range []string{"client_metadata", "metadata"} {
+		metadata, _ := payload[containerKey].(map[string]any)
+		if parentID := codexParentSessionIDFromMap(metadata, currentSessionID); parentID != "" {
+			return parentID
+		}
+		if turnMetadata := codexTurnMetadata(metadata["x-codex-turn-metadata"]); turnMetadata != nil {
+			if parentID := codexParentSessionIDFromMap(turnMetadata, currentSessionID); parentID != "" {
+				return parentID
+			}
+		}
+	}
+	return codexParentSessionIDFromMap(payload, currentSessionID)
+}
+
+func codexParentSessionIDFromMap(values map[string]any, currentSessionID string) string {
+	for _, key := range []string{"parent_session_id", "parentSessionId", "parent_thread_id", "parentThreadId", "source_thread_id", "sourceThreadId"} {
+		if parentID := validCodexParentSessionID(stringValue(values[key]), currentSessionID); parentID != "" {
+			return parentID
+		}
+	}
+	return ""
+}
+
+func codexParentSessionIDFromValue(value any, currentSessionID string) string {
+	switch typed := value.(type) {
+	case string:
+		return codexParentSessionIDFromText(typed, currentSessionID)
+	case []any:
+		for _, item := range typed {
+			if parentID := codexParentSessionIDFromValue(item, currentSessionID); parentID != "" {
+				return parentID
+			}
+		}
+	case map[string]any:
+		if parentID := codexParentSessionIDFromMap(typed, currentSessionID); parentID != "" {
+			return parentID
+		}
+		for _, key := range []string{"text", "content", "input"} {
+			if parentID := codexParentSessionIDFromValue(typed[key], currentSessionID); parentID != "" {
 				return parentID
 			}
 		}
@@ -188,14 +231,23 @@ func codexParentSessionIDFromText(text string, currentSessionID string) string {
 		end += start + len(startTag) + len(endTag)
 		var delegation codexDelegation
 		if xml.Unmarshal([]byte(text[start:end]), &delegation) == nil {
-			parentID := strings.TrimSpace(delegation.SourceThreadID)
-			if parentID != "" && len([]rune(parentID)) <= 512 && parentID != strings.TrimSpace(currentSessionID) {
-				return parentID
+			for _, candidate := range []string{delegation.SourceThreadID, delegation.ParentThreadID, delegation.ParentSessionID} {
+				if parentID := validCodexParentSessionID(candidate, currentSessionID); parentID != "" {
+					return parentID
+				}
 			}
 		}
 		searchFrom = end
 	}
 	return ""
+}
+
+func validCodexParentSessionID(value string, currentSessionID string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len([]rune(value)) > 512 || value == strings.TrimSpace(currentSessionID) {
+		return ""
+	}
+	return value
 }
 
 func normalizeCodexThreadSource(source string) string {

@@ -40,6 +40,17 @@ func TestCodexParentSessionIDFromBody(t *testing.T) {
 	}
 }
 
+func TestCodexParentSessionIDSupportsLatestMetadataAndChatShapes(t *testing.T) {
+	metadataBody := []byte(`{"metadata":{"thread_source":"subagent","parent_thread_id":"parent-from-metadata"},"messages":[{"role":"user","content":"continue"}]}`)
+	if got := codexParentSessionIDFromBody(metadataBody, "child-session", codexThreadSourceSubagent); got != "parent-from-metadata" {
+		t.Fatalf("metadata parent session = %q", got)
+	}
+	chatBody := []byte(`{"messages":[{"role":"user","content":"<codex_delegation><parent_session_id>parent-from-chat</parent_session_id></codex_delegation>"}]}`)
+	if got := codexParentSessionIDFromBody(chatBody, "child-session", codexThreadSourceSubagent); got != "parent-from-chat" {
+		t.Fatalf("chat parent session = %q", got)
+	}
+}
+
 func TestCompactSessionPayloadPersistsParentSession(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().UTC()

@@ -17,7 +17,8 @@ function shortSessionID(value: string): string {
 </script>
 
 <template>
-  <div v-if="session.parentSessionId || session.childCount > 0" class="session-relation" aria-label="会话父子关系">
+  <div v-if="session.parentSessionId || session.childCount > 0 || session.threadSource === 'subagent'" class="session-relation" aria-label="会话父子关系">
+    <span v-if="session.threadSource === 'subagent' && !session.parentSessionId" class="relation-label">子会话 · 父会话未识别</span>
     <span v-if="session.childCount > 0" class="relation-label">主会话 · {{ session.childCount }} 个子会话</span>
     <template v-if="session.parentSessionId">
       <span v-if="session.childCount > 0" class="relation-separator">·</span>

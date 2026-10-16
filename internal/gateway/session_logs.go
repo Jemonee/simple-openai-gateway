@@ -584,7 +584,11 @@ func (s *ManagementService) populateSessionSummary(ctx context.Context, summary 
 		summary.SessionID = latest.CodexSessionID
 		summary.SessionSource = latest.CodexSessionSource
 	} else {
-		summary.SessionSource = "unavailable"
+		summary.SessionSource = sessionUnavailable
+		if latest.ClientKind == agentClientKindDSH && latest.CodexSessionSource == dshSubagentUnavailableSource {
+			summary.SessionSource = dshSubagentUnavailableSource
+			summary.ThreadSource = codexThreadSourceSubagent
+		}
 		summary.FallbackRequestID = latest.ID
 	}
 	if summary.SessionSource == "" {

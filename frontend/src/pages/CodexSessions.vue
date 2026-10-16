@@ -111,6 +111,9 @@ function sessionClientSource(session: CodexSessionSummary): { label: string; kin
   const sessionSource = session.sessionSource?.trim().toLowerCase() ?? ''
   if (clientKind === 'web_chat' || sessionSource === 'web_chat') return { label: '网页聊天', kind: 'web-chat' }
   if (clientKind === 'copilot' || sessionSource.startsWith('copilot')) return { label: 'Copilot', kind: 'copilot' }
+  if (clientKind === 'dsh' || sessionSource.startsWith('dsh.header.') || sessionSource === 'dsh_chat.first_user') {
+    return { label: sessionSource === 'dsh_chat.first_user' ? 'DSH · 推断会话' : 'DSH', kind: 'codex' }
+  }
   if (clientKind === 'codex' || sessionSource === 'prompt_cache_key' || sessionSource.startsWith('client_metadata.') || sessionSource.startsWith('metadata.')) {
     return { label: 'Codex', kind: 'codex' }
   }

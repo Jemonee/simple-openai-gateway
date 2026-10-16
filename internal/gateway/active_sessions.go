@@ -58,25 +58,53 @@ func activeSessionRows(db *gorm.DB, query ActiveSessionQuery) *gorm.DB {
 		Joins("JOIN relay_request_logs AS latest_request ON latest_request.id = session_state.latest_request_id").
 		Joins("LEFT JOIN client_tokens AS client_token ON client_token.id = session_state.token_id")
 	explicitSources := make([]string, 0, len(query.Sources))
+	includeDSH := false
 	includeOther := false
 	for _, source := range query.Sources {
+		if source == "dsh" {
+			includeDSH = true
+			continue
+		}
 		if source == activeSessionOtherSource {
 			includeOther = true
 			continue
 		}
 		explicitSources = append(explicitSources, source)
 	}
-	switch {
-	case includeOther && len(explicitSources) > 0:
-		db = db.Where(
-			"(session_state.thread_source IN ? OR COALESCE(session_state.thread_source, '') NOT IN ?)",
-			explicitSources,
-			knownActiveSessionSources,
-		)
-	case includeOther:
-		db = db.Where("COALESCE(session_state.thread_source, '') NOT IN ?", knownActiveSessionSources)
-	default:
-		db = db.Where("session_state.thread_source IN ?", explicitSources)
+	if includeDSH {
+		dshFilter := "(session_state.client_kind = ? OR session_state.session_source LIKE ? OR session_state.session_source = ?)"
+		dshArgs := []any{agentClientKindDSH, "dsh.header.%", dshChatFirstUserSource}
+		if len(explicitSources) > 0 || includeOther {
+			conditions := []string{dshFilter}
+			args := append([]any{}, dshArgs...)
+			if len(explicitSources) > 0 {
+				conditions = append(conditions, "session_state.thread_source IN ?")
+				args = append(args, explicitSources)
+			}
+			if includeOther {
+				conditions = append(conditions, "COALESCE(session_state.thread_source, '') NOT IN ?")
+				args = append(args, knownActiveSessionSources)
+			}
+			db = db.Where("("+strings.Join(conditions, " OR ")+")", args...)
+		} else {
+			db = db.Where(dshFilter, dshArgs...)
+		}
+		explicitSources = nil
+		includeOther = false
+	}
+	if !includeDSH {
+		switch {
+		case includeOther && len(explicitSources) > 0:
+			db = db.Where(
+				"(session_state.thread_source IN ? OR COALESCE(session_state.thread_source, '') NOT IN ?)",
+				explicitSources,
+				knownActiveSessionSources,
+			)
+		case includeOther:
+			db = db.Where("COALESCE(session_state.thread_source, '') NOT IN ?", knownActiveSessionSources)
+		default:
+			db = db.Where("session_state.thread_source IN ?", explicitSources)
+		}
 	}
 	db = db.Where("session_state.last_activity_at >= ?", utcQueryTime(query.ActiveSince))
 	if query.TokenID > 0 {

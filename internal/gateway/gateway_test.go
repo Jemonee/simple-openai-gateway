@@ -2397,6 +2397,131 @@ func TestParseRelayPayloadExtractsCodexSessionKey(t *testing.T) {
 	}
 }
 
+func TestCodexHeaderSessionFallbackIdentifiesSameSession(t *testing.T) {
+	store := newTestStore(t)
+	body := []byte(`{"model":"public-model","messages":[{"role":"user","content":"hello"}]}`)
+	headers := http.Header{
+		"User-Agent":         []string{"pi-codex/1.0"},
+		"X-Session-Affinity": []string{"dsh-session-1"},
+	}
+	for index := 0; index < 2; index++ {
+		payload, err := ParseRelayPayload(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolution, err := store.resolveAgentSession(context.Background(), agentSessionRequest{
+			TokenID: 7, Endpoint: "chat", Headers: headers, Payload: payload, Body: body, Now: time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		applyAgentSessionResolution(payload, resolution)
+		if payload.SessionKey != "dsh-session-1" || payload.SessionSource != codexHeaderAffinitySource || payload.ClientKind != agentClientKindCodex {
+			t.Fatalf("header session identity on request %d = %+v", index+1, payload)
+		}
+	}
+
+	otherHeaders := http.Header{"Session-Id": []string{"dsh-session-2"}}
+	otherPayload, err := ParseRelayPayload(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.resolveAgentSession(context.Background(), agentSessionRequest{
+		TokenID: 7, Endpoint: "chat", Headers: otherHeaders, Payload: otherPayload, Body: body, Now: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyAgentSessionResolution(otherPayload, other)
+	if otherPayload.SessionKey != "dsh-session-2" || otherPayload.SessionKey == "dsh-session-1" {
+		t.Fatalf("different header session was merged: %+v", otherPayload)
+	}
+}
+
+func TestCodexStableSessionHeaderOverridesSharedCacheKey(t *testing.T) {
+	store := newTestStore(t)
+	body := []byte(`{"model":"public-model","prompt_cache_key":"shared-parent-cache","metadata":{"thread_source":"subagent"}}`)
+	payload, err := ParseRelayPayload(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolution, err := store.resolveAgentSession(context.Background(), agentSessionRequest{
+		Endpoint: "responses", Headers: http.Header{"X-Session-Id": []string{"child-session"}}, Payload: payload, Body: body,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyAgentSessionResolution(payload, resolution)
+	if payload.SessionKey != "child-session" || payload.SessionSource != codexHeaderSessionSource || payload.ThreadSource != codexThreadSourceSubagent {
+		t.Fatalf("stable child identity = %+v", payload)
+	}
+}
+
+func TestCodexRejectsOversizedStableSessionHeader(t *testing.T) {
+	payload, err := ParseRelayPayload([]byte(`{"model":"public-model","prompt_cache_key":"fallback-cache"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolution, err := (&Store{}).resolveAgentSession(context.Background(), agentSessionRequest{
+		Headers: http.Header{"X-Session-Id": []string{strings.Repeat("x", 513)}}, Payload: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyAgentSessionResolution(payload, resolution)
+	if payload.SessionKey != "fallback-cache" || payload.SessionSource != "prompt_cache_key" {
+		t.Fatalf("oversized header changed payload identity: %+v", payload)
+	}
+}
+
+func TestCodexPayloadSessionFallbackUsesExplicitThreadID(t *testing.T) {
+	payload, err := ParseRelayPayload([]byte(`{"model":"public-model","thread_id":"thread-session","metadata":{"thread_source":"subagent"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolution, err := (&Store{}).resolveAgentSession(context.Background(), agentSessionRequest{Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyAgentSessionResolution(payload, resolution)
+	if payload.SessionKey != "thread-session" || payload.SessionSource != "codex.payload.thread_id" {
+		t.Fatalf("payload thread identity = %+v", payload)
+	}
+}
+
+func TestDSHChatFirstUserFallbackKeepsGrowingConversationTogether(t *testing.T) {
+	store := newTestStore(t)
+	firstBody := dshSessionTestBody(t, "first request", false)
+	secondBody := dshSessionTestBody(t, "first request", false,
+		map[string]any{"role": "assistant", "content": "first answer"},
+		map[string]any{"role": "user", "content": "second request"})
+	otherBody := dshSessionTestBody(t, "another conversation", false)
+
+	resolve := func(body []byte) agentSessionIdentity {
+		payload, err := ParseRelayPayload(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolution, err := store.resolveAgentSession(context.Background(), agentSessionRequest{
+			TokenID: 7, Endpoint: "chat", Headers: http.Header{}, Payload: payload, Body: body, Now: time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resolution.Identity
+	}
+
+	first := resolve(firstBody)
+	second := resolve(secondBody)
+	other := resolve(otherBody)
+	if first.ID == "" || first.ID != second.ID || first.Source != dshChatFirstUserSource || second.Source != dshChatFirstUserSource {
+		t.Fatalf("growing conversation identities = first:%+v second:%+v", first, second)
+	}
+	if other.ID == "" || other.ID == first.ID {
+		t.Fatalf("different conversation identity = %+v, first = %+v", other, first)
+	}
+}
+
 func TestSessionCandidateIndexesAreCreated(t *testing.T) {
 	store := newTestStore(t)
 	indexes := []struct {
