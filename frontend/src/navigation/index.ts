@@ -8,6 +8,7 @@ import {
   Aim,
   DataBoard,
   Grid,
+  Picture,
   Key,
   Reading,
   Setting,
@@ -71,6 +72,15 @@ export const navigationGroups: NavigationGroup[] = [
         label: '网页对话',
         icon: ChatDotRound,
         component: () => import('@/pages/WebChat.vue'),
+        workspaceMode: 'contained',
+      },
+      {
+        key: 'image-generation',
+        path: '/image-generation',
+        routeName: 'image-generation',
+        label: 'AI 生图',
+        icon: Picture,
+        component: () => import('@/pages/ImageGeneration.vue'),
         workspaceMode: 'contained',
       },
       {

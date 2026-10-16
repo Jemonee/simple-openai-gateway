@@ -1631,3 +1631,23 @@ export interface WebChatCompletionResponse {
   /** Estimated gateway cost in micro-USD. */
   estimatedCostMicros: number
 }
+
+export interface ImageGenerationRequest {
+  model: string
+  channelId: number
+  prompt: string
+  size: '1K' | '2K' | '4K'
+  quality: 'low' | 'medium' | 'high'
+}
+
+export interface ImageGenerationResponse {
+  requestId: string
+  images: string[]
+  model: string
+  channelId: number
+  channelName: string
+  upstreamModel: string
+  inputTokens: number
+  outputTokens: number
+  estimatedCostMicros: number
+}

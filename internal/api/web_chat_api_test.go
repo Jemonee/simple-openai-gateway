@@ -26,3 +26,23 @@ func TestValidateWebChatRequest(t *testing.T) {
 		t.Fatalf("normalized input = %+v", input)
 	}
 }
+
+func TestValidateImageGenerationRequest(t *testing.T) {
+	input := imageGenerationRequest{Model: " gpt-image-2.5-flare ", Prompt: " sunset ", Size: "2k", Quality: "HIGH"}
+	if err := validateImageGenerationRequest(&input); err != nil {
+		t.Fatal(err)
+	}
+	if input.Model != "gpt-image-2.5-flare" || input.Prompt != "sunset" || input.Size != "2K" || input.Quality != "high" {
+		t.Fatalf("normalized input = %+v", input)
+	}
+	if err := validateImageGenerationRequest(&imageGenerationRequest{Model: "gpt-image-2.5-flare", Prompt: "sunset", Size: "1024x1024", Quality: "high"}); err == nil {
+		t.Fatal("unsupported size passed validation")
+	}
+}
+
+func TestImageGenerationURLsSupportsURLAndBase64(t *testing.T) {
+	images, err := imageGenerationURLs([]byte(`{"data":[{"url":"https://example.com/image.png"},{"b64_json":"aW1hZ2U="}]}`))
+	if err != nil || len(images) != 2 || images[0] != "https://example.com/image.png" || images[1] != "data:image/png;base64,aW1hZ2U=" {
+		t.Fatalf("images = %#v, err = %v", images, err)
+	}
+}
