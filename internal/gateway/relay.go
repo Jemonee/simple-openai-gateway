@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -476,9 +477,10 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 		upstreamBaseURL = ChatGPTCodexBaseURL
 		upstreamEndpoint = "responses"
 	}
-	upstreamURL := upstreamBaseURL + "/" + endpointPath(upstreamEndpoint)
-	if rawQuery != "" {
-		upstreamURL += "?" + rawQuery
+	upstreamURL, err := upstreamRequestURL(upstreamBaseURL, upstreamEndpoint, rawQuery)
+	if err != nil {
+		execution.trace.Record(RelayStageUpstreamRequestBuild, RelayStepCategoryGateway, attempt, requestBuildStarted, err, "channel="+candidate.Channel.Name)
+		return s.recordPreparationFailure(ctx, execution, candidate, selection, "request_url", body, err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(body))
 	if err != nil {
@@ -1051,6 +1053,25 @@ func endpointPath(endpoint string) string {
 		return endpoint
 	}
 	return "chat/completions"
+}
+
+// upstreamRequestURL joins a normalized channel URL with the public endpoint
+// without string concatenation. It preserves a configured provider prefix and
+// keeps client query parameters out of the path even when legacy rows contain
+// a trailing slash.
+func upstreamRequestURL(baseURL string, endpoint string, rawQuery string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", errors.New("upstream base URL is invalid")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", errors.New("upstream base URL must use HTTP or HTTPS")
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/" + endpointPath(endpoint)
+	parsed.RawPath = ""
+	parsed.RawQuery = rawQuery
+	parsed.Fragment = ""
+	return parsed.String(), nil
 }
 
 func isImagesEndpoint(endpoint string) bool {

@@ -9,6 +9,19 @@ import (
 	"time"
 )
 
+func TestUpstreamRequestURLPreservesProviderPrefixAndQuery(t *testing.T) {
+	value, err := upstreamRequestURL("https://provider.example/api/v1/", "responses", "stream=true&include=reasoning.encrypted_content")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "https://provider.example/api/v1/responses?stream=true&include=reasoning.encrypted_content" {
+		t.Fatalf("upstream URL = %q", value)
+	}
+	if _, err := upstreamRequestURL("ftp://provider.example/v1", "chat", ""); err == nil {
+		t.Fatal("non-HTTP upstream URL was accepted")
+	}
+}
+
 func TestHTTPClientWithProxySupportsSOCKS5(t *testing.T) {
 	client, err := httpClientWithProxy("socks5://user:pass@127.0.0.1:1080", 0)
 	if err != nil {
