@@ -10,11 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 func httpClientWithProxy(proxyURL string, timeout time.Duration) (*http.Client, error) {
@@ -24,7 +27,29 @@ func httpClientWithProxy(proxyURL string, timeout time.Duration) (*http.Client, 
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			return nil, errors.New("invalid proxy URL")
 		}
-		transport.Proxy = http.ProxyURL(parsed)
+		switch strings.ToLower(parsed.Scheme) {
+		case "http", "https":
+			transport.Proxy = http.ProxyURL(parsed)
+		case "socks5", "socks5h":
+			var auth *proxy.Auth
+			if parsed.User != nil {
+				password, _ := parsed.User.Password()
+				auth = &proxy.Auth{User: parsed.User.Username(), Password: password}
+			}
+			dialer, dialErr := proxy.SOCKS5("tcp", parsed.Host, auth, proxy.Direct)
+			if dialErr != nil {
+				return nil, fmt.Errorf("configure SOCKS5 proxy: %w", dialErr)
+			}
+			transport.Proxy = nil
+			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
+					return contextDialer.DialContext(ctx, network, address)
+				}
+				return dialer.Dial(network, address)
+			}
+		default:
+			return nil, errors.New("proxy URL must use HTTP, HTTPS, SOCKS5, or SOCKS5H")
+		}
 	}
 	return &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}, nil
 }

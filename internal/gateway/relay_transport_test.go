@@ -9,6 +9,20 @@ import (
 	"time"
 )
 
+func TestHTTPClientWithProxySupportsSOCKS5(t *testing.T) {
+	client, err := httpClientWithProxy("socks5://user:pass@127.0.0.1:1080", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.DialContext == nil || transport.Proxy != nil {
+		t.Fatalf("SOCKS5 transport = %#v", client.Transport)
+	}
+	if _, err := normalizeProxyURL("socks5h://127.0.0.1:1080"); err != nil {
+		t.Fatalf("SOCKS5H normalization failed: %v", err)
+	}
+}
+
 func TestDynamicResponseHeaderTransportAppliesUpdatedTimeout(t *testing.T) {
 	var timeoutNanos atomic.Int64
 	timeoutNanos.Store(int64(20 * time.Millisecond))

@@ -353,8 +353,8 @@ func normalizeProxyURL(value string) (string, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", errors.New("proxy URL must be an absolute HTTP or HTTPS URL")
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", errors.New("proxy URL must use HTTP or HTTPS")
+	if parsed.Scheme != "http" && parsed.Scheme != "https" && parsed.Scheme != "socks5" && parsed.Scheme != "socks5h" {
+		return "", errors.New("proxy URL must use HTTP, HTTPS, SOCKS5, or SOCKS5H")
 	}
 	if parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", errors.New("proxy URL cannot contain query parameters or fragments")
