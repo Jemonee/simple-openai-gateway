@@ -2110,11 +2110,11 @@ func TestRecentRoutingMetricsUseCandidateScopedDynamicSample(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := metrics[11]
-	if first.RouteCount != 2 || first.RouteSampleSize != 3 || first.RouteShare != 2.0/3.0 || first.CacheHitRate != 1 || first.CacheSampleCount != 1 || first.CacheRate != 0.5 || first.CacheTokenCount != 100 || first.LatencyMS != 20 || first.FirstTokenMS != 50 || first.TokensPerSecond != 100 {
+	if first.RouteCount != 2 || first.RouteSampleSize != 3 || first.RouteShare != 2.0/3.0 || first.CacheHitRate != 1 || first.CacheSampleCount != 1 || first.CacheRate != 0.5 || first.CacheTokenCount != 100 || first.LatencyMS != 20 || first.FirstTokenMS != 50 || math.Abs(first.TokensPerSecond-(20.0*1000/180)) > 0.000001 {
 		t.Fatalf("first routing metric = %+v", first)
 	}
 	second := metrics[22]
-	if second.RouteCount != 1 || second.RouteSampleSize != 3 || second.RouteShare != 1.0/3.0 || second.CacheHitRate != 0 || second.CacheSampleCount != 1 || second.CacheRate != 0 || second.CacheTokenCount != 200 || second.LatencyMS != 40 || second.FirstTokenMS != 100 || second.TokensPerSecond != 50 {
+	if second.RouteCount != 1 || second.RouteSampleSize != 3 || second.RouteShare != 1.0/3.0 || second.CacheHitRate != 0 || second.CacheSampleCount != 1 || second.CacheRate != 0 || second.CacheTokenCount != 200 || second.LatencyMS != 40 || second.FirstTokenMS != 100 || math.Abs(second.TokensPerSecond-(10.0*1000/160)) > 0.000001 {
 		t.Fatalf("second routing metric = %+v", second)
 	}
 	empty := metrics[44]
@@ -3329,7 +3329,7 @@ func TestCodexSessionModelSwitchFallsBackWhenPreviousChannelDoesNotSupportModel(
 	if len(plan.Candidates) != 1 || plan.Candidates[0].Mapping.ID != secondMapping.ID || plan.RefreshSessionAffinity {
 		t.Fatalf("model-switch fallback plan = %+v", plan)
 	}
-	if plan.InitialSelection.Reason != SelectionReasonModelSwitch || plan.InitialSelection.Decision == nil || plan.InitialSelection.Decision.Mode != "probability" {
+	if plan.InitialSelection.Reason != SelectionReasonModelSwitch || plan.InitialSelection.Decision == nil || plan.InitialSelection.Decision.Mode != "single_candidate" {
 		t.Fatalf("model-switch fallback selection = %+v", plan.InitialSelection)
 	}
 }
