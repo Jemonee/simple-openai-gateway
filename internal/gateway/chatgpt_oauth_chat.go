@@ -71,6 +71,17 @@ func chatGPTResponsesSSEToChatCompletion(body []byte, model string) ([]byte, err
 	return json.Marshal(state.chatCompletion())
 }
 
+func chatGPTResponsesJSONToChatCompletion(body []byte, model string) ([]byte, error) {
+	var response map[string]any
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+	state := newChatGPTOAuthResponseAccumulator(model)
+	state.observeResponse(response)
+	state.Completed = true
+	return json.Marshal(state.chatCompletion())
+}
+
 func (s *chatGPTOAuthResponseAccumulator) observe(event map[string]any) {
 	typeName := strings.ToLower(stringValue(event["type"]))
 	if response, ok := event["response"].(map[string]any); ok {
@@ -119,6 +130,9 @@ func (s *chatGPTOAuthResponseAccumulator) observeResponse(response map[string]an
 	}
 	if usage, ok := response["usage"].(map[string]any); ok {
 		s.Usage = usage
+	}
+	if outputText := rawStringValue(response["output_text"]); outputText != "" {
+		s.Text.WriteString(outputText)
 	}
 	output, _ := response["output"].([]any)
 	if len(output) == 0 {

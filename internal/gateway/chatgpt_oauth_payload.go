@@ -6,37 +6,326 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"sort"
 	"strings"
 )
 
 func chatGPTResponsesSSEToJSON(body []byte) ([]byte, error) {
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	scanner.Buffer(make([]byte, 64*1024), maxBufferedResponseBytes)
-	var completed map[string]any
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(line, "data:") {
-			continue
+	state := newChatGPTOAuthResponsesAccumulator()
+	reader := bufio.NewReader(bytes.NewReader(body))
+	for {
+		event, err := readSSEEventWithLimit(reader, "responses", maxSSEEventBytes)
+		if payload, ok := firstSSEPayload(event); ok {
+			state.observe(payload)
 		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if data == "" || data == "[DONE]" {
-			continue
-		}
-		var event map[string]any
-		if json.Unmarshal([]byte(data), &event) != nil {
-			continue
-		}
-		if response, ok := event["response"].(map[string]any); ok {
-			completed = response
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				return nil, err
+			}
+			break
 		}
 	}
-	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
-	}
-	if completed == nil {
+	if !state.Terminal || state.Response == nil {
 		return nil, errors.New("ChatGPT OAuth upstream did not return a completed response")
 	}
-	return json.Marshal(completed)
+	return json.Marshal(state.finalResponse())
+}
+
+type chatGPTOAuthResponsesAccumulator struct {
+	Response map[string]any
+	Output   map[int]map[string]any
+	Terminal bool
+}
+
+func newChatGPTOAuthResponsesAccumulator() *chatGPTOAuthResponsesAccumulator {
+	return &chatGPTOAuthResponsesAccumulator{Output: make(map[int]map[string]any)}
+}
+
+func (s *chatGPTOAuthResponsesAccumulator) observe(event map[string]any) {
+	typeName := strings.ToLower(stringValue(event["type"]))
+	if response, ok := event["response"].(map[string]any); ok {
+		s.observeResponse(response)
+	}
+	outputIndex := jsonInt(event["output_index"])
+	switch typeName {
+	case "response.output_item.added", "response.output_item.done":
+		if item, ok := event["item"].(map[string]any); ok {
+			s.mergeOutputItem(outputIndex, item)
+		}
+	case "response.content_part.added", "response.content_part.done":
+		if part, ok := event["part"].(map[string]any); ok {
+			s.mergeIndexedPart(outputIndex, "content", jsonInt(event["content_index"]), part, "message")
+		}
+	case "response.output_text.delta":
+		part := s.ensureIndexedPart(outputIndex, "content", jsonInt(event["content_index"]), "message", "output_text")
+		part["text"] = rawStringValue(part["text"]) + rawStringValue(event["delta"])
+	case "response.output_text.done":
+		part := s.ensureIndexedPart(outputIndex, "content", jsonInt(event["content_index"]), "message", "output_text")
+		if text := rawStringValue(event["text"]); text != "" {
+			part["text"] = text
+		}
+	case "response.refusal.delta":
+		part := s.ensureIndexedPart(outputIndex, "content", jsonInt(event["content_index"]), "message", "refusal")
+		part["refusal"] = rawStringValue(part["refusal"]) + rawStringValue(event["delta"])
+	case "response.refusal.done":
+		part := s.ensureIndexedPart(outputIndex, "content", jsonInt(event["content_index"]), "message", "refusal")
+		if refusal := rawStringValue(event["refusal"]); refusal != "" {
+			part["refusal"] = refusal
+		}
+	case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
+		if part, ok := event["part"].(map[string]any); ok {
+			s.mergeIndexedPart(outputIndex, "summary", jsonInt(event["summary_index"]), part, "reasoning")
+		}
+	case "response.reasoning_summary_text.delta":
+		part := s.ensureIndexedPart(outputIndex, "summary", jsonInt(event["summary_index"]), "reasoning", "summary_text")
+		part["text"] = rawStringValue(part["text"]) + rawStringValue(event["delta"])
+	case "response.reasoning_summary_text.done":
+		part := s.ensureIndexedPart(outputIndex, "summary", jsonInt(event["summary_index"]), "reasoning", "summary_text")
+		if text := rawStringValue(event["text"]); text != "" {
+			part["text"] = text
+		}
+	case "response.function_call_arguments.delta":
+		item := s.ensureOutputItem(outputIndex, "function_call")
+		item["arguments"] = rawStringValue(item["arguments"]) + rawStringValue(event["delta"])
+	case "response.function_call_arguments.done":
+		item := s.ensureOutputItem(outputIndex, "function_call")
+		if arguments := rawStringValue(event["arguments"]); arguments != "" {
+			item["arguments"] = arguments
+		}
+	case "response.custom_tool_call_input.delta":
+		item := s.ensureOutputItem(outputIndex, "custom_tool_call")
+		item["input"] = rawStringValue(item["input"]) + rawStringValue(event["delta"])
+	case "response.custom_tool_call_input.done":
+		item := s.ensureOutputItem(outputIndex, "custom_tool_call")
+		if input := rawStringValue(event["input"]); input != "" {
+			item["input"] = input
+		}
+	case "response.completed", "response.incomplete", "response.failed", "response.done":
+		s.Terminal = true
+	}
+}
+
+func (s *chatGPTOAuthResponsesAccumulator) observeResponse(response map[string]any) {
+	if s.Response == nil {
+		s.Response = make(map[string]any, len(response))
+	}
+	for key, value := range response {
+		if key == "output" {
+			continue
+		}
+		s.Response[key] = value
+	}
+	if output, ok := response["output"].([]any); ok {
+		for index, rawItem := range output {
+			if item, ok := rawItem.(map[string]any); ok {
+				s.mergeOutputItem(index, item)
+			}
+		}
+	}
+}
+
+func (s *chatGPTOAuthResponsesAccumulator) ensureOutputItem(index int, itemType string) map[string]any {
+	if index < 0 {
+		index = 0
+	}
+	item := s.Output[index]
+	if item == nil {
+		item = map[string]any{"type": itemType}
+		s.Output[index] = item
+	}
+	if stringValue(item["type"]) == "" {
+		item["type"] = itemType
+	}
+	return item
+}
+
+func (s *chatGPTOAuthResponsesAccumulator) mergeOutputItem(index int, incoming map[string]any) {
+	item := s.ensureOutputItem(index, stringValue(incoming["type"]))
+	mergeChatGPTOAuthResponseMap(item, incoming)
+}
+
+func (s *chatGPTOAuthResponsesAccumulator) ensureIndexedPart(outputIndex int, field string, partIndex int, itemType string, partType string) map[string]any {
+	item := s.ensureOutputItem(outputIndex, itemType)
+	parts, _ := item[field].([]any)
+	for len(parts) <= partIndex {
+		parts = append(parts, nil)
+	}
+	part, _ := parts[partIndex].(map[string]any)
+	if part == nil {
+		part = map[string]any{"type": partType}
+		parts[partIndex] = part
+	}
+	item[field] = parts
+	return part
+}
+
+func (s *chatGPTOAuthResponsesAccumulator) mergeIndexedPart(outputIndex int, field string, partIndex int, incoming map[string]any, itemType string) {
+	part := s.ensureIndexedPart(outputIndex, field, partIndex, itemType, stringValue(incoming["type"]))
+	mergeChatGPTOAuthResponseMap(part, incoming)
+}
+
+func mergeChatGPTOAuthResponseMap(target map[string]any, incoming map[string]any) {
+	for key, value := range incoming {
+		if nested, ok := value.(map[string]any); ok {
+			current, _ := target[key].(map[string]any)
+			if current == nil {
+				current = make(map[string]any)
+				target[key] = current
+			}
+			mergeChatGPTOAuthResponseMap(current, nested)
+			continue
+		}
+		if values, ok := value.([]any); ok && len(values) == 0 {
+			if current, exists := target[key].([]any); exists && len(current) > 0 {
+				continue
+			}
+		}
+		target[key] = value
+	}
+}
+
+func (s *chatGPTOAuthResponsesAccumulator) finalResponse() map[string]any {
+	indices := make([]int, 0, len(s.Output))
+	for index := range s.Output {
+		indices = append(indices, index)
+	}
+	sort.Ints(indices)
+	output := make([]any, 0, len(indices))
+	for _, index := range indices {
+		output = append(output, s.Output[index])
+	}
+	s.Response["output"] = output
+	return s.Response
+}
+
+func chatGPTOAuthResponseIsSSE(header http.Header, body []byte) bool {
+	if isEventStream(header) {
+		return true
+	}
+	for _, line := range bytes.Split(bytes.TrimSpace(body), []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("data:")) || bytes.HasPrefix(line, []byte("event:")) {
+			return true
+		}
+	}
+	return false
+}
+
+func adaptChatGPTOAuthBufferedResponse(header http.Header, body []byte, endpoint string, model string) ([]byte, bool, error) {
+	if chatGPTOAuthResponseIsSSE(header, body) {
+		if endpoint == "chat" {
+			converted, err := chatGPTResponsesSSEToChatCompletion(body, model)
+			return converted, true, err
+		}
+		if endpoint == "responses" {
+			converted, err := chatGPTResponsesSSEToJSON(body)
+			return converted, true, err
+		}
+	}
+	if endpoint == "chat" {
+		var response map[string]any
+		if err := json.Unmarshal(body, &response); err == nil {
+			if _, alreadyChat := response["choices"]; alreadyChat {
+				return body, false, nil
+			}
+			if status := strings.ToLower(strings.TrimSpace(stringValue(response["status"]))); status != "" {
+				switch status {
+				case "completed", "incomplete":
+					converted, convertErr := chatGPTResponsesJSONToChatCompletion(body, model)
+					return converted, true, convertErr
+				}
+			}
+			if _, hasOutput := response["output"]; hasOutput {
+				converted, convertErr := chatGPTResponsesJSONToChatCompletion(body, model)
+				return converted, true, convertErr
+			}
+		}
+	}
+	return body, false, nil
+}
+
+func adaptChatGPTOAuthBufferedResponseReader(reader io.Reader, header http.Header, endpoint string, model string, observe func([]byte)) ([]byte, bool, error) {
+	body, err := readChatGPTOAuthResponseBody(reader, observe)
+	if err != nil {
+		return body, false, err
+	}
+	return adaptChatGPTOAuthBufferedResponse(header, body, endpoint, model)
+}
+
+func readChatGPTOAuthResponseBody(reader io.Reader, observe func([]byte)) ([]byte, error) {
+	buffered := bufio.NewReader(reader)
+	body := bytes.NewBuffer(nil)
+	for {
+		event, err := readSSEEventWithLimit(buffered, "responses", maxSSEEventBytes)
+		if len(event) > 0 {
+			if body.Len()+len(event) > maxBufferedResponseBytes {
+				return body.Bytes(), errBufferedResponseTooLarge
+			}
+			_, _ = body.Write(event)
+			if observe != nil {
+				observe(event)
+			}
+			if sseEventIsTerminalSuccess(event, "responses") {
+				return body.Bytes(), nil
+			}
+			if _, failed := sseApplicationError(event); failed {
+				return body.Bytes(), nil
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return body.Bytes(), nil
+			}
+			return body.Bytes(), err
+		}
+	}
+}
+
+type chatGPTOAuthPrefixedReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+func prepareChatGPTOAuthStreamResponse(response *http.Response, endpoint string, model string, includeUsage bool) bool {
+	if response == nil {
+		return false
+	}
+	if !isEventStream(response.Header) {
+		originalBody := response.Body
+		buffered := bufio.NewReader(originalBody)
+		prefix, detected := probeChatGPTOAuthSSEPrefix(buffered)
+		response.Body = &chatGPTOAuthPrefixedReadCloser{
+			Reader: io.MultiReader(bytes.NewReader(prefix), buffered),
+			Closer: originalBody,
+		}
+		if !detected {
+			return false
+		}
+	}
+	if endpoint == "chat" {
+		response.Body = newChatGPTOAuthChatSSEReadCloser(response.Body, model, includeUsage)
+	}
+	response.Header.Del("Content-Length")
+	response.Header.Set("Content-Type", "text/event-stream")
+	return true
+}
+
+func probeChatGPTOAuthSSEPrefix(reader *bufio.Reader) ([]byte, bool) {
+	const maxProbeBytes = 64 << 10
+	var prefix bytes.Buffer
+	for prefix.Len() <= maxProbeBytes {
+		fragment, err := reader.ReadSlice('\n')
+		_, _ = prefix.Write(fragment)
+		line := bytes.TrimSpace(fragment)
+		if len(line) > 0 && !bytes.HasPrefix(line, []byte(":")) {
+			return prefix.Bytes(), bytes.HasPrefix(line, []byte("event:")) || bytes.HasPrefix(line, []byte("data:"))
+		}
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
+			return prefix.Bytes(), false
+		}
+	}
+	return prefix.Bytes(), false
 }
 
 var chatGPTOAuthUnsupportedFields = []string{

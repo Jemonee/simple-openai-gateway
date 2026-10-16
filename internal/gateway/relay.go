@@ -549,34 +549,44 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	execution.latencyMS = latency
 
 	response.Body = s.withIdleTimeout(response.Body)
-	if candidate.Channel.AuthType == ChannelTypeChatGPTOAuth && execution.endpoint == "chat" && isEventStream(response.Header) && response.StatusCode >= 200 && response.StatusCode < 300 && execution.payload.Stream {
-		response.Body = newChatGPTOAuthChatSSEReadCloser(response.Body, execution.payload.Model, chatStreamIncludesUsage(execution.payload))
-		response.Header.Del("Content-Length")
-		response.Header.Set("Content-Type", "text/event-stream")
+	if candidate.Channel.AuthType == ChannelTypeChatGPTOAuth && response.StatusCode >= 200 && response.StatusCode < 300 && execution.payload.Stream {
+		prepareChatGPTOAuthStreamResponse(response, execution.endpoint, execution.payload.Model, chatStreamIncludesUsage(execution.payload))
 	}
 	if execution.payload.Stream && isEventStream(response.Header) && response.StatusCode >= 200 && response.StatusCode < 300 {
 		return s.streamResponse(ctx, writer, execution, candidate, selection, response, started, latency, sentTokens, body)
 	}
 
-	responseReadStarted := time.Now()
-	responseBody, readErr := readUpstreamResponseBody(response.Body)
-	responseFinishedAt := time.Now()
-	_ = response.Body.Close()
-	if candidate.Channel.AuthType == ChannelTypeChatGPTOAuth && !execution.payload.Stream && isEventStream(response.Header) && readErr == nil {
-		var converted []byte
-		var convertErr error
-		if execution.endpoint == "chat" {
-			converted, convertErr = chatGPTResponsesSSEToChatCompletion(responseBody, execution.payload.Model)
-		} else {
-			converted, convertErr = chatGPTResponsesSSEToJSON(responseBody)
+	var bufferedFirstResponseMS int64
+	var bufferedFirstTokenMS int64
+	observeBufferedSSE := func(event []byte) {
+		if bufferedFirstResponseMS == 0 && sseEventHasData(event) {
+			bufferedFirstResponseMS = elapsedMilliseconds(started, time.Now())
 		}
-		if convertErr == nil {
-			responseBody = converted
+		if bufferedFirstTokenMS == 0 && sseEventHasOutputToken(event) {
+			bufferedFirstTokenMS = elapsedMilliseconds(started, time.Now())
+		}
+	}
+	responseReadStarted := time.Now()
+	var responseBody []byte
+	var readErr error
+	var adapted bool
+	if candidate.Channel.AuthType == ChannelTypeChatGPTOAuth && !execution.payload.Stream {
+		responseBody, adapted, readErr = adaptChatGPTOAuthBufferedResponseReader(response.Body, response.Header, execution.endpoint, execution.payload.Model, observeBufferedSSE)
+		if readErr == nil && adapted {
 			response.Header.Del("Content-Length")
 			response.Header.Set("Content-Type", "application/json")
-		} else if response.StatusCode >= 200 && response.StatusCode < 300 {
-			readErr = convertErr
 		}
+	} else {
+		responseBody, readErr = readUpstreamResponseBody(response.Body)
+	}
+	responseFinishedAt := time.Now()
+	_ = response.Body.Close()
+	applyBufferedMetrics := func(result *attemptResult) {
+		result.firstResponseMS = bufferedFirstResponseMS
+		result.firstTokenMS = bufferedFirstTokenMS
+		execution.firstResponseMS = bufferedFirstResponseMS
+		execution.firstTokenMS = bufferedFirstTokenMS
+		finalizeTokensPerSecond(result, execution, result.usage.OutputTokens)
 	}
 	execution.trace.Record(RelayStageResponseBodyRead, RelayStepCategoryUpstream, attempt, responseReadStarted, readErr,
 		fmt.Sprintf("status=%d bytes=%d", response.StatusCode, len(responseBody)))
@@ -594,6 +604,7 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 			costSource: CostSourceFailedZero, latencyMS: latency, durationMS: elapsedMilliseconds(started, responseFinishedAt),
 			retryReason: SelectionReasonRetryableStatus, retryDetail: fmt.Sprintf("HTTP %d", response.StatusCode),
 		}
+		applyBufferedMetrics(result)
 		attemptErr := readErr
 		failureMessage := fmt.Sprintf("HTTP %d", response.StatusCode)
 		if attemptErr == nil {
@@ -645,6 +656,7 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 			costSource: CostSourceFailedZero, latencyMS: latency, durationMS: elapsedMilliseconds(started, responseFinishedAt),
 			retryReason: SelectionReasonUpstreamApplicationError, retryDetail: truncateRunes(appErr.Message, 512),
 		}
+		applyBufferedMetrics(result)
 		if appErr.penalizesChannel() {
 			result.circuitOpenUntil = s.recordApplicationChannelFailure(logCtx, candidate, appErr)
 		} else {
@@ -674,6 +686,7 @@ func (s *RelayService) performAttempt(ctx context.Context, writer http.ResponseW
 	success := response.StatusCode >= 200 && response.StatusCode < 300 && readErr == nil
 	estimatedCost, upstreamCost, costSource := attemptCosts(candidate.Mapping, usage, responseBody, success)
 	result := &attemptResult{response: response, body: responseBody, requestBody: body, usage: usage, sentTokens: sentTokens, estimatedCost: estimatedCost, upstreamCost: upstreamCost, costSource: costSource, latencyMS: latency, durationMS: elapsedMilliseconds(started, responseFinishedAt)}
+	applyBufferedMetrics(result)
 	if readErr != nil {
 		result.retryReason = SelectionReasonResponseError
 		result.retryDetail = "response_body_read"

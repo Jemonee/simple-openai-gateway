@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -12,6 +13,26 @@ import (
 )
 
 type oauthRoundTripFunc func(*http.Request) (*http.Response, error)
+
+type delayedOAuthSSEReader struct {
+	chunks [][]byte
+	delay  time.Duration
+	index  int
+}
+
+func (r *delayedOAuthSSEReader) Read(destination []byte) (int, error) {
+	if r.index >= len(r.chunks) {
+		return 0, io.EOF
+	}
+	if r.index > 0 {
+		time.Sleep(r.delay)
+	}
+	chunk := r.chunks[r.index]
+	r.index++
+	return copy(destination, chunk), nil
+}
+
+func (r *delayedOAuthSSEReader) Close() error { return nil }
 
 func (f oauthRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return f(request)
@@ -72,8 +93,268 @@ func TestChatGPTResponsesSSEToJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(body) != `{"id":"resp_1","status":"completed"}` {
+	if string(body) != `{"id":"resp_1","output":[],"status":"completed"}` {
 		t.Fatalf("unexpected converted body: %s", body)
+	}
+}
+
+func TestChatGPTResponsesSSEToJSONAggregatesOutputBeforeEmptyCompletedResponse(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_aggregate","object":"response","status":"in_progress","output":[]}}`,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}`,
+		`data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}`,
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hel"}`,
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"lo"}`,
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[]}]}}`,
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"id":"reason_1","type":"reasoning","summary":[]}}`,
+		`data: {"type":"response.reasoning_summary_text.delta","output_index":1,"summary_index":0,"delta":"because"}`,
+		`data: {"type":"response.output_item.added","output_index":2,"item":{"id":"call_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":""}}`,
+		`data: {"type":"response.function_call_arguments.delta","output_index":2,"delta":"{\"city\":"}`,
+		`data: {"type":"response.function_call_arguments.done","output_index":2,"arguments":"{\"city\":\"Paris\"}"}`,
+		`data: {"type":"response.completed","response":{"id":"resp_aggregate","object":"response","status":"completed","output":[],"usage":{"input_tokens":12,"output_tokens":4,"total_tokens":16}}}`,
+	}, "\n\n") + "\n\n"
+
+	converted, err := chatGPTResponsesSSEToJSON([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(converted, &response); err != nil {
+		t.Fatal(err)
+	}
+	output, _ := response["output"].([]any)
+	if len(output) != 3 {
+		t.Fatalf("aggregated output = %#v", output)
+	}
+	message := output[0].(map[string]any)
+	content := message["content"].([]any)[0].(map[string]any)
+	if content["text"] != "hello" || message["status"] != "completed" {
+		t.Fatalf("aggregated message = %#v", message)
+	}
+	reasoning := output[1].(map[string]any)
+	if reasoning["summary"].([]any)[0].(map[string]any)["text"] != "because" {
+		t.Fatalf("aggregated reasoning = %#v", reasoning)
+	}
+	tool := output[2].(map[string]any)
+	if tool["arguments"] != `{"city":"Paris"}` || tool["name"] != "lookup" {
+		t.Fatalf("aggregated tool call = %#v", tool)
+	}
+	usage := response["usage"].(map[string]any)
+	if usage["total_tokens"] != float64(16) {
+		t.Fatalf("aggregated usage = %#v", usage)
+	}
+}
+
+func TestChatGPTOAuthResponseIsSSEDetectsBodyWhenContentTypeIsIncorrect(t *testing.T) {
+	body := []byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n")
+	if !chatGPTOAuthResponseIsSSE(http.Header{"Content-Type": []string{"application/json"}}, body) {
+		t.Fatal("SSE body was not detected when the upstream content type was application/json")
+	}
+	if chatGPTOAuthResponseIsSSE(http.Header{"Content-Type": []string{"application/json"}}, []byte(`{"status":"completed"}`)) {
+		t.Fatal("ordinary JSON response was incorrectly classified as SSE")
+	}
+}
+
+func TestAdaptChatGPTOAuthBufferedResponseToStandardChatCompletion(t *testing.T) {
+	body := []byte(`{"id":"resp_json","model":"gpt-5.6-luna","status":"completed","output_text":"hello","usage":{"input_tokens":2,"output_tokens":1}}`)
+	converted, adapted, err := adaptChatGPTOAuthBufferedResponse(http.Header{"Content-Type": []string{"application/json"}}, body, "chat", "gpt-5.6-luna")
+	if err != nil || !adapted {
+		t.Fatalf("adapted = %v, error = %v", adapted, err)
+	}
+	var completion map[string]any
+	if err := json.Unmarshal(converted, &completion); err != nil {
+		t.Fatal(err)
+	}
+	if completion["object"] != "chat.completion" || completion["model"] != "gpt-5.6-luna" {
+		t.Fatalf("standard completion metadata = %#v", completion)
+	}
+	choice := completion["choices"].([]any)[0].(map[string]any)
+	message := choice["message"].(map[string]any)
+	if message["content"] != "hello" || choice["finish_reason"] != "stop" {
+		t.Fatalf("standard completion content = %#v", completion)
+	}
+}
+
+func TestRelayConvertsOAuthChatSSEWhenContentTypeIsIncorrect(t *testing.T) {
+	store := newTestStore(t)
+	token, _, channels, _ := createRouteFixture(t, store, RoutingPriorityWeighted, "http://unused.invalid")
+	if err := store.db.Model(&Channel{}).Where("id = ?", channels[0].ID).Updates(map[string]any{
+		"auth_type": ChannelTypeChatGPTOAuth,
+		"base_url":  ChatGPTCodexBaseURL,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	relay := newTestRelay(store)
+	relay.client.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		body := strings.Join([]string{
+			`event: response.output_text.delta`,
+			`data: {"type":"response.output_text.delta","delta":"hello"}`,
+			`data: {"type":"response.completed","response":{"id":"resp_chat","model":"upstream-1","status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":1}}}`,
+		}, "\n\n") + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})
+
+	raw := []byte(`{"model":"public-model","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	payload, err := ParseRelayPayload(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	if publicErr := relay.Relay(context.Background(), recorder, nil, "", "chat", token, payload, raw); publicErr != nil {
+		t.Fatal(publicErr)
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var completion map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &completion); err != nil {
+		t.Fatal(err)
+	}
+	choices, _ := completion["choices"].([]any)
+	if len(choices) != 1 || choices[0].(map[string]any)["finish_reason"] != "stop" {
+		t.Fatalf("converted chat completion = %#v", completion)
+	}
+}
+
+func TestRelayStreamsOAuthResponsesWhenContentTypeIsIncorrect(t *testing.T) {
+	store := newTestStore(t)
+	token, _, channels, _ := createRouteFixture(t, store, RoutingPriorityWeighted, "http://unused.invalid")
+	if err := store.db.Model(&Channel{}).Where("id = ?", channels[0].ID).Updates(map[string]any{
+		"auth_type": ChannelTypeChatGPTOAuth,
+		"base_url":  ChatGPTCodexBaseURL,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	relay := newTestRelay(store)
+	relay.client.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		body := strings.Join([]string{
+			`event: response.created\ndata: {"type":"response.created","response":{"id":"resp_stream","object":"response","status":"in_progress","output":[]}}`,
+			`event: response.output_text.delta\ndata: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hello"}`,
+			`event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_stream","object":"response","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}`,
+		}, "\n\n") + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})
+
+	raw := []byte(`{"model":"public-model","input":"hello","stream":true}`)
+	payload, err := ParseRelayPayload(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	if publicErr := relay.Relay(context.Background(), recorder, nil, "", "responses", token, payload, raw); publicErr != nil {
+		t.Fatal(publicErr)
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if contentType := recorder.Header().Get("Content-Type"); !strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("content type = %q", contentType)
+	}
+	streamBody := recorder.Body.String()
+	if !strings.Contains(streamBody, "response.output_text.delta") || !strings.Contains(streamBody, "response.completed") {
+		t.Fatalf("stream body = %q", streamBody)
+	}
+}
+
+func TestRelayAggregatesOAuthResponsesWhenCompletedOutputIsEmpty(t *testing.T) {
+	store := newTestStore(t)
+	token, _, channels, _ := createRouteFixture(t, store, RoutingPriorityWeighted, "http://unused.invalid")
+	if err := store.db.Model(&Channel{}).Where("id = ?", channels[0].ID).Updates(map[string]any{
+		"auth_type": ChannelTypeChatGPTOAuth,
+		"base_url":  ChatGPTCodexBaseURL,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	relay := newTestRelay(store)
+	relay.client.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		body := strings.Join([]string{
+			`data: {"type":"response.created","response":{"id":"resp_buffered","object":"response","status":"in_progress","output":[]}}`,
+			`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[]}]}}`,
+			`data: {"type":"response.completed","response":{"id":"resp_buffered","object":"response","status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}`,
+		}, "\n\n") + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})
+
+	raw := []byte(`{"model":"public-model","input":"hello","stream":false}`)
+	payload, err := ParseRelayPayload(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	if publicErr := relay.Relay(context.Background(), recorder, nil, "", "responses", token, payload, raw); publicErr != nil {
+		t.Fatal(publicErr)
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	output, _ := response["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("aggregated response = %#v", response)
+	}
+	content := output[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if content["text"] != "hello" {
+		t.Fatalf("aggregated response = %#v", response)
+	}
+}
+
+func TestRelayRecordsOAuthBufferedSSETimingMetrics(t *testing.T) {
+	store := newTestStore(t)
+	token, _, channels, _ := createRouteFixture(t, store, RoutingPriorityWeighted, "http://unused.invalid")
+	if err := store.db.Model(&Channel{}).Where("id = ?", channels[0].ID).Updates(map[string]any{
+		"auth_type": ChannelTypeChatGPTOAuth,
+		"base_url":  ChatGPTCodexBaseURL,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	relay := newTestRelay(store)
+	relay.client.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: &delayedOAuthSSEReader{delay: 30 * time.Millisecond, chunks: [][]byte{
+				[]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_metrics\",\"model\":\"upstream-1\",\"status\":\"in_progress\"}}\n\n"),
+				[]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"),
+				[]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_metrics\",\"model\":\"upstream-1\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"),
+			}},
+			Request: request,
+		}, nil
+	})
+	raw := []byte(`{"model":"public-model","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	payload, err := ParseRelayPayload(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publicErr := relay.Relay(context.Background(), httptest.NewRecorder(), nil, "", "chat", token, payload, raw); publicErr != nil {
+		t.Fatal(publicErr)
+	}
+	var log RelayRequestLog
+	if err := store.db.First(&log).Error; err != nil {
+		t.Fatal(err)
+	}
+	if log.FirstResponseMS <= 0 || log.FirstTokenMS <= 0 || log.TokensPerSecond <= 0 {
+		t.Fatalf("OAuth buffered timing metrics = %+v", log)
 	}
 }
 
@@ -168,6 +449,26 @@ func TestChatGPTOAuthChatStreamConversion(t *testing.T) {
 	tracker := newSSETerminalTracker("chat", 1)
 	if !tracker.Observe(converted) {
 		t.Fatalf("converted stream is not terminal: %s", text)
+	}
+}
+
+func TestChatGPTOAuthChatStreamConversionDoesNotWaitForCompletion(t *testing.T) {
+	reader := newChatGPTOAuthChatSSEReadCloser(&delayedOAuthSSEReader{delay: 80 * time.Millisecond, chunks: [][]byte{
+		[]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_stream\",\"model\":\"gpt-5.4\"}}\n\n"),
+		[]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"),
+		[]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream\",\"status\":\"completed\"}}\n\n"),
+	}}, "public-model", false)
+	started := time.Now()
+	buffer := make([]byte, 4096)
+	n, err := reader.Read(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 || time.Since(started) >= 60*time.Millisecond {
+		t.Fatalf("stream adapter waited for completion: bytes=%d elapsed=%s", n, time.Since(started))
+	}
+	if !strings.Contains(string(buffer[:n]), "chat.completion.chunk") {
+		t.Fatalf("first adapted chunk = %q", buffer[:n])
 	}
 }
 
