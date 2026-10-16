@@ -5,10 +5,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
+)
+
+const (
+	maxChatGPTOAuthResponseIndex = 4096
+	// Bound sparse slice growth across all outputs, including content and summaries.
+	maxChatGPTOAuthPartSlots = 64 << 10
 )
 
 func chatGPTResponsesSSEToJSON(body []byte) ([]byte, error) {
@@ -17,7 +25,9 @@ func chatGPTResponsesSSEToJSON(body []byte) ([]byte, error) {
 	for {
 		event, err := readSSEEventWithLimit(reader, "responses", maxSSEEventBytes)
 		if payload, ok := firstSSEPayload(event); ok {
-			state.observe(payload)
+			if err := state.observe(payload); err != nil {
+				return nil, err
+			}
 		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
@@ -33,21 +43,25 @@ func chatGPTResponsesSSEToJSON(body []byte) ([]byte, error) {
 }
 
 type chatGPTOAuthResponsesAccumulator struct {
-	Response map[string]any
-	Output   map[int]map[string]any
-	Terminal bool
+	Response  map[string]any
+	Output    map[int]map[string]any
+	Terminal  bool
+	partSlots int
 }
 
 func newChatGPTOAuthResponsesAccumulator() *chatGPTOAuthResponsesAccumulator {
 	return &chatGPTOAuthResponsesAccumulator{Output: make(map[int]map[string]any)}
 }
 
-func (s *chatGPTOAuthResponsesAccumulator) observe(event map[string]any) {
+func (s *chatGPTOAuthResponsesAccumulator) observe(event map[string]any) error {
 	typeName := strings.ToLower(stringValue(event["type"]))
+	outputIndex, partIndex, err := chatGPTOAuthResponseEventIndices(typeName, event)
+	if err != nil {
+		return err
+	}
 	if response, ok := event["response"].(map[string]any); ok {
 		s.observeResponse(response)
 	}
-	outputIndex := jsonInt(event["output_index"])
 	switch typeName {
 	case "response.output_item.added", "response.output_item.done":
 		if item, ok := event["item"].(map[string]any); ok {
@@ -55,33 +69,51 @@ func (s *chatGPTOAuthResponsesAccumulator) observe(event map[string]any) {
 		}
 	case "response.content_part.added", "response.content_part.done":
 		if part, ok := event["part"].(map[string]any); ok {
-			s.mergeIndexedPart(outputIndex, "content", jsonInt(event["content_index"]), part, "message")
+			return s.mergeIndexedPart(outputIndex, "content", partIndex, part, "message")
 		}
 	case "response.output_text.delta":
-		part := s.ensureIndexedPart(outputIndex, "content", jsonInt(event["content_index"]), "message", "output_text")
+		part, err := s.ensureIndexedPart(outputIndex, "content", partIndex, "message", "output_text")
+		if err != nil {
+			return err
+		}
 		part["text"] = rawStringValue(part["text"]) + rawStringValue(event["delta"])
 	case "response.output_text.done":
-		part := s.ensureIndexedPart(outputIndex, "content", jsonInt(event["content_index"]), "message", "output_text")
+		part, err := s.ensureIndexedPart(outputIndex, "content", partIndex, "message", "output_text")
+		if err != nil {
+			return err
+		}
 		if text := rawStringValue(event["text"]); text != "" {
 			part["text"] = text
 		}
 	case "response.refusal.delta":
-		part := s.ensureIndexedPart(outputIndex, "content", jsonInt(event["content_index"]), "message", "refusal")
+		part, err := s.ensureIndexedPart(outputIndex, "content", partIndex, "message", "refusal")
+		if err != nil {
+			return err
+		}
 		part["refusal"] = rawStringValue(part["refusal"]) + rawStringValue(event["delta"])
 	case "response.refusal.done":
-		part := s.ensureIndexedPart(outputIndex, "content", jsonInt(event["content_index"]), "message", "refusal")
+		part, err := s.ensureIndexedPart(outputIndex, "content", partIndex, "message", "refusal")
+		if err != nil {
+			return err
+		}
 		if refusal := rawStringValue(event["refusal"]); refusal != "" {
 			part["refusal"] = refusal
 		}
 	case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
 		if part, ok := event["part"].(map[string]any); ok {
-			s.mergeIndexedPart(outputIndex, "summary", jsonInt(event["summary_index"]), part, "reasoning")
+			return s.mergeIndexedPart(outputIndex, "summary", partIndex, part, "reasoning")
 		}
 	case "response.reasoning_summary_text.delta":
-		part := s.ensureIndexedPart(outputIndex, "summary", jsonInt(event["summary_index"]), "reasoning", "summary_text")
+		part, err := s.ensureIndexedPart(outputIndex, "summary", partIndex, "reasoning", "summary_text")
+		if err != nil {
+			return err
+		}
 		part["text"] = rawStringValue(part["text"]) + rawStringValue(event["delta"])
 	case "response.reasoning_summary_text.done":
-		part := s.ensureIndexedPart(outputIndex, "summary", jsonInt(event["summary_index"]), "reasoning", "summary_text")
+		part, err := s.ensureIndexedPart(outputIndex, "summary", partIndex, "reasoning", "summary_text")
+		if err != nil {
+			return err
+		}
 		if text := rawStringValue(event["text"]); text != "" {
 			part["text"] = text
 		}
@@ -104,6 +136,57 @@ func (s *chatGPTOAuthResponsesAccumulator) observe(event map[string]any) {
 	case "response.completed", "response.incomplete", "response.failed", "response.done":
 		s.Terminal = true
 	}
+	return nil
+}
+
+func chatGPTOAuthResponseEventIndices(typeName string, event map[string]any) (int, int, error) {
+	partField := ""
+	switch typeName {
+	case "response.content_part.added", "response.content_part.done",
+		"response.output_text.delta", "response.output_text.done", "response.refusal.delta", "response.refusal.done":
+		partField = "content_index"
+	case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done",
+		"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done":
+		partField = "summary_index"
+	case "response.output_item.added", "response.output_item.done",
+		"response.function_call_arguments.delta", "response.function_call_arguments.done",
+		"response.custom_tool_call_input.delta", "response.custom_tool_call_input.done":
+	default:
+		return 0, 0, nil
+	}
+	outputIndex, err := chatGPTOAuthResponseEventIndex(event, "output_index")
+	if err != nil || partField == "" {
+		return outputIndex, 0, err
+	}
+	partIndex, err := chatGPTOAuthResponseEventIndex(event, partField)
+	return outputIndex, partIndex, err
+}
+
+func chatGPTOAuthResponseEventIndex(event map[string]any, field string) (int, error) {
+	value, exists := event[field]
+	if !exists {
+		return 0, nil
+	}
+	switch typed := value.(type) {
+	case float64:
+		// Check before converting so non-integers and overflowing floats cannot wrap.
+		if typed >= 0 && typed < maxChatGPTOAuthResponseIndex && typed == math.Trunc(typed) {
+			return int(typed), nil
+		}
+	case json.Number:
+		if index, err := typed.Int64(); err == nil && index >= 0 && index < maxChatGPTOAuthResponseIndex {
+			return int(index), nil
+		}
+	case int:
+		if typed >= 0 && typed < maxChatGPTOAuthResponseIndex {
+			return typed, nil
+		}
+	case int64:
+		if typed >= 0 && typed < maxChatGPTOAuthResponseIndex {
+			return int(typed), nil
+		}
+	}
+	return 0, fmt.Errorf("ChatGPT OAuth upstream %s must be an integer between 0 and %d", field, maxChatGPTOAuthResponseIndex-1)
 }
 
 func (s *chatGPTOAuthResponsesAccumulator) observeResponse(response map[string]any) {
@@ -145,11 +228,18 @@ func (s *chatGPTOAuthResponsesAccumulator) mergeOutputItem(index int, incoming m
 	mergeChatGPTOAuthResponseMap(item, incoming)
 }
 
-func (s *chatGPTOAuthResponsesAccumulator) ensureIndexedPart(outputIndex int, field string, partIndex int, itemType string, partType string) map[string]any {
+func (s *chatGPTOAuthResponsesAccumulator) ensureIndexedPart(outputIndex int, field string, partIndex int, itemType string, partType string) (map[string]any, error) {
+	if partIndex < 0 || partIndex >= maxChatGPTOAuthResponseIndex {
+		return nil, fmt.Errorf("ChatGPT OAuth upstream %s index is out of range", field)
+	}
 	item := s.ensureOutputItem(outputIndex, itemType)
 	parts, _ := item[field].([]any)
-	for len(parts) <= partIndex {
-		parts = append(parts, nil)
+	if growth := partIndex + 1 - len(parts); growth > 0 {
+		if growth > maxChatGPTOAuthPartSlots-s.partSlots {
+			return nil, errors.New("ChatGPT OAuth upstream indexed content exceeds size limit")
+		}
+		parts = append(parts, make([]any, growth)...)
+		s.partSlots += growth
 	}
 	part, _ := parts[partIndex].(map[string]any)
 	if part == nil {
@@ -157,12 +247,16 @@ func (s *chatGPTOAuthResponsesAccumulator) ensureIndexedPart(outputIndex int, fi
 		parts[partIndex] = part
 	}
 	item[field] = parts
-	return part
+	return part, nil
 }
 
-func (s *chatGPTOAuthResponsesAccumulator) mergeIndexedPart(outputIndex int, field string, partIndex int, incoming map[string]any, itemType string) {
-	part := s.ensureIndexedPart(outputIndex, field, partIndex, itemType, stringValue(incoming["type"]))
+func (s *chatGPTOAuthResponsesAccumulator) mergeIndexedPart(outputIndex int, field string, partIndex int, incoming map[string]any, itemType string) error {
+	part, err := s.ensureIndexedPart(outputIndex, field, partIndex, itemType, stringValue(incoming["type"]))
+	if err != nil {
+		return err
+	}
 	mergeChatGPTOAuthResponseMap(part, incoming)
+	return nil
 }
 
 func mergeChatGPTOAuthResponseMap(target map[string]any, incoming map[string]any) {
