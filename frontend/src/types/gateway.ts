@@ -13,7 +13,7 @@ export interface ResourceView {
   sizeBytes: number
   sha256: string
   preview: string
-  /** Bounded data URI for image previews; empty for non-image resources. */
+  /** Complete bounded data URI retained only when the resource is safe for browser preview. */
   previewData: string
   firstSeenAt: string
   lastSeenAt: string

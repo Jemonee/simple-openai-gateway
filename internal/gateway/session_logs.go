@@ -980,8 +980,7 @@ func (s *ManagementService) relayRequestViews(ctx context.Context, logs []RelayR
 	var sensitiveRows []struct{ RequestID string }
 	if err := db.Table("request_resources rr").Select("DISTINCT rr.request_id").
 		Joins("JOIN gateway_resources r ON r.id = rr.resource_id").
-		Where("rr.request_id IN ? AND r.sensitive = ?", requestIDs, true).
-		Where("r.kind <> ? OR r.sha256 <> ''", "file").Scan(&sensitiveRows).Error; err != nil {
+		Where("rr.request_id IN ? AND r.sensitive = ?", requestIDs, true).Scan(&sensitiveRows).Error; err != nil {
 		return nil, err
 	}
 	for _, row := range sensitiveRows {

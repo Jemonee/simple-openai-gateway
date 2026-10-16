@@ -78,6 +78,7 @@ export function resourceFallbackLabel(resource: ResourcePreviewInput): string {
   if (resource.kind === 'skill') return '已识别 Skill 调用；该请求未携带可预览的 SKILL.md 正文'
   if (resource.uri?.startsWith('data:')) return '内嵌内容未保留完整，无法恢复预览'
   if (resource.uri?.startsWith('file-') || resource.uri?.startsWith('file_')) return '仅有文件标识，当前没有可下载地址'
+  if (resource.kind === 'file' && resource.uri && !/^(?:https?:|data:)/i.test(resource.uri)) return '检测到本机文件引用；请求未携带可展示的文件正文'
   const mime = resource.mimeType?.toLowerCase().split(';', 1)[0].trim() ?? ''
   if (resource.kind === 'file' && (mime.startsWith('text/') || ['application/json', 'application/xml', 'application/yaml'].includes(mime))) return '请求中只包含源码路径，没有可高亮的文件内容'
   return '浏览器不支持此资源的内嵌预览'

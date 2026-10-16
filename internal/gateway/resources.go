@@ -112,6 +112,9 @@ var (
 	fileLineSuffixPattern           = regexp.MustCompile(`:\d+(?::\d+)?$`)
 	fencedCodePattern               = regexp.MustCompile("(?s)```([A-Za-z0-9_+.-]*)[^\\r\\n]*\\r?\\n(.*?)```")
 	inlineCodePattern               = regexp.MustCompile("`[^`\\r\\n]+`")
+	localWindowsPathPattern         = regexp.MustCompile(`(?i)^[a-z]:[\\/]`)
+	codexLocalResourceTagPattern    = regexp.MustCompile(`(?is)<(?:image|file|attachment|artifact)\b[^>]*?\b(?:path|file_path|local_path|source_path)=["']([^"']+)["'][^>]*>`)
+	codexFileMentionPattern         = regexp.MustCompile(`(?im)^[ \t]*##[ \t]+[^:\r\n]+:[ \t]+((?:/[^\r\n]+|~[\\/][^\r\n]+|[A-Za-z]:[\\/][^\r\n]+|\\\\[^\r\n]+))[ \t]*$`)
 	codexSkillBlockPattern          = regexp.MustCompile(`(?is)<skill>[ \t\r\n]*(.*?)[ \t\r\n]*</skill>`)
 	codexSkillNamePattern           = regexp.MustCompile(`(?is)<name>[ \t\r\n]*([^<\r\n]+?)[ \t\r\n]*</name>`)
 	codexSkillPathPattern           = regexp.MustCompile(`(?is)<path>[ \t\r\n]*([^<\r\n]+?)[ \t\r\n]*</path>`)
@@ -155,6 +158,20 @@ func walkResourceValue(value any, location, role string, result *[]detectedResou
 			currentRole = "image"
 		}
 		inlineFileDetected := addDetectedInlineFile(typed, location, currentRole, result)
+		if !inlineFileDetected {
+			for key, raw := range typed {
+				text, ok := raw.(string)
+				if !ok {
+					continue
+				}
+				if isExplicitFilePathKey(key) {
+					addDetectedLocalFileReference(text, typed, fmt.Sprintf("%s.%s", location, key), currentRole, result)
+				}
+				if isFileIdentifierKey(key) {
+					addDetectedFileIdentifier(text, typed, fmt.Sprintf("%s.%s", location, key), currentRole, result)
+				}
+			}
+		}
 		for _, key := range []string{"url", "image_url", "file_url", "uri"} {
 			if raw, ok := typed[key]; ok {
 				if text, ok := raw.(string); ok {
@@ -181,6 +198,7 @@ func walkResourceValue(value any, location, role string, result *[]detectedResou
 	case string:
 		remaining := extractCodexSkillResources(typed, location, role, result)
 		remaining = extractInjectedMarkdownDocuments(remaining, location, role, result)
+		extractCodexLocalResourceReferences(remaining, location, role, result)
 		allowUnfencedCode := role == "user" || role == "tool" || strings.HasSuffix(location, ".output") || strings.HasSuffix(location, ".source") || strings.HasSuffix(location, ".code")
 		snippets := extractCodeSnippets(remaining, allowUnfencedCode)
 		if shouldExtractTextURLs(role, location) {
@@ -375,6 +393,16 @@ func isExplicitFilePathKey(key string) bool {
 	}
 }
 
+func isFileIdentifierKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(strings.TrimSpace(key)))
+	switch normalized {
+	case "fileid", "fileids", "inputfileid", "imagefileid", "attachmentid":
+		return true
+	default:
+		return false
+	}
+}
+
 func cleanFilePathCandidate(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.Trim(value, "`\"'()[]{}<>,;")
@@ -409,6 +437,73 @@ func looksLikeFilePath(value string) bool {
 		}
 	}
 	return true
+}
+
+// looksLikeLocalFileReference intentionally requires an absolute or home-relative
+// path. Bare values such as "main.go" are commonly tool parameters rather than a
+// retained local resource and would otherwise create noisy catalog rows.
+func looksLikeLocalFileReference(value string) bool {
+	value = cleanFilePathCandidate(value)
+	if !looksLikeFilePath(value) {
+		return false
+	}
+	normalized := strings.ReplaceAll(value, `\`, "/")
+	return strings.HasPrefix(normalized, "/") || strings.HasPrefix(normalized, "~/") ||
+		strings.HasPrefix(value, `\\`) || localWindowsPathPattern.MatchString(value)
+}
+
+func addDetectedLocalFileReference(value string, object map[string]any, location, role string, result *[]detectedResource) {
+	reference := cleanFilePathCandidate(value)
+	if !looksLikeLocalFileReference(reference) {
+		return
+	}
+	resource := detectedResource{Location: location, Role: role}
+	resource.Kind = "file"
+	resource.Name = stringValue(objectValue(object, "filename", "file_name", "name"))
+	if resource.Name == "" {
+		resource.Name = resourcePathBase(reference)
+	}
+	resource.MIMEType = stringValue(objectValue(object, "mime_type", "media_type", "mimeType"))
+	if resource.MIMEType == "" {
+		resource.MIMEType = sourceMIMETypeForPath(reference)
+	}
+	resource.URI = truncateRunes(reference, 2048)
+	resource.Preview = "本机资源引用：" + truncateRunes(reference, 480)
+	fingerprint := sha256.Sum256([]byte("local-file|" + strings.ToLower(reference) + "|" + strings.ToLower(resource.MIMEType)))
+	resource.Fingerprint = hex.EncodeToString(fingerprint[:])
+	*result = append(*result, resource)
+}
+
+func addDetectedFileIdentifier(value string, object map[string]any, location, role string, result *[]detectedResource) {
+	identifier := truncateRunes(strings.TrimSpace(value), 512)
+	if identifier == "" || strings.ContainsAny(identifier, "\r\n\x00") {
+		return
+	}
+	resource := detectedResource{Location: location, Role: role}
+	resource.Kind = "file"
+	resource.Name = stringValue(objectValue(object, "filename", "file_name", "name"))
+	if resource.Name == "" {
+		resource.Name = identifier
+	}
+	resource.MIMEType = stringValue(objectValue(object, "mime_type", "media_type", "mimeType"))
+	resource.URI = identifier
+	resource.Preview = "文件标识：" + identifier
+	fingerprint := sha256.Sum256([]byte("file-id|" + strings.ToLower(identifier)))
+	resource.Fingerprint = hex.EncodeToString(fingerprint[:])
+	*result = append(*result, resource)
+}
+
+func extractCodexLocalResourceReferences(value, location, role string, result *[]detectedResource) {
+	for index, match := range codexLocalResourceTagPattern.FindAllStringSubmatch(value, -1) {
+		if len(match) > 1 {
+			addDetectedLocalFileReference(match[1], nil, fmt.Sprintf("%s.local[%d]", location, index), role, result)
+		}
+	}
+	for index, match := range codexFileMentionPattern.FindAllStringSubmatch(value, -1) {
+		if len(match) > 1 {
+			addDetectedLocalFileReference(match[1], nil, fmt.Sprintf("%s.file_mention[%d]", location, index), role, result)
+		}
+	}
 }
 
 func resourcePathBase(value string) string {
@@ -807,7 +902,7 @@ func addDetectedResource(value string, object map[string]any, location, role str
 	if strings.HasPrefix(value, "data:") {
 		resource.Kind = "data"
 		if comma := strings.IndexByte(value, ','); comma > 5 {
-			header, encoded := value[5:comma], value[comma+1:]
+			header := value[5:comma]
 			if semi := strings.IndexByte(header, ';'); semi >= 0 {
 				if resource.MIMEType == "" {
 					resource.MIMEType = header[:semi]
@@ -815,8 +910,11 @@ func addDetectedResource(value string, object map[string]any, location, role str
 			} else if resource.MIMEType == "" {
 				resource.MIMEType = header
 			}
-			decoded, err := decodeResourceBase64(encoded)
+			decoded, dataMIMEType, err := decodeInlineFileData(value)
 			if err == nil {
+				if resource.MIMEType == "" {
+					resource.MIMEType = dataMIMEType
+				}
 				resource.SizeBytes = int64(len(decoded))
 				sum := sha256.Sum256(decoded)
 				resource.SHA256 = hex.EncodeToString(sum[:])
@@ -970,7 +1068,7 @@ func loadRequestResourcesBatch(db *gorm.DB, requestIDs []string, includePreviews
 		RequestID string
 		Location  string
 	}
-	if err := db.Table("gateway_resources AS r").Select("r.*, rr.request_id, rr.location").Joins("JOIN request_resources rr ON rr.resource_id = r.id").Where("rr.request_id IN ?", requestIDs).Where("r.kind <> ? OR r.sha256 <> ''", "file").Order("rr.id ASC").Scan(&rows).Error; err != nil {
+	if err := db.Table("gateway_resources AS r").Select("r.*, rr.request_id, rr.location").Joins("JOIN request_resources rr ON rr.resource_id = r.id").Where("rr.request_id IN ?", requestIDs).Order("rr.id ASC").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	indexes := make(map[string]map[uint64]int, len(requestIDs))
@@ -1061,7 +1159,7 @@ func resourcePreviewFromBody(storedBody, fingerprint string) string {
 }
 
 func loadSessionResources(db *gorm.DB, tokenID uint64, sessionID, requestID string, identified, includePreviews bool) ([]ResourceSummary, error) {
-	query := db.Table("request_resources rr").Select("r.*, COUNT(DISTINCT rr.request_id) AS request_count, COUNT(*) AS use_count").Joins("JOIN gateway_resources r ON r.id = rr.resource_id").Joins("JOIN relay_request_logs l ON l.id = rr.request_id").Where("r.kind <> ? OR r.sha256 <> ''", "file")
+	query := db.Table("request_resources rr").Select("r.*, COUNT(DISTINCT rr.request_id) AS request_count, COUNT(*) AS use_count").Joins("JOIN gateway_resources r ON r.id = rr.resource_id").Joins("JOIN relay_request_logs l ON l.id = rr.request_id")
 	if identified {
 		query = query.Where("l.token_id = ? AND l.codex_session_id = ?", tokenID, sessionID)
 	} else {
@@ -1198,7 +1296,7 @@ func (s *ManagementService) Resources(ctx context.Context, query ResourceQuery) 
 	if query.PageSize < 1 || query.PageSize > 200 {
 		query.PageSize = 50
 	}
-	db := s.store.db.WithContext(ctx).Model(&GatewayResource{}).Where("kind <> ? OR sha256 <> ''", "file")
+	db := s.store.db.WithContext(ctx).Model(&GatewayResource{})
 	if value := strings.TrimSpace(query.Search); value != "" {
 		pattern := "%" + value + "%"
 		db = db.Where("name LIKE ? OR uri LIKE ? OR preview LIKE ? OR sha256 LIKE ?", pattern, pattern, pattern, pattern)
@@ -1246,9 +1344,6 @@ func (s *ManagementService) ResourceDetail(ctx context.Context, id uint64) (*Res
 	if err := s.store.db.WithContext(ctx).First(&resource, id).Error; err != nil {
 		return nil, err
 	}
-	if resource.Kind == "file" && resource.SHA256 == "" {
-		return nil, gorm.ErrRecordNotFound
-	}
 	if resource.PreviewData == "" {
 		resource.PreviewData = resourcePreviewForResource(s.store.db.WithContext(ctx), resource.ID, resource.Fingerprint)
 		if resource.PreviewData != "" {
@@ -1279,12 +1374,12 @@ func (s *ManagementService) SetResourceSensitive(ctx context.Context, id uint64,
 
 func hasSensitiveResources(db *gorm.DB, requestID string) (bool, error) {
 	var count int64
-	err := db.Table("request_resources rr").Joins("JOIN gateway_resources r ON r.id = rr.resource_id").Where("rr.request_id = ? AND r.sensitive = ?", requestID, true).Where("r.kind <> ? OR r.sha256 <> ''", "file").Count(&count).Error
+	err := db.Table("request_resources rr").Joins("JOIN gateway_resources r ON r.id = rr.resource_id").Where("rr.request_id = ? AND r.sensitive = ?", requestID, true).Count(&count).Error
 	return count > 0, err
 }
 
 func hasSensitiveSessionResources(db *gorm.DB, tokenID uint64, sessionID, requestID string, identified bool) (bool, error) {
-	query := db.Table("request_resources rr").Joins("JOIN gateway_resources r ON r.id = rr.resource_id").Joins("JOIN relay_request_logs l ON l.id = rr.request_id").Where("r.sensitive = ?", true).Where("r.kind <> ? OR r.sha256 <> ''", "file")
+	query := db.Table("request_resources rr").Joins("JOIN gateway_resources r ON r.id = rr.resource_id").Joins("JOIN relay_request_logs l ON l.id = rr.request_id").Where("r.sensitive = ?", true)
 	if identified {
 		query = query.Where("l.token_id = ? AND l.codex_session_id = ?", tokenID, sessionID)
 	} else {

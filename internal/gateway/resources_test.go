@@ -13,8 +13,8 @@ import (
 func TestDetectResourcesFindsReferencesAndStableFingerprints(t *testing.T) {
 	body := []byte(`{"model":"gpt-4.1","messages":[{"role":"user","content":[{"type":"text","text":"see https://example.com/report.pdf"},{"type":"image_url","image_url":{"url":"https://cdn.example.com/a.png"}},{"type":"image_url","image_url":{"url":"https://cdn.example.com/a.png"}}]}],"file_id":"file_123"}`)
 	items := detectResources(body)
-	if len(items) != 3 {
-		t.Fatalf("detected resources = %d, want 3", len(items))
+	if len(items) != 4 {
+		t.Fatalf("detected resources = %d, want 4", len(items))
 	}
 	counts := map[string]int{}
 	for _, item := range items {
@@ -70,7 +70,7 @@ func TestDetectResourcesExtractsCleanURLFromEmbeddedJSONText(t *testing.T) {
 	}
 }
 
-func TestDetectResourcesDoesNotTreatFilePathsOrIdentifiersAsFiles(t *testing.T) {
+func TestDetectResourcesKeepsExplicitLocalPathsAndFileIdentifiers(t *testing.T) {
 	body, err := json.Marshal(map[string]any{
 		"input": []any{
 			map[string]any{"role": "user", "content": `# Files mentioned by the user:
@@ -92,11 +92,31 @@ The API endpoint is /v1/responses and the public reference is https://example.co
 			fileCount++
 		}
 	}
-	if fileCount != 0 {
-		t.Fatalf("path-only payload produced %d file resources: %+v", fileCount, items)
+	if fileCount != 3 {
+		t.Fatalf("explicit local references produced %d file resources: %+v", fileCount, items)
 	}
-	if len(items) != 1 || items[0].Kind != "url" || items[0].URI != "https://example.com/report.pdf" {
-		t.Fatalf("non-file resources changed: %+v", items)
+	if len(items) != 4 {
+		t.Fatalf("detected resources = %+v", items)
+	}
+	urlFound := false
+	for _, item := range items {
+		if item.Kind == "url" && item.URI == "https://example.com/report.pdf" {
+			urlFound = true
+		}
+	}
+	if !urlFound {
+		t.Fatalf("public URL was lost: %+v", items)
+	}
+}
+
+func TestDetectResourcesKeepsNonBase64DataURI(t *testing.T) {
+	items := detectResources([]byte(`{"input":[{"type":"input_image","image_url":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3C%2Fsvg%3E"}]}`))
+	if len(items) != 1 {
+		t.Fatalf("detected resources = %+v", items)
+	}
+	item := items[0]
+	if item.Kind != "image" || item.MIMEType != "image/svg+xml" || item.SHA256 == "" || item.SizeBytes == 0 || item.PreviewData == "" {
+		t.Fatalf("non-base64 image resource = %+v", item)
 	}
 }
 
@@ -317,7 +337,7 @@ func TestPersistRequestResourcesEnrichesExistingSourcePreview(t *testing.T) {
 	}
 }
 
-func TestResourceQueriesHideLegacyPathOnlyFiles(t *testing.T) {
+func TestResourceQueriesKeepPathOnlyFilesVisible(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().UTC()
 	request := RelayRequestLog{ID: "resource-filter-request", CreatedAt: now}
@@ -343,15 +363,18 @@ func TestResourceQueriesHideLegacyPathOnlyFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(requestResources) != 1 || requestResources[0].ID != resources[1].ID {
+	if len(requestResources) != 2 {
 		t.Fatalf("request resources = %+v", requestResources)
 	}
 	page, err := NewManagementService(store).Resources(context.Background(), ResourceQuery{Page: 1, PageSize: 50})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].ID != resources[1].ID {
+	if page.Total != 2 || len(page.Items) != 2 {
 		t.Fatalf("resource page = %+v, total = %d", page.Items, page.Total)
+	}
+	if _, err := NewManagementService(store).ResourceDetail(context.Background(), resources[0].ID); err != nil {
+		t.Fatalf("path-only resource detail = %v", err)
 	}
 }
 
