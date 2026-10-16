@@ -145,14 +145,14 @@
 
 .brand-mark {
   display: grid;
-  width: 32px;
+  width: 34px;
   height: 32px;
   place-items: center;
   border-radius: var(--hongfen-radius-control);
   color: var(--hongfen-on-primary);
   background: var(--hongfen-primary);
   font-family: var(--hongfen-font-mono);
-  font-size: 16px;
+  font-size: 11px;
   font-weight: 700;
 }
 
@@ -190,14 +190,14 @@
   transition: width 180ms ease, transform 180ms ease;
 }
 
-.sidebar-toolbar { gap: 8px; padding: 12px; border-bottom: 1px solid var(--hongfen-border); }
+.sidebar-toolbar { gap: 8px; padding: 12px; border-bottom: 1px solid var(--hongfen-border); background: color-mix(in srgb, var(--hongfen-surface) 52%, var(--hongfen-surface-muted)); }
 .sidebar-search { display: flex; align-items: center; flex: 1; gap: 8px; height: 34px; padding: 0 9px; border: 1px solid var(--hongfen-border); border-radius: var(--hongfen-radius-control); color: var(--hongfen-text-subtle); background: var(--hongfen-surface); }
 .sidebar-search svg { width: 15px; height: 15px; flex-shrink: 0; }
 .sidebar-search input { width: 100%; min-width: 0; border: 0; outline: 0; color: var(--hongfen-text); background: transparent; font-size: 12px; }
 .sidebar-search input::placeholder { color: var(--hongfen-text-subtle); }
 .sidebar-toggle { flex-shrink: 0; }
 .sidebar-nav { flex: 1; overflow: auto; padding: 13px 9px; }
-.nav-group + .nav-group { margin-top: 18px; }
+.nav-group + .nav-group { margin-top: 20px; }
 .nav-group-label { padding: 0 9px 6px; color: var(--hongfen-text-subtle); font-size: 11px; letter-spacing: 0; }
 .sidebar-menu { width: 100%; border-right: 0 !important; background: transparent !important; --el-menu-bg-color: transparent; --el-menu-text-color: var(--hongfen-text-muted); --el-menu-active-color: var(--hongfen-primary-hover); --el-menu-hover-bg-color: var(--hongfen-primary-soft); }
 .sidebar-menu .el-menu { background: transparent; }

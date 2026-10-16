@@ -308,9 +308,9 @@ onMounted(() => {
         empty-text="最近 30 分钟内没有符合来源条件的活跃会话"
         @row-click="openSession"
       >
-        <el-table-column label="会话" min-width="300">
+        <el-table-column label="会话 / 健康度" min-width="340">
           <template #default="scope">
-            <div class="session-identity" :class="`is-${sessionClientSource(scope.row).kind}`" :aria-label="`来源 ${sessionClientSource(scope.row).label}`">
+            <div class="session-identity session-summary-card" :class="`is-${sessionClientSource(scope.row).kind}`" :aria-label="`来源 ${sessionClientSource(scope.row).label}`">
               <div class="session-title-line">
                 <strong class="session-name" :title="scope.row.sessionName || '未命名会话'">{{ scope.row.sessionName || '未命名会话' }}</strong><el-tag v-if="!isAccessTokenLogin && scope.row.sensitiveResourceLeak" type="danger" effect="plain" size="small">敏感资源泄露</el-tag>
                 <span class="session-client"><i aria-hidden="true" />{{ sessionClientSource(scope.row).label }}</span>
@@ -319,11 +319,16 @@ onMounted(() => {
                 <small><code :title="scope.row.sessionId">{{ scope.row.identified ? scope.row.sessionId : scope.row.fallbackRequestId }}</code></small>
                 <span class="session-origin" :class="`is-${sessionOrigin(scope.row.threadSource).kind}`" :title="`原始来源：${scope.row.threadSource || 'unavailable'}`"><i aria-hidden="true" />{{ sessionOrigin(scope.row.threadSource).label }}</span>
               </div>
+              <div class="session-health-inline" :class="`is-${sessionHealth(scope.row).kind}`">
+                <strong>{{ sessionHealth(scope.row).score ?? '--' }}<small v-if="sessionHealth(scope.row).score !== null">分</small></strong>
+                <span><i aria-hidden="true" />{{ sessionHealth(scope.row).label }}</span>
+                <small>成功率 {{ formatPercent(scope.row.successRate) }} · {{ formatCompactNumber(scope.row.requestCount) }} 请求</small>
+              </div>
               <SessionRelationBadge :session="scope.row" :on-open-parent="openParentSession" />
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="路由 / 调用身份" min-width="290">
+        <el-table-column label="当前路由" min-width="270">
           <template #default="scope">
             <div class="route-cell">
               <div v-if="scope.row.currentChannel" class="channel-title"><strong>{{ scope.row.currentChannel.channelName }}</strong><el-tag v-if="!isAccessTokenLogin" :type="channelState(scope.row).type" effect="plain">{{ channelState(scope.row).label }}</el-tag></div>
@@ -334,44 +339,22 @@ onMounted(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="会话健康度" width="156">
+        <el-table-column label="最近活动 / 性能" min-width="260">
           <template #default="scope">
-            <div class="health-cell" :class="`is-${sessionHealth(scope.row).kind}`">
-              <div><strong>{{ sessionHealth(scope.row).score ?? '--' }}<small v-if="sessionHealth(scope.row).score !== null">分</small></strong><span><i aria-hidden="true" />{{ sessionHealth(scope.row).label }}</span></div>
-              <small>成功率 {{ formatPercent(scope.row.successRate) }}</small>
-              <small>{{ formatCompactNumber(scope.row.requestCount) }} 请求 · {{ formatCompactNumber(scope.row.attemptCount) }} 尝试</small>
+            <div class="session-activity-cell">
+              <strong><i aria-hidden="true" />{{ formatRelativeActivity(scope.row.lastSeenAt) }}</strong>
+              <small>最近 {{ formatDate(scope.row.lastSeenAt) }}</small>
+              <small>首 Token {{ formatTiming(scope.row.averageFirstTokenMs, scope.row.firstTokenSampleCount) }} · 延迟 {{ formatTiming(scope.row.averageLatencyMs, scope.row.latencySampleCount) }}</small>
+              <el-tooltip :content="contextWindowTooltip(scope.row)" placement="top"><span class="session-context-summary">{{ contextWindowLabel(scope.row) }} 上下文 · {{ formatCompactNumber(scope.row.compactionCount) }} 次压缩</span></el-tooltip>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="上下文 / 压缩" width="142" align="right">
-          <template #default="scope">
-            <el-tooltip :content="contextWindowTooltip(scope.row)" placement="top">
-              <div class="context-window-cell" :class="{ 'is-unknown': scope.row.contextWindowTokens <= 0 }" :style="compactionStyle(scope.row.compactionCount)">
-                <strong>{{ contextWindowLabel(scope.row) }}</strong>
-                <small v-if="scope.row.contextWindowTokens > 0">{{ contextWindowSourceLabel(scope.row) }} · {{ formatCompactNumber(scope.row.contextWindowSampleCount) }} 样本</small>
-                <small v-else>等待自动压缩</small>
-                <small>{{ formatCompactNumber(scope.row.compactionCount) }} 次压缩</small>
-                <i aria-hidden="true" />
-              </div>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-        <el-table-column label="Token / 费用" min-width="260">
+        <el-table-column label="用量 / 费用" min-width="230">
           <template #default="scope">
             <div class="usage-cell">
               <div><strong>{{ formatCompactNumber(scope.row.inputTokens + scope.row.outputTokens) }} Token</strong><span>{{ formatUSD(scope.row.upstreamCostMicros) }}</span></div>
               <small>普通输入 {{ formatCompactNumber(scope.row.normalInputTokens) }} · 输出 {{ formatCompactNumber(scope.row.outputTokens) }} · 缓存读 {{ formatCompactNumber(scope.row.cachedTokens) }}</small>
               <small>缓存写 {{ formatCompactNumber(scope.row.cacheWriteTokens) }} · 真实发送 {{ formatCompactNumber(scope.row.sentTokens) }} · 估算 {{ formatUSD(scope.row.estimatedCostMicros) }}</small>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="性能 / 时间" min-width="290">
-          <template #default="scope">
-            <div class="performance-cell">
-              <strong>首 Token {{ formatTiming(scope.row.averageFirstTokenMs, scope.row.firstTokenSampleCount) }} · 延迟 {{ formatTiming(scope.row.averageLatencyMs, scope.row.latencySampleCount) }}</strong>
-              <small>请求耗时 {{ formatTiming(scope.row.averageDurationMs, scope.row.durationSampleCount) }}</small>
-              <small>首次 {{ formatDate(scope.row.firstSeenAt) }}</small>
-              <small class="activity-line"><i aria-hidden="true" />最近 {{ formatDate(scope.row.lastSeenAt) }} · {{ formatRelativeActivity(scope.row.lastSeenAt) }}</small>
             </div>
           </template>
         </el-table-column>
@@ -436,6 +419,14 @@ onMounted(() => {
 .session-identity.is-web-chat .session-client i { background: var(--hongfen-warning); }
 .session-meta { display: flex; min-width: 0; align-items: center; gap: 8px; }
 .session-meta small { min-width: 0; flex: 1; }
+.session-summary-card { gap: 7px; padding: 7px 8px 7px 10px; border: 1px solid transparent; background: color-mix(in srgb, var(--session-row-fill) 84%, var(--hongfen-surface)); }
+.active-session-table :deep(.el-table__body tr:hover .session-summary-card) { border-color: color-mix(in srgb, var(--session-row-tone) 36%, var(--hongfen-border)); }
+.session-health-inline { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 5px 8px; color: var(--session-row-tone); font-variant-numeric: tabular-nums; }
+.session-health-inline strong { color: currentColor; font: 700 16px/1 var(--hongfen-font-mono); }
+.session-health-inline strong small { margin-left: 2px; color: inherit; font: 500 9px/1 var(--hongfen-font-sans); }
+.session-health-inline > span { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 650; }
+.session-health-inline > span i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.session-health-inline > small { overflow: hidden; color: var(--hongfen-text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .session-origin { display: inline-flex; flex: none; align-items: center; gap: 5px; padding: 2px 6px; border: 1px solid var(--hongfen-border); color: var(--hongfen-text-muted); background: color-mix(in srgb, var(--hongfen-surface) 88%, transparent); font-size: 10px; line-height: 1.2; }
 .session-origin i { width: 5px; height: 5px; border-radius: 50%; background: var(--hongfen-text-subtle); }
 .session-origin.is-user { border-color: color-mix(in srgb, var(--hongfen-primary) 40%, var(--hongfen-border)); color: var(--hongfen-primary-hover); }
@@ -450,6 +441,11 @@ onMounted(() => {
 .channel-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-identity small { overflow: hidden; color: var(--hongfen-text-muted); text-overflow: ellipsis; white-space: nowrap; }
 .route-cell, .usage-cell, .performance-cell { display: grid; min-width: 0; gap: 4px; font-variant-numeric: tabular-nums; }
+.session-activity-cell { display: grid; min-width: 0; gap: 4px; font-variant-numeric: tabular-nums; }
+.session-activity-cell > strong { display: inline-flex; align-items: center; gap: 6px; color: var(--hongfen-success); font-size: 12px; }
+.session-activity-cell > strong i { width: 7px; height: 7px; flex: none; border-radius: 50%; background: currentColor; }
+.session-activity-cell > small { overflow: hidden; color: var(--hongfen-text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.session-context-summary { width: fit-content; max-width: 100%; overflow: hidden; padding: 2px 6px; border: 1px solid var(--hongfen-border); color: var(--hongfen-text-subtle); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .route-cell > small { display: flex; min-width: 0; align-items: center; gap: 6px; overflow: hidden; color: var(--hongfen-text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .route-cell > small span { color: var(--hongfen-text-subtle); }
 .route-cell > small code { overflow: hidden; text-overflow: ellipsis; }

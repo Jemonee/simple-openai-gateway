@@ -7,6 +7,7 @@ import ResourceList from '@/components/ResourceList.vue'
 import { useAdminAuth } from '@/composables/useAdminAuth'
 import type { PayloadLogDetail, RelayAttemptLog, RelayRequestLog } from '@/types/gateway'
 import { conversation, deltaDescription, requestConversation } from '@/utils/conversation'
+import { formatCompactNumber, formatDuration, formatUSD } from '@/utils/formatters'
 
 interface RequestPayloadDialogProps {
   /** Request whose retained payloads should be inspected. */
@@ -19,8 +20,10 @@ const { request } = defineProps<RequestPayloadDialogProps>()
 
 function defaultActiveTab(): string {
   const attempts = request?.attempts ?? []
+  const failedAttempt = [...attempts].reverse().find((attempt) => attempt.outcome === 'failed' || attempt.statusCode >= 400 || attempt.statusCode === 0)
   const finalAttempt = attempts[attempts.length - 1]
-  return finalAttempt ? `attempt-${finalAttempt.id}` : 'original'
+  const target = failedAttempt ?? finalAttempt
+  return target ? `attempt-${target.id}` : 'original'
 }
 
 const open = defineModel<boolean>({ required: true })
@@ -35,6 +38,20 @@ const detailModeOptions: Array<{ label: string; value: DetailMode }> = [
 const title = computed(() => request ? `调用详情 · ${request.id}` : '调用详情')
 const originalMessages = computed(() => requestConversation(request?.requestBody ?? ''))
 const requestPayloadLogDetail = computed<PayloadLogDetail>(() => request?.payloadLogDetail || 'default')
+const finalAttempt = computed(() => request?.attempts.at(-1) ?? null)
+const diagnosticTone = computed<'success' | 'warning' | 'danger' | 'info'>(() => {
+  if (!request) return 'info'
+  if (request.outcome === 'success') return 'success'
+  if (request.outcome === 'canceled' || request.outcome === 'processing') return 'warning'
+  return 'danger'
+})
+const diagnosticTitle = computed(() => {
+  if (!request) return '正在读取调用详情'
+  if (request.outcome === 'success') return `调用完成 · ${request.attemptCount} 次上游尝试`
+  if (request.outcome === 'canceled') return '调用已由客户端取消'
+  if (request.outcome === 'processing') return '调用仍在处理中'
+  return `调用失败 · ${request.attemptCount} 次上游尝试后未完成`
+})
 
 function attemptMessages(attempt: RelayAttemptLog) {
   return conversation(request?.requestBody ?? '', attempt.responseBody)
@@ -104,6 +121,12 @@ watch(
         </div>
         <el-segmented v-if="requestPayloadLogDetail !== 'none'" v-model="detailMode" :options="detailModeOptions" size="small" aria-label="详情展示方式" />
       </div>
+      <section class="request-diagnostic" :class="`is-${diagnosticTone}`" aria-label="调用诊断摘要">
+        <div class="request-diagnostic-status"><i aria-hidden="true" /><span>最终结果</span><strong>{{ diagnosticTitle }}</strong></div>
+        <div><span>最终渠道</span><strong>{{ finalAttempt?.channelName || (finalAttempt?.channelId ? `渠道 #${finalAttempt.channelId}` : '未进入上游') }}</strong><code v-if="finalAttempt?.upstreamModel">{{ finalAttempt.upstreamModel }}</code></div>
+        <div><span>总耗时</span><strong>{{ request.durationMs > 0 ? formatDuration(request.durationMs) : '--' }}</strong><small>首 Token {{ request.firstTokenMs > 0 ? formatDuration(request.firstTokenMs) : '--' }}</small></div>
+        <div><span>Token / 费用</span><strong>{{ formatCompactNumber(request.inputTokens + request.outputTokens) }} / {{ formatUSD(request.upstreamCostMicros) }}</strong><small>缓存读 {{ formatCompactNumber(request.cachedTokens) }}</small></div>
+      </section>
       <el-alert v-if="retentionNotice(request.payloadLogDetail)" :title="retentionNotice(request.payloadLogDetail)" :type="request.payloadLogDetail === 'summary' ? 'warning' : 'info'" :closable="false" show-icon />
       <section v-if="!isAccessTokenLogin && request.resources?.length" class="resource-section"><h3>识别到的资源</h3><ResourceList :resources="request.resources" /></section>
 
@@ -167,6 +190,19 @@ watch(
 .payload-meta span, .attempt-meta span { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
 .payload-meta strong, .attempt-meta strong { color: var(--hongfen-text); }
 .payload-meta code, .attempt-meta code { overflow-wrap: anywhere; }
+.request-diagnostic { display: grid; grid-template-columns: minmax(220px, 1.35fr) repeat(3, minmax(150px, 1fr)); margin-bottom: 14px; border: 1px solid var(--hongfen-border); background: var(--hongfen-surface-muted); font-variant-numeric: tabular-nums; }
+.request-diagnostic > div { display: grid; min-width: 0; gap: 4px; padding: 10px 12px; border-right: 1px solid var(--hongfen-border); }
+.request-diagnostic > div:last-child { border-right: 0; }
+.request-diagnostic span { color: var(--hongfen-text-subtle); font-size: 10px; }
+.request-diagnostic strong { overflow: hidden; color: var(--hongfen-text); font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.request-diagnostic code, .request-diagnostic small { overflow: hidden; color: var(--hongfen-text-muted); font: 10px/1.35 var(--hongfen-font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.request-diagnostic-status { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 8px; }
+.request-diagnostic-status i { grid-row: span 2; width: 8px; height: 8px; border-radius: 50%; background: var(--hongfen-text-subtle); }
+.request-diagnostic.is-success .request-diagnostic-status i { background: var(--hongfen-success); }
+.request-diagnostic.is-warning .request-diagnostic-status i { background: var(--hongfen-warning); }
+.request-diagnostic.is-danger { border-color: var(--hongfen-danger-border); }
+.request-diagnostic.is-danger .request-diagnostic-status i { background: var(--hongfen-danger); }
+.request-diagnostic.is-danger .request-diagnostic-status strong { color: var(--hongfen-danger); }
 .payload-tabs { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .payload-tabs :deep(.el-tabs__header) { flex: none; }
 .payload-tabs :deep(.el-tabs__content) { flex: 1; min-height: 0; overflow-y: auto; padding-right: 6px; scrollbar-gutter: stable; }
@@ -181,5 +217,8 @@ watch(
   :global(.request-payload-modal.el-dialog) { max-height: calc(100dvh - 24px); margin: 12px auto; }
   .payload-toolbar { align-items: stretch; flex-direction: column; }
   .payload-toolbar .el-segmented { align-self: flex-end; }
+  .request-diagnostic { grid-template-columns: 1fr 1fr; }
+  .request-diagnostic > div:nth-child(2) { border-right: 0; }
+  .request-diagnostic > div:nth-child(-n + 2) { border-bottom: 1px solid var(--hongfen-border); }
 }
 </style>

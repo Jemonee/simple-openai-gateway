@@ -41,6 +41,10 @@ function filterNavigationItems(items: NavigationItem[], query: string): Navigati
   })
 }
 
+function flattenNavigationItems(items: NavigationItem[]): NavigationItem[] {
+  return items.flatMap((item) => [item, ...(item.children ? flattenNavigationItems(item.children) : [])])
+}
+
 const filteredGroups = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
   const visibleGroups = navigationGroups
@@ -77,9 +81,13 @@ const defaultOpenMenuKeys = computed(() => {
 const menuCollapsed = computed(() => sidebarCollapsed.value && !isMobileViewport.value)
 const breadcrumbs = computed(() => route.meta.breadcrumbs ?? ['网关控制台'])
 const workspaceContained = computed(() => route.meta.workspaceMode === 'contained')
-const quickNavigationItems = computed(() => navigationGroups
-  .flatMap((group) => group.items)
-  .filter((item) => (item.key === 'active-sessions' || item.key === 'sessions') && (isAdminLogin.value || !item.adminOnly)))
+const quickNavigationItems = computed(() => {
+  const items = flattenNavigationItems(navigationGroups.flatMap((group) => group.items))
+  const byKey = new Map(items.map((item) => [item.key, item]))
+  return ['channels', 'logs', 'active-sessions', 'sessions']
+    .map((key) => byKey.get(key))
+    .filter((item): item is NavigationItem => Boolean(item) && (isAdminLogin.value || !item.adminOnly))
+})
 
 function syncMobileViewport(event: MediaQueryList | MediaQueryListEvent) {
   isMobileViewport.value = event.matches
@@ -175,7 +183,7 @@ watch([authenticated, isAccessTokenLogin, headlessMode], ([isAuthenticated, toke
         <button class="icon-button header-menu-button" type="button" title="切换导航" @click="toggleSidebar">
           <Menu />
         </button>
-        <div class="brand-mark" aria-hidden="true">O</div>
+        <div class="brand-mark" aria-hidden="true">GW</div>
         <div class="header-brand-copy">
           <strong>{{ projectMeta.displayName }}</strong>
           <span>OpenAI Gateway</span>
@@ -183,7 +191,7 @@ watch([authenticated, isAccessTokenLogin, headlessMode], ([isAuthenticated, toke
       </div>
 
       <div class="header-actions">
-        <span class="header-status" title="运行状态：网关就绪"><i aria-hidden="true"></i>{{ projectMeta.displayName }}</span>
+        <span class="header-status" title="运行状态：网关就绪"><i aria-hidden="true"></i>网关就绪</span>
         <el-dropdown trigger="click" @command="handleAccountCommand">
 			<button class="account-button" type="button" :disabled="logoutLoading">
             <span class="account-avatar" aria-hidden="true">{{ user?.username.slice(0, 1).toUpperCase() }}</span>

@@ -46,7 +46,7 @@ export interface NavigationGroup {
 
 export const navigationGroups: NavigationGroup[] = [
   {
-    label: '网关运营',
+    label: '接入与路由',
     items: [
       {
         key: 'overview',
@@ -65,23 +65,6 @@ export const navigationGroups: NavigationGroup[] = [
         component: () => import('@/pages/Channels.vue'),
       },
       {
-        key: 'channel-verification',
-        path: '/channel-verification',
-        routeName: 'channel-verification',
-        label: '渠道验证',
-        icon: Aim,
-        component: () => import('@/pages/ChannelVerification.vue'),
-        adminOnly: true,
-      },
-      {
-        key: 'active-sessions',
-        path: '/active-sessions',
-        routeName: 'active-sessions',
-        label: '活跃会话',
-        icon: ChatDotRound,
-        component: () => import('@/pages/ActiveSessions.vue'),
-      },
-      {
         key: 'web-chat',
         path: '/web-chat',
         routeName: 'web-chat',
@@ -89,15 +72,6 @@ export const navigationGroups: NavigationGroup[] = [
         icon: ChatDotRound,
         component: () => import('@/pages/WebChat.vue'),
         workspaceMode: 'contained',
-      },
-      {
-        key: 'circuit-records',
-        path: '/circuit-records',
-        routeName: 'circuit-records',
-        label: '熔断记录',
-        icon: WarningFilled,
-        component: () => import('@/pages/CircuitRecords.vue'),
-        adminOnly: true,
       },
       {
         key: 'models',
@@ -116,15 +90,11 @@ export const navigationGroups: NavigationGroup[] = [
         icon: Key,
         component: () => import('@/pages/Tokens.vue'),
       },
-      {
-        key: 'user-management',
-        path: '/users',
-        routeName: 'user-management',
-        label: '账号管理',
-        icon: UserFilled,
-        component: () => import('@/pages/UserManagement.vue'),
-        adminOnly: true,
-      },
+    ],
+  },
+  {
+    label: '观测与诊断',
+    items: [
       {
         key: 'logs',
         path: '/logs',
@@ -132,6 +102,14 @@ export const navigationGroups: NavigationGroup[] = [
         label: '调用日志',
         icon: Tickets,
         component: () => import('@/pages/RequestLogs.vue'),
+      },
+      {
+        key: 'active-sessions',
+        path: '/active-sessions',
+        routeName: 'active-sessions',
+        label: '活跃会话',
+        icon: ChatDotRound,
+        component: () => import('@/pages/ActiveSessions.vue'),
       },
       {
         key: 'sessions',
@@ -150,11 +128,38 @@ export const navigationGroups: NavigationGroup[] = [
         component: () => import('@/pages/Resources.vue'),
         adminOnly: true,
       },
+      {
+        key: 'channel-verification',
+        path: '/channel-verification',
+        routeName: 'channel-verification',
+        label: '渠道验证',
+        icon: Aim,
+        component: () => import('@/pages/ChannelVerification.vue'),
+        adminOnly: true,
+      },
+      {
+        key: 'circuit-records',
+        path: '/circuit-records',
+        routeName: 'circuit-records',
+        label: '熔断记录',
+        icon: WarningFilled,
+        component: () => import('@/pages/CircuitRecords.vue'),
+        adminOnly: true,
+      },
     ],
   },
   {
     label: '系统',
     items: [
+      {
+        key: 'user-management',
+        path: '/users',
+        routeName: 'user-management',
+        label: '账号管理',
+        icon: UserFilled,
+        component: () => import('@/pages/UserManagement.vue'),
+        adminOnly: true,
+      },
       {
         key: 'user-manual',
         path: '/manual',

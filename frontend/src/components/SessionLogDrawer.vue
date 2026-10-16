@@ -116,6 +116,15 @@ const failureCount = computed(() => {
   if (!summary) return 0
   return Math.max(0, summary.requestCount - summary.successCount - summary.canceledCount - summary.processingCount)
 })
+const sessionFocus = computed(() => {
+  const current = detail.value?.summary
+  if (!current) return { tone: 'info', title: '正在读取会话诊断', detail: '请稍候' }
+  const failures = Math.max(0, current.requestCount - current.successCount - current.canceledCount - current.processingCount)
+  if (failures > 0) return { tone: 'danger', title: `${failures} 个失败请求需要关注`, detail: '已优先展开最近的异常调用；可筛选失败请求查看完整重试链路。' }
+  if (current.processingCount > 0) return { tone: 'warning', title: `${current.processingCount} 个请求仍在处理中`, detail: '刷新后可查看最新上游状态与处理阶段。' }
+  if (current.compactionCount > 0) return { tone: 'warning', title: `已发生 ${current.compactionCount} 次上下文压缩`, detail: '压缩会改变后续请求上下文；时间线中可单独筛选核对。' }
+  return { tone: 'success', title: '会话运行正常', detail: '当前保留记录中没有失败请求，最新调用已自动展开。' }
+})
 const channelUsageText = computed(() => (detail.value?.channels ?? [])
   .slice()
   .sort((left, right) => right.share - left.share || right.attemptCount - left.attemptCount || left.channelName.localeCompare(right.channelName, 'zh-CN'))
@@ -150,6 +159,12 @@ function formatPercent(value: number): string {
 
 function formatTiming(value: number): string {
   return value > 0 ? formatDuration(value) : '--'
+}
+
+function focusRequestID(requests: RelayRequestLog[]): string {
+  return requests.find((item) => item.outcome === 'failed' || item.statusCode >= 500 || item.statusCode === 0)?.id
+    ?? requests[0]?.id
+    ?? ''
 }
 
 function routeStrategyLabel(value: string): string {
@@ -370,6 +385,8 @@ async function loadDetail(append = false) {
       pagination.value.page = requestedPage
     } else {
       detail.value = result
+      const focusedRequestID = focusRequestID(result.requests)
+      expandedRequestIds.value = focusedRequestID ? new Set([focusedRequestID]) : new Set()
     }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '会话详情加载失败'
@@ -393,6 +410,8 @@ async function filterDetailByStatus() {
     } else {
       detail.value = result
     }
+    const focusedRequestID = focusRequestID(result.requests)
+    expandedRequestIds.value = focusedRequestID ? new Set([focusedRequestID]) : new Set()
     await nextTick()
     timelineScroller.value?.scrollTo({ top: 0 })
   } catch (error) {
@@ -477,6 +496,16 @@ watch(
       <strong>会话详情加载失败</strong><span>{{ errorMessage }}</span><el-button :loading="loading" @click="loadDetail">重试</el-button>
     </div>
     <div v-else-if="detail" v-loading="loading" class="session-detail">
+      <section class="session-focus" :class="`is-${sessionFocus.tone}`" aria-label="会话诊断摘要">
+        <div class="session-focus-indicator" aria-hidden="true"><i /></div>
+        <div class="session-focus-copy"><span>会话诊断</span><strong>{{ sessionFocus.title }}</strong><p>{{ sessionFocus.detail }}</p></div>
+        <div class="session-focus-route">
+          <span>当前路由</span>
+          <strong>{{ detail.summary.currentChannel?.channelName || '尚未分配渠道' }}</strong>
+          <code>{{ detail.summary.currentChannel?.upstreamModel || detail.summary.latestModel }}</code>
+        </div>
+        <el-button v-if="failureCount > 0" type="primary" plain @click="selectDetailStatus('failure')">查看失败调用</el-button>
+      </section>
       <section class="session-overview" aria-labelledby="session-overview-title">
         <header class="session-overview-heading">
           <div>
@@ -749,11 +778,25 @@ watch(
 
 <style scoped>
 :global(.session-detail-drawer > .el-drawer__body) { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
-.session-detail { display: grid; width: 100%; min-width: 940px; height: 100%; min-height: 720px; grid-template-rows: auto auto minmax(260px, 1fr); gap: 16px; }
+.session-detail { display: grid; width: 100%; min-width: 0; height: 100%; min-height: 720px; grid-template-rows: auto auto auto minmax(260px, 1fr); gap: 16px; }
 .drawer-title, .drawer-title-main { display: flex; align-items: center; min-width: 0; }
 .drawer-title { flex: 1; justify-content: space-between; gap: 16px; }
 .drawer-title-main { gap: 8px; }
 .drawer-title strong { overflow: hidden; color: var(--hongfen-text); text-overflow: ellipsis; white-space: nowrap; }
+.session-focus { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(180px, auto) auto; align-items: center; gap: 12px 16px; padding: 13px 16px; border: 1px solid var(--hongfen-border); background: var(--hongfen-surface); }
+.session-focus-indicator { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid currentColor; color: var(--hongfen-text-subtle); background: var(--hongfen-surface-muted); }
+.session-focus-indicator i { width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
+.session-focus-copy { display: grid; min-width: 0; gap: 2px; }
+.session-focus-copy > span, .session-focus-route > span { color: var(--hongfen-text-subtle); font-size: 10px; }
+.session-focus-copy strong { color: var(--hongfen-text); font-size: 13px; font-weight: 700; }
+.session-focus-copy p { overflow: hidden; color: var(--hongfen-text-muted); font-size: 11px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.session-focus-route { display: grid; min-width: 0; gap: 2px; padding-left: 16px; border-left: 1px solid var(--hongfen-border); }
+.session-focus-route strong, .session-focus-route code { overflow: hidden; color: var(--hongfen-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.session-focus-route code { color: var(--hongfen-text-muted); font-family: var(--hongfen-font-mono); }
+.session-focus.is-success .session-focus-indicator { color: var(--hongfen-success); background: var(--hongfen-success-soft); }
+.session-focus.is-warning .session-focus-indicator { color: var(--hongfen-warning); background: var(--hongfen-warning-soft); }
+.session-focus.is-danger { border-color: var(--hongfen-danger-border); }
+.session-focus.is-danger .session-focus-indicator { color: var(--hongfen-danger); background: var(--hongfen-danger-soft); }
 .drawer-refresh-button { flex: 0 0 auto; width: 34px; height: 34px; padding: 0; }
 .session-overview { border: 1px solid var(--hongfen-border); border-radius: var(--hongfen-radius-panel); background: var(--hongfen-surface); overflow: hidden; }
 .session-overview-heading { display: flex; min-height: 46px; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 14px; border-bottom: 1px solid var(--hongfen-border); background: var(--hongfen-surface-muted); }
@@ -884,6 +927,25 @@ watch(
 .timeline-loading, .timeline-end { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 16px; color: var(--hongfen-text-muted); font-size: 11px; }
 :global(.session-timeline-dialog) { display: grid; max-height: 94dvh; grid-template-rows: auto minmax(0, 1fr); margin-bottom: 0; overflow: hidden; }
 :global(.session-timeline-dialog .el-dialog__body) { min-height: 0; padding-top: 4px; overflow: auto; scrollbar-gutter: stable; }
-.session-timeline-dialog-host { width: 100%; min-width: 900px; height: calc(91dvh - 82px); min-height: 520px; }
+.session-timeline-dialog-host { width: 100%; min-width: 0; height: calc(91dvh - 82px); min-height: 520px; }
 .timeline-section.is-dialog-mode { height: 100%; grid-template-rows: auto minmax(0, 1fr); }
+@media (max-width: 760px) {
+  .session-detail { min-height: 0; grid-template-rows: auto auto auto auto; gap: 12px; }
+  .session-focus { grid-template-columns: auto minmax(0, 1fr); }
+  .session-focus-route { grid-column: 2; padding-left: 0; border-left: 0; }
+  .session-focus .el-button { grid-column: 1 / -1; width: 100%; }
+  .session-primary-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .session-primary-metrics article:nth-child(2n) { border-right: 0; }
+  .session-primary-metrics article:nth-child(-n + 4) { border-bottom: 1px solid var(--hongfen-border); }
+  .session-secondary-metrics, .session-secondary-metrics > section:nth-child(2) dl, .session-secondary-metrics .token-breakdown dl { grid-template-columns: 1fr; }
+  .session-secondary-metrics > section { border-right: 0; border-bottom: 1px solid var(--hongfen-border); }
+  .session-secondary-metrics > section:last-child { border-bottom: 0; }
+  .timeline-heading, .timeline-heading-actions { align-items: flex-start; flex-direction: column; }
+  .timeline-heading-actions { width: 100%; }
+  .timeline-status-tabs { width: 100%; overflow-x: auto; }
+  .timeline-status-tabs button { flex: 1 0 auto; }
+  .request-header { align-items: flex-start; flex-direction: column; }
+  .request-actions { width: 100%; justify-content: flex-start; }
+  .request-brief { padding-left: 6px; }
+}
 </style>
