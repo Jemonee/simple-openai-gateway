@@ -747,6 +747,7 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 	responseID := ""
 	terminalSuccess := false
 	terminalTracker := newSSETerminalTracker(execution.endpoint, expectedChatChoiceCount(execution.payload))
+	waitForChatUsage := execution.endpoint == "chat" && (candidate.Channel.SupportsStreamUsage || chatStreamIncludesUsage(execution.payload))
 	hasUsableOutput := false
 	result := attemptResult{response: response, requestBody: requestBody, sentTokens: sentTokens, latencyMS: latency}
 	capture := payloadCapture{}
@@ -840,7 +841,9 @@ func (s *RelayService) streamResponse(ctx context.Context, writer http.ResponseW
 					break
 				}
 			}
-			if terminalSuccess {
+			// Chat 的 finish_reason 仅表示 choices 结束，独立 usage 分片仍可能在后面。
+			// 请求了 usage 时继续读取到 [DONE] / EOF；不支持 usage 的兼容上游保持原有行为。
+			if terminalSuccess && (!waitForChatUsage || terminalTracker.doneSentinel) {
 				break
 			}
 		}
@@ -1447,6 +1450,7 @@ func sseEventIsTerminalSuccess(event []byte, endpoint string) bool {
 }
 
 type sseTerminalTracker struct {
+	doneSentinel        bool
 	endpoint            string
 	expectedChatChoices int64
 	finishedChatChoices map[int64]struct{}
@@ -1471,6 +1475,7 @@ func (t *sseTerminalTracker) Observe(event []byte) bool {
 		}
 		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 		if bytes.Equal(data, []byte("[DONE]")) {
+			t.doneSentinel = true
 			return true
 		}
 		var payload map[string]any
