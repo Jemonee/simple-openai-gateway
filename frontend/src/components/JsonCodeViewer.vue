@@ -36,12 +36,6 @@ const viewerModeOptions: Array<{ label: string; value: ViewerMode }> = [
   { label: '原文', value: 'raw' },
 ]
 let editor: monaco.editor.IStandaloneCodeEditor | undefined
-let colorSchemeQuery: MediaQueryList | undefined
-
-function syncEditorTheme(event: MediaQueryList | MediaQueryListEvent) {
-  monaco.editor.setTheme(event.matches ? 'vs-dark' : 'vs')
-}
-
 function tryFormatJSON(source: string): string | null {
   try {
     return JSON.stringify(JSON.parse(source), null, 2)
@@ -104,11 +98,10 @@ monacoGlobal.MonacoEnvironment ??= {
 
 onMounted(() => {
   if (!container.value) return
-  colorSchemeQuery = window.matchMedia('(prefers-color-scheme: dark)')
   editor = monaco.editor.create(container.value, {
     value: editorValue.value,
     language: editorLanguage.value,
-    theme: colorSchemeQuery.matches ? 'vs-dark' : 'vs',
+    theme: 'vs',
     readOnly: true,
     automaticLayout: true,
     folding: true,
@@ -125,7 +118,6 @@ onMounted(() => {
     fontSize: 12,
     tabSize: 2,
   })
-  colorSchemeQuery.addEventListener('change', syncEditorTheme)
 })
 
 watch([editorValue, editorLanguage], ([nextValue, nextLanguage]) => {
@@ -147,7 +139,6 @@ async function copyCurrentValue() {
 }
 
 onBeforeUnmount(() => {
-  colorSchemeQuery?.removeEventListener('change', syncEditorTheme)
   editor?.dispose()
 })
 </script>

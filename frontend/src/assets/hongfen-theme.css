@@ -1,6 +1,6 @@
-/* 红粉主题：紧凑、清晰的管理界面，颜色随系统明暗模式自动切换。 */
+/* 红粉主题：紧凑、清晰的固定浅色管理界面。 */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --hongfen-page: #fff7fa;
   --hongfen-surface: #fffcfd;
   --hongfen-surface-muted: #fff0f6;
@@ -59,77 +59,6 @@
   --el-border-radius-small: var(--hongfen-radius-control);
   --el-box-shadow-light: 0 2px 10px rgba(96, 52, 69, 0.08);
   --el-font-family: var(--hongfen-font-sans);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root,
-  :root.dark {
-    --hongfen-page: #171318;
-    --hongfen-surface: #211a20;
-    --hongfen-surface-muted: #2b2028;
-    --hongfen-surface-strong: #422334;
-    --hongfen-primary: #ef6f9d;
-    --hongfen-primary-hover: #ff9bbb;
-    --hongfen-primary-soft: #4a2637;
-    --hongfen-text: #f7edf2;
-    --hongfen-text-muted: #c7b6bf;
-    --hongfen-text-subtle: #a5919d;
-    --hongfen-border: #4a3741;
-    --hongfen-border-strong: #69515d;
-    --hongfen-success: #6bc49c;
-    --hongfen-success-soft: #1d392f;
-    --hongfen-warning: #e9b95d;
-    --hongfen-warning-soft: #3f321d;
-    --hongfen-danger: #f08a9b;
-    --hongfen-danger-soft: #43232b;
-    --hongfen-teal: #6bc49c;
-    --hongfen-amber: #e0a64c;
-    --hongfen-purple-gray: #b9a8c4;
-    --hongfen-on-primary: #2b1721;
-    --hongfen-danger-border: #743b49;
-    --hongfen-table-hover: #30232c;
-    --hongfen-scrim: rgba(0, 0, 0, 0.52);
-
-    --el-color-primary: var(--hongfen-primary);
-    --el-color-primary-light-3: #f58ab0;
-    --el-color-primary-light-5: #f7a7c3;
-    --el-color-primary-light-7: #e8739f;
-    --el-color-primary-light-8: #c75d86;
-    --el-color-primary-light-9: var(--hongfen-primary-soft);
-    --el-color-primary-dark-2: var(--hongfen-primary-hover);
-    --el-color-success: var(--hongfen-success);
-    --el-color-success-light-9: var(--hongfen-success-soft);
-    --el-color-warning: var(--hongfen-warning);
-    --el-color-warning-light-9: var(--hongfen-warning-soft);
-    --el-color-danger: var(--hongfen-danger);
-    --el-color-danger-light-9: var(--hongfen-danger-soft);
-    --el-color-error: var(--hongfen-danger);
-    --el-color-error-light-9: var(--hongfen-danger-soft);
-    --el-bg-color: var(--hongfen-surface);
-    --el-bg-color-page: var(--hongfen-page);
-    --el-bg-color-overlay: var(--hongfen-surface-muted);
-    --el-text-color-primary: var(--hongfen-text);
-    --el-text-color-regular: var(--hongfen-text-muted);
-    --el-text-color-secondary: var(--hongfen-text-subtle);
-    --el-text-color-placeholder: #917d88;
-    --el-text-color-disabled: #75636d;
-    --el-border-color: var(--hongfen-border);
-    --el-border-color-light: #5a444f;
-    --el-border-color-lighter: #503c47;
-    --el-border-color-extra-light: #45333d;
-    --el-border-color-dark: #624a56;
-    --el-border-color-darker: var(--hongfen-border-strong);
-    --el-fill-color: var(--hongfen-surface-muted);
-    --el-fill-color-light: #34252e;
-    --el-fill-color-lighter: #30232c;
-    --el-fill-color-extra-light: #2a1f26;
-    --el-fill-color-dark: #3d2b35;
-    --el-fill-color-darker: #49333e;
-    --el-fill-color-blank: var(--hongfen-surface);
-    --el-mask-color: rgba(0, 0, 0, 0.72);
-    --el-mask-color-extra-light: rgba(0, 0, 0, 0.38);
-    --el-box-shadow-light: 0 2px 10px rgba(0, 0, 0, 0.28);
-  }
 }
 
 .skip-link {
@@ -309,11 +238,6 @@
 
 .sidebar-menu-popper { border: 1px solid var(--hongfen-border) !important; border-radius: var(--hongfen-radius-control) !important; }
 .sidebar-menu-popper .el-menu { background: var(--hongfen-surface) !important; }
-
-@media (prefers-color-scheme: dark) {
-  .el-button--primary { --el-button-text-color: var(--hongfen-on-primary); --el-button-hover-text-color: var(--hongfen-on-primary); --el-button-active-text-color: var(--hongfen-on-primary); }
-  .el-segmented { --el-segmented-item-selected-color: var(--hongfen-on-primary); }
-}
 
 @media (max-width: 960px) {
   .header-menu-button { display: inline-grid !important; }

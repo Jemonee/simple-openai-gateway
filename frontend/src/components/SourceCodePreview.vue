@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { CopyDocument } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api'
@@ -41,37 +41,23 @@ interface SourceCodePreviewProps {
 
 const { code, language, label = '源码预览' } = defineProps<SourceCodePreviewProps>()
 const highlightedHTML = ref('')
-const isDarkMode = ref(document.documentElement.classList.contains('dark'))
 let renderVersion = 0
-let colorSchemeQuery: MediaQueryList | undefined
 
 const languageLabel = computed(() => sourceCodeLanguageLabel(language))
 const sourceSummary = computed(() => `${code.split(/\r?\n/).length} 行 · ${code.length.toLocaleString('zh-CN')} 字符`)
 const tokenizerLanguage = computed(() => language === 'json' ? 'javascript' : language)
 
-function syncColorScheme(event: MediaQueryListEvent) {
-  isDarkMode.value = event.matches
-}
-
-watch([() => code, tokenizerLanguage, isDarkMode], async ([nextCode, nextLanguage, nextIsDarkMode]) => {
+watch([() => code, tokenizerLanguage], async ([nextCode, nextLanguage]) => {
   const version = ++renderVersion
   highlightedHTML.value = ''
   try {
-    monaco.editor.setTheme(nextIsDarkMode ? 'vs-dark' : 'vs')
+    monaco.editor.setTheme('vs')
     const html = await monaco.editor.colorize(nextCode, nextLanguage || 'plaintext', { tabSize: 2 })
     if (version === renderVersion) highlightedHTML.value = html
   } catch {
     if (version === renderVersion) highlightedHTML.value = ''
   }
 }, { immediate: true })
-
-onMounted(() => {
-  colorSchemeQuery = window.matchMedia('(prefers-color-scheme: dark)')
-  isDarkMode.value = colorSchemeQuery.matches
-  colorSchemeQuery.addEventListener('change', syncColorScheme)
-})
-
-onBeforeUnmount(() => colorSchemeQuery?.removeEventListener('change', syncColorScheme))
 
 async function copySource() {
   try {
