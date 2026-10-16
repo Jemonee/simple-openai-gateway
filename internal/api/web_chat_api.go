@@ -91,10 +91,15 @@ func NewWebChatApi(relay *gateway.RelayService, management *gateway.ManagementSe
 }
 
 func newAdminWebChatToken(admin *gateway.AdminUser) *gateway.ClientToken {
-	// Administrator-managed channels use owner_user_id=0, so this temporary
-	// token must keep OwnerUserID zero to retain the global console scope.
+	// Preserve regular users' channel ownership while retaining the global
+	// scope for administrators, including legacy users with an empty role.
+	ownerUserID := admin.ID
+	if admin.Role == "" || admin.Role == gateway.ConsoleRoleAdmin {
+		ownerUserID = 0
+	}
 	return &gateway.ClientToken{
 		ID:               webChatTokenIDBase + admin.ID,
+		OwnerUserID:      ownerUserID,
 		Name:             "网页聊天 / " + admin.Username,
 		KeyPrefix:        "web-chat",
 		Enabled:          true,

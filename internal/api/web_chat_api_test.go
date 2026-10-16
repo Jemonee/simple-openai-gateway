@@ -1,6 +1,34 @@
 package api
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/Jemonee/simple-openai-gateway/internal/gateway"
+)
+
+func TestNewAdminWebChatTokenPreservesConsoleChannelScope(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		role        string
+		wantOwnerID uint64
+	}{
+		{name: "administrator", role: gateway.ConsoleRoleAdmin},
+		{name: "legacy administrator"},
+		{name: "regular user", role: gateway.ConsoleRoleUser, wantOwnerID: 7},
+		{name: "unrecognized role", role: "unknown", wantOwnerID: 7},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			user := &gateway.AdminUser{ID: 7, Username: "console-user", Role: test.role}
+			token := newAdminWebChatToken(user)
+			if token.OwnerUserID != test.wantOwnerID {
+				t.Fatalf("temporary console token owner = %d, want %d", token.OwnerUserID, test.wantOwnerID)
+			}
+			if token.ID != webChatTokenIDBase+user.ID || !token.Enabled || !token.AllowAllModels || !token.AllowAllChannels {
+				t.Fatalf("temporary console token = %+v", token)
+			}
+		})
+	}
+}
 
 func TestChatCompletionContentSupportsStringAndParts(t *testing.T) {
 	stringContent, err := chatCompletionContent([]byte(`{"choices":[{"message":{"content":"hello"}}]}`))
